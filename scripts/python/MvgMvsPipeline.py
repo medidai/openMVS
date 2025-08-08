@@ -249,7 +249,7 @@ class StepsStore:
              ["-i", "%reconstruction_dir%"+FOLDER_DELIM+"sfm_data.bin", "-o", "%mvs_dir%"+FOLDER_DELIM+"scene.mvs", "-d", "%mvs_dir%"+FOLDER_DELIM+"images"]],
             ["Feature Extractor",            # 12
              COLMAP_BIN,
-             ["feature_extractor", "--database_path", "%matches_dir%"+FOLDER_DELIM+"database.db", "--image_path", "%input_dir%", "--ImageReader.single_camera=1", "--ImageReader.camera_model=OPENCV"]],
+             ["feature_extractor", "--database_path", "%matches_dir%"+FOLDER_DELIM+"database.db", "--image_path", "%input_dir%", "--ImageReader.camera_model=OPENCV"]],
             ["Exhaustive Matcher",           # 13
              COLMAP_BIN,
              ["exhaustive_matcher", "--database_path", "%matches_dir%"+FOLDER_DELIM+"database.db"]],
