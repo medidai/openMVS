@@ -86,7 +86,6 @@ MDEFVAR_OPTDENSE_uint32(nNumViews, "Num Views", "Number of views used for depth-
 MDEFVAR_OPTDENSE_uint32(nMinPixelsFuse, "Min Pixels Fuse", "minimum number of depth-estimates that agree during fusion in order to consider it (multiple pixels can be from the same depth-map)", "5")
 MDEFVAR_OPTDENSE_uint32(nMaxPointsFuse, "Max Points Fuse", "maximum number of pixels to fuse into a single point", "1000")
 MDEFVAR_OPTDENSE_uint32(nMaxFuseDepth, "Max Fuse Depth", "maximum depth in fusion graph traversal", "100")
-MDEFVAR_OPTDENSE_uint32(nPointInsideROI, "Point Inside ROI", "consider a point shared only if inside ROI when estimating the neighbor views (0 - ignore ROI, 1 - weight more ROI points, 2 - consider only ROI points)", "1")
 MDEFVAR_OPTDENSE_bool(bAddCorners, "Add Corners", "add support points at image corners with nearest neighbor disparities", "0")
 MDEFVAR_OPTDENSE_bool(bInitSparse, "Init Sparse", "init depth-map only with the sparse points (no interpolation)", "1")
 MDEFVAR_OPTDENSE_bool(bRemoveDmaps, "Remove Dmaps", "remove depth-maps after fusion", "0")
@@ -96,6 +95,7 @@ MDEFVAR_OPTDENSE_float(fMinArea, "Min Area", "Min shared area for accepting the 
 MDEFVAR_OPTDENSE_float(fMinAngle, "Min Angle", "Min angle for accepting the depth triangulation", "3.0")
 MDEFVAR_OPTDENSE_float(fOptimAngle, "Optim Angle", "Optimal angle for computing the depth triangulation", "12.0")
 MDEFVAR_OPTDENSE_float(fMaxAngle, "Max Angle", "Max angle for accepting the depth triangulation", "65.0")
+MDEFVAR_OPTDENSE_float(fWeightPointInsideROI, "Weight Point Inside ROI", "weight a point inside ROI when estimating the neighbor views (0 - ignore ROI, <1 - weight more ROI points, 1 - consider only ROI points)", "0.7")
 MDEFVAR_OPTDENSE_float(fDescriptorMinMagnitudeThreshold, "Descriptor Min Magnitude Threshold", "minimum patch texture variance accepted when matching two patches (0 - disabled)", "0.02") // 0.02: pixels with patch texture variance below 0.0004 (0.02^2) will be removed from depthmap; 0.12: patch texture variance below 0.02 (0.12^2) is considered texture-less
 MDEFVAR_OPTDENSE_float(fDepthReprojectionErrorThreshold, "Depth Reprojection Error Threshold", "maximum relative difference between measured and depth projected pixel", "1.2")
 MDEFVAR_OPTDENSE_float(fDepthDiffThreshold, "Depth Diff Threshold", "maximum variance allowed for the depths during refinement", "0.01")

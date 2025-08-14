@@ -831,8 +831,8 @@ bool Scene::EstimateNeighborViewsPointCloud(unsigned maxResolution)
 // and select the best views for reconstructing the dense point-cloud;
 // extract also all 3D points seen by the reference image;
 // (inspired by: "Multi-View Stereo for Community Photo Collections", Goesele, 2007)
-//  - nInsideROI: 0 - ignore ROI, 1 - weight more ROI points, 2 - consider only ROI points
-bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, unsigned nInsideROI)
+//  - fWeightPointInsideROI: 0 - ignore ROI, between 0 and 1 - weight inside ROI points, 1 - consider only ROI points
+bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI)
 {
 	ASSERT(points.empty());
 
@@ -853,21 +853,17 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 		nMinPointViews = nCalibratedImages;
 	unsigned nPoints = 0;
 	imageData.avgDepth = 0;
+	ASSERT(fWeightPointInsideROI >= 0 && fWeightPointInsideROI <= 1);
+	const bool bCheckInsideROI(fWeightPointInsideROI > 0 && IsBounded());
+	const float fWeightPointOutsideROI(bCheckInsideROI ? 1.f - fWeightPointInsideROI : 1.f);
 	const float sigmaAngleSmall(-1.f/(2.f*SQUARE(fOptimAngle*0.38f)));
 	const float sigmaAngleLarge(-1.f/(2.f*SQUARE(fOptimAngle*0.7f)));
-	const bool bCheckInsideROI(nInsideROI > 0 && IsBounded());
 	FOREACH(idx, pointcloud.points) {
 		const PointCloud::ViewArr& views = pointcloud.pointViews[idx];
 		ASSERT(views.IsSorted());
 		if (views.FindFirst(ID) == PointCloud::ViewArr::NO_INDEX)
 			continue;
 		const PointCloud::Point& point = pointcloud.points[idx];
-		float wROI(1.f);
-		if (bCheckInsideROI && !obb.Intersects(point)) {
-			if (nInsideROI > 1)
-				continue;
-			wROI = 0.7f;
-		}
 		const Depth depth((float)imageData.camera.PointDepth(point));
 		ASSERT(depth > 0);
 		if (depth <= 0)
@@ -875,6 +871,9 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 		// store this point
 		if (views.size() >= nMinPointViews)
 			points.push_back((uint32_t)idx);
+		const float wROI(bCheckInsideROI && obb.Intersects(point) ? fWeightPointInsideROI : fWeightPointOutsideROI);
+		if (wROI <= 0)
+			continue;
 		imageData.avgDepth += depth;
 		++nPoints;
 		// score shared views
@@ -971,7 +970,7 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 	return true;
 } // SelectNeighborViews
 
-void Scene::SelectNeighborViews(unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, unsigned nInsideROI)
+void Scene::SelectNeighborViews(unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI)
 {
 	#ifdef SCENE_USE_OPENMP
 	for (int_t ID=0; ID<(int_t)images.size(); ++ID) {
@@ -981,7 +980,7 @@ void Scene::SelectNeighborViews(unsigned nMinViews, unsigned nMinPointViews, flo
 	#endif
 		// select image neighbors
 		IndexArr points;
-		SelectNeighborViews(idxImage, points, nMinViews, nMinPointViews, fOptimAngle, nInsideROI);
+		SelectNeighborViews(idxImage, points, nMinViews, nMinPointViews, fOptimAngle, fWeightPointInsideROI);
 	}
 } // SelectNeighborViews
 /*----------------------------------------------------------------*/
@@ -2216,13 +2215,13 @@ void Scene::InitTowerScene(const int towerMode)
 		break;
 	case 3: // select neighbors
 		pointcloud.Swap(towerPC);
-		SelectNeighborViews(OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, FD2R(OPTDENSE::fOptimAngle), OPTDENSE::nPointInsideROI);
+		SelectNeighborViews(OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, FD2R(OPTDENSE::fOptimAngle), OPTDENSE::fWeightPointInsideROI);
 		pointcloud.Swap(towerPC);
 		VERBOSE("Scene identified as tower-like; only select view neighbors from detected tower point-cloud");
 		break;
 	case 4: // select neighbors and append tower points
 		pointcloud.Swap(towerPC);
-		SelectNeighborViews(OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, FD2R(OPTDENSE::fOptimAngle), OPTDENSE::nPointInsideROI);
+		SelectNeighborViews(OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, FD2R(OPTDENSE::fOptimAngle), OPTDENSE::fWeightPointInsideROI);
 		pointcloud.Swap(towerPC);
 		AppendPointCloud(towerPC);
 		VERBOSE("Scene identified as tower-like; select view neighbors from detected tower point-cloud and next append it to existing point-cloud");
