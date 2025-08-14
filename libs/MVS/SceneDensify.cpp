@@ -146,7 +146,7 @@ bool DepthMapsData::SelectViews(DepthData& depthData)
 	const IIndex idxImage((IIndex)(&depthData-arrDepthData.Begin()));
 	ASSERT(depthData.neighbors.IsEmpty());
 	if (scene.images[idxImage].neighbors.empty() &&
-		!scene.SelectNeighborViews(idxImage, depthData.points, OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, FD2R(OPTDENSE::fOptimAngle), OPTDENSE::nPointInsideROI))
+		!scene.SelectNeighborViews(idxImage, depthData.points, OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, FD2R(OPTDENSE::fOptimAngle), OPTDENSE::fWeightPointInsideROI))
 		return false;
 	depthData.neighbors.CopyOf(scene.images[idxImage].neighbors);
 
@@ -2033,6 +2033,11 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 
 	// select images to be used for dense reconstruction
 	{
+		#if TD_VERBOSE != TD_VERBOSE_OFF
+		if (OPTDENSE::fWeightPointInsideROI > 0 && IsBounded()) {
+			VERBOSE("Select neighbor views by weighting inside ROI points with %.2f", OPTDENSE::fWeightPointInsideROI);
+		}
+		#endif
 		TD_TIMER_START();
 		// for each image, find all useful neighbor views
 		IIndexArr invalidIDs;

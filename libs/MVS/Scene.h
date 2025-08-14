@@ -95,8 +95,8 @@ public:
 	void SampleMeshWithVisibility(unsigned maxResolution=320);
 	bool ExportMeshToDepthMaps(const String& baseName);
 
-	bool SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews = 3, unsigned nMinPointViews = 2, float fOptimAngle = FD2R(12), unsigned nInsideROI = 1);
-	void SelectNeighborViews(unsigned nMinViews = 3, unsigned nMinPointViews = 2, float fOptimAngle = FD2R(12), unsigned nInsideROI = 1);
+	bool SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews=3, unsigned nMinPointViews=2, float fOptimAngle=FD2R(12), float fWeightPointInsideROI=0.7f);
+	void SelectNeighborViews(unsigned nMinViews=3, unsigned nMinPointViews=2, float fOptimAngle=FD2R(12), float fWeightPointInsideROI=0.7f);
 	static bool FilterNeighborViews(ViewScoreArr& neighbors, float fMinArea=0.1f, float fMinScale=0.2f, float fMaxScale=2.4f, float fMinAngle=FD2R(3), float fMaxAngle=FD2R(45), unsigned nMaxViews=12);
 
 	bool ExportCamerasMLP(const String& fileName, const String& fileNameScene) const;
