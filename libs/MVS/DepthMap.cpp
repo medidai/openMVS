@@ -1881,7 +1881,7 @@ bool MVS::ExportConfidenceMap(const String& fileName, const ConfidenceMap& confM
 	}
 	if (confs.IsEmpty())
 		return false;
-	const std::pair<float,float> th(ComputeX84Threshold<float,float>(confs.Begin(), confs.GetSize()));
+	const std::pair<float,float> th(ComputeX84Threshold<float,float>(confs.data(), confs.size()));
 	float minConf = th.first-th.second;
 	float maxConf = th.first+th.second;
 	if (minConf < 0.1f)
@@ -2301,7 +2301,7 @@ void MVS::CompareNormalMaps(const NormalMap& normalMap, const NormalMap& normalM
 	const MeanStd<float,double> ms(errors.Begin(), errors.GetSize());
 	const float mean((float)ms.GetMean());
 	const float stddev((float)ms.GetStdDev());
-	const std::pair<float,float> th(ComputeX84Threshold<float,float>(errors.Begin(), errors.GetSize()));
+	const std::pair<float,float> th(ComputeX84Threshold<float,float>(errors.data(), errors.size()));
 	VERBOSE("Normal-maps compared for image % 3u: %.2f median %.2f mean %.2f stddev error (%s)",
 		idxImage,
 		th.first, mean, stddev,

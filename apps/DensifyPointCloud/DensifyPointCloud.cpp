@@ -61,6 +61,7 @@ String strExportDepthMapsName;
 String strMaskPath;
 float fMaxSubsceneArea;
 float fSampleMesh;
+float fSampleMeshNeighbors;
 float fBorderROI;
 bool bCrop2ROI;
 int nEstimateROI;
@@ -71,6 +72,7 @@ float fEstimateScale;
 int nEstimateSegmentation;
 int thFilterPointCloud;
 int nExportNumViews;
+bool bForceNeighborsFromImages;
 int nArchiveType;
 int nProcessPriority;
 unsigned nMaxThreads;
@@ -179,6 +181,8 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	// in config file, but will not be shown to the user
 	boost::program_options::options_description hidden("Hidden options");
 	hidden.add_options()
+		("force-neighbors-from-images", boost::program_options::value(&OPT::bForceNeighborsFromImages)->default_value(false), "force estimating neighbor views from image pairs baseline")
+		("sample-mesh-for-neighbors", boost::program_options::value(&OPT::fSampleMeshNeighbors)->default_value(0.f), "mesh sampling used for neighbor views estimation (0 - disabled/use mesh vertices, <0 - number of points, >0 - sample density per square unit)")
 		("mesh-file", boost::program_options::value<std::string>(&OPT::strMeshFileName), "mesh file name used for image pair overlap estimation")
 		("export-roi-file", boost::program_options::value<std::string>(&OPT::strExportROIFileName), "ROI file name to be exported form the scene")
 		("import-roi-file", boost::program_options::value<std::string>(&OPT::strImportROIFileName), "ROI file name to be imported into the scene")
@@ -473,8 +477,25 @@ int main(int argc, LPCTSTR* argv)
 		#endif
 		if ((ARCHIVE_TYPE)OPT::nArchiveType == ARCHIVE_MVS)
 			sparsePointCloud = scene.pointcloud;
+		if (OPT::bForceNeighborsFromImages) {
+			// force estimating neighbor views from image pairs baseline
+			if (!scene.IsEmpty()) {
+				scene.pointcloud.Release();
+				scene.mesh.Release();
+				VERBOSE("Remove all scene geometry");
+			}
+			bool bHasNeighbors(false);
+			for (Image& image: scene.images) {
+				if (!image.neighbors.IsEmpty()) {
+					image.neighbors.Release();
+					bHasNeighbors = true;
+				}
+			}
+			if (bHasNeighbors)
+				VERBOSE("Removed all image neighbors");
+		}
 		TD_TIMER_START();
-		if (!scene.DenseReconstruction(OPT::nFusionMode, OPT::bCrop2ROI, OPT::fBorderROI)) {
+		if (!scene.DenseReconstruction(OPT::nFusionMode, OPT::bCrop2ROI, OPT::fBorderROI, OPT::fSampleMeshNeighbors)) {
 			if (ABS(OPT::nFusionMode) != 1)
 				return EXIT_FAILURE;
 			VERBOSE("Depth-maps estimated (%s)", TD_TIMER_GET_FMT().c_str());

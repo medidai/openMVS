@@ -91,8 +91,10 @@ public:
 	SCENE_TYPE Load(const String& fileName, bool bImport=false);
 	bool Save(const String& fileName, ARCHIVE_TYPE type=ARCHIVE_DEFAULT) const;
 
+	bool EstimatePointCloudNormals(bool bRefine=true);
+	bool EstimateSparseSurface(unsigned kNeighbors=16, float sizeScale=0.9f, float normalAngleMax=FD2R(0.f));
 	bool EstimateNeighborViewsPointCloud(unsigned maxResolution=16);
-	void SampleMeshWithVisibility(unsigned maxResolution=320);
+	void SampleMeshWithVisibility(REAL sampling=0, unsigned maxResolution=320);
 	bool ExportMeshToDepthMaps(const String& baseName);
 
 	bool SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews=3, unsigned nMinPointViews=2, float fOptimAngle=FD2R(12), float fWeightPointInsideROI=0.7f);
@@ -134,7 +136,7 @@ public:
 	PointCloud BuildTowerMesh(const PointCloud& origPointCloud, const Point2f& centerPoint, const float fRadius, const float fROIRadius, const float zMin, const float zMax, const float minCamZ, bool bFixRadius = false);
 	
 	// Dense reconstruction
-	bool DenseReconstruction(int nFusionMode=0, bool bCrop2ROI=true, float fBorderROI=0);
+	bool DenseReconstruction(int nFusionMode=0, bool bCrop2ROI=true, float fBorderROI=0, float fSampleMeshNeighbors=0);
 	bool ComputeDepthMaps(DenseDepthMapData& data);
 	void DenseReconstructionEstimate(void*);
 	void DenseReconstructionFilter(void*);

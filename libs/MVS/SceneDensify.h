@@ -109,9 +109,10 @@ struct MVS_API DenseDepthMapData {
 	CAutoPtr<Util::Progress> progress;
 	int nEstimationGeometricIter;
 	int nFusionMode;
+	float fSampleMeshNeighbors;
 	STEREO::SemiGlobalMatcher sgm;
 
-	DenseDepthMapData(Scene& _scene, int _nFusionMode=0);
+	DenseDepthMapData(Scene& _scene, int _nFusionMode=0, float _fSampleMeshNeighbors=0);
 	~DenseDepthMapData();
 
 	void SignalCompleteDepthmapFilter();

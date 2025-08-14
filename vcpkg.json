@@ -24,6 +24,7 @@
         "openexr"
       ]
     },
+    "nanoflann",
     "pkgconf",
     "tiff",
     "vcglib",
