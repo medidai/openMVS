@@ -1844,8 +1844,9 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 
 // S T R U C T S ///////////////////////////////////////////////////
 
-DenseDepthMapData::DenseDepthMapData(Scene& _scene, int _nFusionMode)
-	: scene(_scene), depthMaps(_scene), idxImage(0), sem(1), nEstimationGeometricIter(-1), nFusionMode(_nFusionMode)
+DenseDepthMapData::DenseDepthMapData(Scene& _scene, int _nFusionMode, float _fSampleMeshNeighbors) :
+	scene(_scene), depthMaps(_scene), idxImage(0), sem(1), nEstimationGeometricIter(-1),
+	nFusionMode(_nFusionMode), fSampleMeshNeighbors(_fSampleMeshNeighbors)
 {
 	if (nFusionMode < 0) {
 		STEREO::SemiGlobalMatcher::CreateThreads(scene.nMaxThreads);
@@ -1874,9 +1875,9 @@ void DenseDepthMapData::SignalCompleteDepthmapFilter()
 static void* DenseReconstructionEstimateTmp(void*);
 static void* DenseReconstructionFilterTmp(void*);
 
-bool Scene::DenseReconstruction(int nFusionMode, bool bCrop2ROI, float fBorderROI)
+bool Scene::DenseReconstruction(int nFusionMode, bool bCrop2ROI, float fBorderROI, float fSampleMeshNeighbors)
 {
-	DenseDepthMapData data(*this, nFusionMode);
+	DenseDepthMapData data(*this, nFusionMode, fSampleMeshNeighbors);
 
 	// estimate depth-maps
 	if (!ComputeDepthMaps(data))
@@ -1955,7 +1956,7 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 {
 	// compute point-cloud from the existing mesh
 	if (!mesh.IsEmpty() && !ImagesHaveNeighbors()) {
-		SampleMeshWithVisibility();
+		SampleMeshWithVisibility(static_cast<REAL>(data.fSampleMeshNeighbors));
 		mesh.Release();
 	}
 	

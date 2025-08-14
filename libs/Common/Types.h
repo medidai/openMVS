@@ -152,6 +152,14 @@ namespace cv { namespace gpu = cuda; }
 #pragma pop_macro("DEBUG")
 #pragma pop_macro("free")
 
+#pragma push_macro("free")
+#undef free
+#pragma push_macro("malloc")
+#undef malloc
+#include <nanoflann.hpp>
+#pragma pop_macro("malloc")
+#pragma pop_macro("free")
+
 #ifdef _USE_SSE
 #include <xmmintrin.h>
 #include <emmintrin.h>

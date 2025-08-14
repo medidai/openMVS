@@ -1,3 +1,11 @@
+# Find required packages
+FIND_PACKAGE(nanoflann REQUIRED)
+if(nanoflann_FOUND)
+	include_directories(${nanoflann_INCLUDE_DIRS})
+	add_definitions(${nanoflann_DEFINITIONS})
+	MESSAGE(STATUS "nanoflann ${nanoflann_VERSION} found")
+endif()
+
 # List sources files
 FILE(GLOB LIBRARY_FILES_C "*.cpp")
 FILE(GLOB LIBRARY_FILES_H "*.h" "*.inl")
