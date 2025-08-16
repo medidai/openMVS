@@ -168,7 +168,7 @@ CImageDDS::~CImageDDS()
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageDDS::ReadHeader()
+bool CImageDDS::ReadHeader()
 {
 	// read header
 	((ISTREAM*)m_pStream)->setPos(0);
@@ -178,7 +178,7 @@ HRESULT CImageDDS::ReadHeader()
 		ddsInfo.dwSize != IMAGE_DDS_DDSINFOHEADERSIZE &&
 		!(ddsInfo.dwFlags & (DDSDCaps | DDSDPixelFormat | DDSDWidth | DDSDHeight))) {	// always include DDSD_CAPS, DDSD_PIXELFORMAT, DDSD_WIDTH, DDSD_HEIGHT
 		LOG(LT_IMAGE, "error: invalid DDS image");
-		return _INVALIDFILE;
+		return false;
 	}
 
 	m_width = ddsInfo.dwWidth;
@@ -285,16 +285,16 @@ HRESULT CImageDDS::ReadHeader()
 	if (m_format == PF_UNKNOWN)
 	{
 		LOG(LT_IMAGE, "error: unsupported DDS image");
-		return _INVALIDFILE;
+		return false;
 	}
 
 	m_lineWidth = GetDataSizes(0, m_dataWidth, m_dataHeight);
-	return _OK;
+	return true;
 } // ReadHeader
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageDDS::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageDDS::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	// read data
 	if (dataFormat == m_format && nStride == m_stride) {
@@ -302,39 +302,39 @@ HRESULT CImageDDS::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, S
 		if (lineWidth == m_lineWidth) {
 			const size_t nSize = m_dataHeight*m_lineWidth;
 			if (nSize != m_pStream->read(pData, nSize))
-				return _INVALIDFILE;
+				return false;
 		} else {
 			for (Size j=0; j<m_dataHeight; ++j, (uint8_t*&)pData+=lineWidth)
 				if (m_lineWidth != m_pStream->read(pData, m_lineWidth))
-					return _INVALIDFILE;
+					return false;
 		}
 	} else {
 		// read image to a buffer and convert it
 		CAutoPtrArr<uint8_t> const buffer(new uint8_t[m_lineWidth]);
 		for (Size j=0; j<m_dataHeight; ++j, (uint8_t*&)pData+=lineWidth) {
 			if (m_lineWidth != m_pStream->read(buffer, m_lineWidth))
-				return _INVALIDFILE;
+				return false;
 			if (!FilterFormat(pData, dataFormat, nStride, buffer, m_format, m_stride, m_dataWidth))
-				return _FAIL;
+				return false;
 		}
 	}
 	// prepare next level
 	m_lineWidth = GetDataSizes(++m_level, m_dataWidth, m_dataHeight);
-	return _OK;
+	return true;
 } // ReadData
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageDDS::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
+bool CImageDDS::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
 {
-	return _FAIL;
+	return false;
 } // WriteHeader
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageDDS::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageDDS::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
-	return _FAIL;
+	return false;
 } // WriteData
 /*----------------------------------------------------------------*/
 

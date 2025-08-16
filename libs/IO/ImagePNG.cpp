@@ -68,14 +68,14 @@ void CImagePNG::Close()
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImagePNG::ReadHeader()
+bool CImagePNG::ReadHeader()
 {
 	// initialize stuff
 	ASSERT(m_png_ptr == NULL);
 	m_png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
 	if (!m_png_ptr) {
 		LOG(LT_IMAGE, "error: invalid PNG image (png_create_read_struct)");
-		return _INVALIDFILE;
+		return false;
 	}
 	bRead = true;
 	png_structp png_ptr = (png_structp)m_png_ptr;
@@ -83,12 +83,12 @@ HRESULT CImagePNG::ReadHeader()
 	m_info_ptr = png_create_info_struct(png_ptr);
 	if (!m_info_ptr) {
 		LOG(LT_IMAGE, "error: invalid PNG image (png_create_info_struct)");
-		return _INVALIDFILE;
+		return false;
 	}
 	png_infop info_ptr = (png_infop)m_info_ptr;
 
 	if (setjmp(png_jmpbuf(png_ptr)))
-		return _INVALIDFILE;
+		return false;
 
 	((ISTREAM*)m_pStream)->setPos(0);
 	png_set_read_fn(png_ptr, m_pStream, custom_png_read_file);
@@ -141,7 +141,7 @@ HRESULT CImagePNG::ReadHeader()
 		break;
 	default:
 		LOG(LT_IMAGE, "error: unsupported PNG image");
-		return _INVALIDFILE;
+		return false;
 	}
 
 	if (bitdepth == 16)
@@ -156,12 +156,12 @@ HRESULT CImagePNG::ReadHeader()
 	m_level		= 0;
 	m_lineWidth	= (Size)png_get_rowbytes(png_ptr, info_ptr);
 
-	return _OK;
+	return true;
 } // ReadHeader
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImagePNG::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImagePNG::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	png_structp png_ptr = (png_structp)m_png_ptr;
 
@@ -183,23 +183,23 @@ HRESULT CImagePNG::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, S
 		for (Size j=0; j<m_height; ++j, pData=(uint8_t*)pData+lineWidth) {
 			png_read_row(png_ptr, buffer, NULL);
 			if (!FilterFormat(pData, dataFormat, nStride, buffer, m_format, m_stride, m_width))
-				return _FAIL;
+				return false;
 		}
 	}
 
-	return _OK;
+	return true;
 } // Read
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImagePNG::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE /*numLevels*/)
+bool CImagePNG::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE /*numLevels*/)
 {
 	// initialize stuff
 	ASSERT(m_png_ptr == NULL);
 	m_png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
 	if (!m_png_ptr) {
 		LOG(LT_IMAGE, "error: can not create PNG image (png_create_write_struct)");
-		return _INVALIDFILE;
+		return false;
 	}
 	bRead = false;
 	png_structp png_ptr = (png_structp)m_png_ptr;
@@ -207,12 +207,12 @@ HRESULT CImagePNG::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height,
 	m_info_ptr = png_create_info_struct(png_ptr);
 	if (!m_info_ptr) {
 		LOG(LT_IMAGE, "error: invalid PNG image (png_create_info_struct)");
-		return _INVALIDFILE;
+		return false;
 	}
 	png_infop info_ptr = (png_infop)m_info_ptr;
 
 	if (setjmp(png_jmpbuf(png_ptr)))
-		return _INVALIDFILE;
+		return false;
 
 	// write header
 	switch (imageFormat)
@@ -236,7 +236,7 @@ HRESULT CImagePNG::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height,
 		break;
 	default:
 		LOG(LT_IMAGE, "error: unsupported PNG image format");
-		return _INVALIDFILE;
+		return false;
 	}
 	m_numLevels = 1;
 	m_level = 0;
@@ -268,12 +268,12 @@ HRESULT CImagePNG::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height,
 
 	png_write_info(png_ptr, info_ptr);
 
-	return _OK;
+	return true;
 } // WriteHeader
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImagePNG::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImagePNG::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	png_structp png_ptr = (png_structp)m_png_ptr;
 
@@ -294,13 +294,13 @@ HRESULT CImagePNG::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 		CAutoPtrArr<png_byte> const buffer(new png_byte[m_lineWidth]);
 		for (Size j=0; j<m_height; ++j, pData=(uint8_t*)pData+lineWidth) {
 			if (!FilterFormat(buffer, m_format, m_stride, pData, dataFormat, nStride, m_width))
-				return _FAIL;
+				return false;
 			png_write_row(png_ptr, buffer);
 		}
 	}
 	png_write_end(png_ptr, NULL);
 
-	return _OK;
+	return true;
 } // WriteData
 /*----------------------------------------------------------------*/
 

@@ -52,6 +52,13 @@ inline TOBB<TYPE,DIMS>::TOBB(const TOBB<CTYPE,DIMS>& rhs)
 
 
 template <typename TYPE, int DIMS>
+inline void TOBB<TYPE,DIMS>::Reset()
+{
+	m_rot.setIdentity();
+	m_pos = POINT::Zero();
+	m_ext = POINT::Zero();
+}
+template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::Set(const AABB& aabb)
 {
 	m_rot.setIdentity();
@@ -71,14 +78,27 @@ inline void TOBB<TYPE,DIMS>::Set(const MATRIX& rot, const POINT& ptMin, const PO
 // Inspired from "Fitting Oriented Bounding Boxes" by James Gregson
 // http://jamesgregson.blogspot.ro/2011/03/latex-test.html
 
-// build an OBB from a vector of input points.  This
+// Build an OBB from a vector of input points.  This
 // method just forms the covariance matrix and hands
 // it to the build_from_covariance_matrix method
-// which handles fitting the box to the points
+// which handles fitting the box to the points.
+//
+// If k (number of nearest neighbors) is set, the method will filter
+// out inside points and use only the surface points. This is useful
+// when the dominant direction of the inside points is not aligned with
+// the convex hull which ultimately is used to define the OBB dimensions.
 template <typename TYPE, int DIMS>
-inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n)
+inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, int k)
 {
 	ASSERT(n >= DIMS);
+
+	std::vector<POINT> surfacePoints;
+	if (k > 0) {
+		// Filter surface points based on the k nearest neighbors
+		surfacePoints = FilterSurfacePoints(pts, n, k);
+		pts = surfacePoints.data();
+		n = surfacePoints.size();
+	}
 
 	// loop over the points to find the mean point
 	// location and to build the covariance matrix;
@@ -336,32 +356,19 @@ inline void TOBB<TYPE,DIMS>::GetSize(POINT& ptSize) const
 template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::GetCorners(POINT pts[numCorners]) const
 {
-	if (DIMS == 2) {
-		const POINT pEAxis[2] = {
-			m_rot.row(0)*m_ext[0],
-			m_rot.row(1)*m_ext[1]
-		};
-		const POINT pos(m_rot.transpose()*m_pos);
-		pts[0] = pos - pEAxis[0] - pEAxis[1];
-		pts[1] = pos + pEAxis[0] - pEAxis[1];
-		pts[2] = pos + pEAxis[0] + pEAxis[1];
-		pts[3] = pos - pEAxis[0] + pEAxis[1];
-	}
-	if (DIMS == 3) {
-		const POINT pEAxis[3] = {
-			m_rot.row(0)*m_ext[0],
-			m_rot.row(1)*m_ext[1],
-			m_rot.row(2)*m_ext[2]
-		};
-		const POINT pos(m_rot.transpose()*m_pos);
-		pts[0] = pos - pEAxis[0] - pEAxis[1] - pEAxis[2];
-		pts[1] = pos - pEAxis[0] - pEAxis[1] + pEAxis[2];
-		pts[2] = pos + pEAxis[0] - pEAxis[1] - pEAxis[2];
-		pts[3] = pos + pEAxis[0] - pEAxis[1] + pEAxis[2];
-		pts[4] = pos + pEAxis[0] + pEAxis[1] - pEAxis[2];
-		pts[5] = pos + pEAxis[0] + pEAxis[1] + pEAxis[2];
-		pts[6] = pos - pEAxis[0] + pEAxis[1] - pEAxis[2];
-		pts[7] = pos - pEAxis[0] + pEAxis[1] + pEAxis[2];
+	// generate all corner combinations using bit patterns;
+	// use bit j of i to determine sign: 0 = subtract, 1 = add
+	POINT axisVectors[DIMS];
+	for (int j=0; j<DIMS; ++j)
+		axisVectors[j] = m_rot.row(j) * m_ext[j];
+	for (int i=0; i<numCorners; ++i) {
+		pts[i] = m_pos;
+		for (int j=0; j<DIMS; ++j) {
+			if (i & (1 << j))
+				pts[i] += axisVectors[j];
+			else
+				pts[i] -= axisVectors[j];
+		}
 	}
 } // GetCorners
 // constructs the corner of the aligned bounding box in world space
@@ -398,4 +405,86 @@ bool TOBB<TYPE,DIMS>::Intersects(const POINT& pt) const
 			&& ABS(dist[2]) <= m_ext[2];
 	}
 } // Intersects(POINT)
+/*----------------------------------------------------------------*/
+
+
+// Surface (aproximate) point extraction from 3D point clouds using directional vector summation.
+//
+// This algorithm approximates which points lie on the surface (outer boundary) of a 3D point cloud,
+// based on the spatial distribution of their neighbors.
+//
+// For each point:
+// 1. Find its k nearest neighbors using a KD-tree (via nanoflann).
+// 2. Compute unit direction vectors from the point to each neighbor.
+// 3. Sum all direction vectors and compute the magnitude of the result.
+//    - A large magnitude indicates an asymmetric neighborhood — likely a surface point.
+//    - A near-zero magnitude indicates a symmetric (interior) neighborhood.
+//
+// After computing this "surface score" for each point, the algorithm selects the top N% of points
+// with the highest scores as likely surface points.
+
+template <typename TYPE, int DIMS>
+struct TPointCloudSurfaceAdaptor {
+	const typename TOBB<TYPE,DIMS>::POINT* pts;
+	size_t n;
+	TPointCloudSurfaceAdaptor(const typename TOBB<TYPE,DIMS>::POINT* pts_, size_t n_) : pts(pts_), n(n_) {}
+	inline size_t kdtree_get_point_count() const { return n; }
+	inline TYPE kdtree_get_pt(const size_t idx, int dim) const { return pts[idx][dim]; }
+	template <class BBOX>
+	bool kdtree_get_bbox(BBOX&) const { return false; }
+};
+
+template <typename TYPE, int DIMS>
+std::vector<TYPE> TOBB<TYPE,DIMS>::ComputeSurfacePointsScores(const POINT* pts, size_t n, int k)
+{
+	using PointCloudSurfaceAdaptor = TPointCloudSurfaceAdaptor<TYPE, DIMS>;
+	using KDTree = nanoflann::KDTreeSingleIndexAdaptor<
+		nanoflann::L2_Simple_Adaptor<TYPE, PointCloudSurfaceAdaptor>,
+		PointCloudSurfaceAdaptor, DIMS>;
+
+	PointCloudSurfaceAdaptor adaptor(pts, n);
+	KDTree kdtree(DIMS, adaptor, nanoflann::KDTreeSingleIndexAdaptorParams());
+	kdtree.buildIndex();
+
+	std::vector<TYPE> scores(n);
+	std::vector<size_t> indices(k + 1);
+	std::vector<TYPE> dists(k + 1);
+	for (size_t i = 0; i < n; ++i) {
+		nanoflann::KNNResultSet<TYPE> resultSet(k + 1);
+		resultSet.init(indices.data(), dists.data());
+		kdtree.findNeighbors(resultSet, &pts[i][0], nanoflann::SearchParameters());
+		POINT sum_vector = POINT::Zero();
+		for (size_t j = 1; j < resultSet.size(); ++j) { // skip self
+			POINT dir = pts[indices[j]] - pts[i];
+			TYPE norm = dir.norm();
+			if (!ISZERO(norm))
+				sum_vector += dir / norm;
+		}
+		scores[i] = sum_vector.norm();
+	}
+	return scores;
+}
+
+template <typename TYPE, int DIMS>
+std::vector<typename TOBB<TYPE,DIMS>::POINT> TOBB<TYPE,DIMS>::FilterSurfacePoints(const POINT* pts, size_t n, int k, TYPE percentile)
+{
+	auto scores = ComputeSurfacePointsScores(pts, n, k);
+	TYPE threshold;
+	if (percentile > 0) {
+		// Calculate the index for the given percentile
+		size_t index = static_cast<size_t>((TYPE(1) - percentile) * scores.size());
+		const auto nth = scores.begin() + index;
+		std::nth_element(scores.begin(), nth, scores.end());
+		threshold = *nth;
+	} else {
+		// Use given percentile param as threshold
+		threshold = -percentile;
+	}
+	std::vector<POINT> result;
+	for (size_t i = 0; i < n; ++i) {
+		if (scores[i] > threshold)
+			result.push_back(pts[i]);
+	}
+	return result;
+}
 /*----------------------------------------------------------------*/

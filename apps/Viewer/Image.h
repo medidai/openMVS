@@ -1,7 +1,7 @@
 /*
  * Image.h
  *
- * Copyright (c) 2014-2015 SEACAVE
+ * Copyright (c) 2014-2025 SEACAVE
  *
  * Author(s):
  *
@@ -29,8 +29,7 @@
  *      containing it.
  */
 
-#ifndef _VIEWER_IMAGE_H_
-#define _VIEWER_IMAGE_H_
+#pragma once
 
 
 // I N C L U D E S /////////////////////////////////////////////////
@@ -93,5 +92,3 @@ typedef Image::ImageArr ImageArr;
 /*----------------------------------------------------------------*/
 
 } // namespace VIEWER
-
-#endif // _VIEWER_IMAGE_H_

@@ -141,6 +141,10 @@ public:
 	#endif
 };
 typedef MVS_API CLISTDEF2IDX(Image,IIndex) ImageArr;
+
+static inline IIndex ImageID2Index(const ImageArr& images, IIndex ID) {
+	return images.FindFunc([&ID](const Image& image) { return image.ID == ID; });
+}
 /*----------------------------------------------------------------*/
 
 } // namespace MVS

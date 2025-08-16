@@ -189,7 +189,7 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 	IIndex prevNumImages = (IIndex)images.size();
 	const IIndex numImages = depthData.images.size();
 	params.nNumViews = (int)numImages-1;
-	params.nInitTopK = std::min(params.nInitTopK, params.nNumViews);
+	params.nInitTopK = MINF(params.nInitTopK, params.nNumViews);
 	params.fDepthMin = depthData.dMin;
 	params.fDepthMax = depthData.dMax;
 	if (prevNumImages < numImages) {

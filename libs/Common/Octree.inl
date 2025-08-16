@@ -295,8 +295,8 @@ void TOctree<ITEMARR_TYPE,TYPE,DIMS,DATA_TYPE>::_Collect(const CELL_TYPE& cell, 
 {
 	if (cell.IsLeaf()) {
 		// add all items contained by the bounding-box
-		for (IDX_TYPE i=0; i<cell.Leaf().size; ++i) {
-			const IDX_TYPE idx = m_indices[cell.Leaf().idxBegin + i];
+		for (IDX_TYPE i=0; i<cell.GetNumItems(); ++i) {
+			const IDX_TYPE idx = m_indices[cell.GetFirstItemIdx() + i];
 			if (aabb.Intersects(m_items[idx]))
 				inserter(idx);
 		}

@@ -1347,7 +1347,7 @@ protected:
 	{
 		if (useConstruct) {
 			while (n--)
-				dst[n] = src[n];
+				dst[n] = std::move(src[n]);
 		} else {
 			memcpy((void*)dst, (const void*)src, n*sizeof(TYPE));
 		}
@@ -1357,7 +1357,7 @@ protected:
 		ASSERT(dst != src);
 		if (useConstruct > 1) {
 			for (IDX i=0; i<n; ++i) {
-				new(dst+i) TYPE(src[i]);
+				new(dst+i) TYPE(std::move(src[i]));
 				(src+i)->~TYPE();
 			}
 		} else {
@@ -1370,7 +1370,7 @@ protected:
 		ASSERT(dst != src);
 		if (useConstruct > 1) {
 			while (n--) {
-				new(dst+n) TYPE(src[n]);
+				new(dst+n) TYPE(std::move(src[n]));
 				(src+n)->~TYPE();
 			}
 		} else {
@@ -1387,7 +1387,7 @@ protected:
 		ASSERT(dst != src);
 		if (useConstruct > 1) {
 			while (n--) {
-				dst[n] = src[n];
+				dst[n] = std::move(src[n]);
 				(src+n)->~TYPE();
 			}
 		} else {

@@ -42,20 +42,14 @@ using namespace MVS;
 
 IMAGEPTR Image::OpenImage(const String& fileName)
 {
-	#if 0
-	if (Util::isFullPath(fileName))
-		return IMAGEPTR(CImage::Create(fileName, CImage::READ));
-	return IMAGEPTR(CImage::Create((Util::getCurrentFolder()+fileName).c_str(), CImage::READ));
-	#else
 	return IMAGEPTR(CImage::Create(fileName, CImage::READ));
-	#endif
 } // OpenImage
 /*----------------------------------------------------------------*/
 
 IMAGEPTR Image::ReadImageHeader(const String& fileName)
 {
 	IMAGEPTR pImage(OpenImage(fileName));
-	if (pImage == NULL || FAILED(pImage->ReadHeader())) {
+	if (pImage == NULL || !pImage->ReadHeader()) {
 		LOG("error: failed loading image header");
 		pImage.Release();
 	}
@@ -74,12 +68,12 @@ IMAGEPTR Image::ReadImage(const String& fileName, Image8U3& image)
 
 bool Image::ReadImage(IMAGEPTR pImage, Image8U3& image)
 {
-	if (FAILED(pImage->ReadHeader())) {
+	if (!pImage->ReadHeader()) {
 		LOG("error: failed loading image header");
 		return false;
 	}
 	image.create(pImage->GetHeight(), pImage->GetWidth());
-	if (FAILED(pImage->ReadData(image.data, PF_R8G8B8, 3, (CImage::Size)image.step))) {
+	if (!pImage->ReadData(image.data, PF_R8G8B8, 3, (CImage::Size)image.step)) {
 		LOG("error: failed loading image data");
 		return false;
 	}

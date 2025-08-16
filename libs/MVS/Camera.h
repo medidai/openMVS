@@ -458,6 +458,29 @@ public:
 		return GetFootprintWorld(PointDepth(X));
 	}
 
+	// create the 4 image points corresponding to the image corners
+	Point2Arr GetImageCorners(const cv::Size& size) const {
+		const int maxX = size.width - 1;
+		const int maxY = size.height - 1;
+		return Point2Arr{
+			Point2(0, 0),
+			Point2(0, maxY),
+			Point2(maxX, maxY),
+			Point2(maxX, 0)
+		};
+	}
+	// compute the normalized rays in camera space corresponding to the image corners
+	Point3Arr GetCameraCornerRays(const cv::Size& size, bool bNormalize=true) const {
+		const Point2Arr corners(GetImageCorners(size));
+		Point3Arr result(4);
+		for (int i = 0; i < 4; ++i) {
+			result[i] = RayPoint(corners[i]);
+			if (bNormalize)
+				normalize(result[i]);
+		}
+		return result;
+	}
+
 	#ifdef _USE_BOOST
 	// implement BOOST serialization
 	template<class Archive>

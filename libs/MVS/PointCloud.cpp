@@ -84,7 +84,19 @@ void PointCloud::RemovePoint(IDX idx)
 		labels.RemoveAt(idx);
 	points.RemoveAt(idx);
 }
-void PointCloud::RemovePointsOutside(const OBB3f& obb) {
+
+// remove multiple points based on the indices provided;
+// the indices must be sorted in ascending order
+void PointCloud::RemovePoints(IndexArr& indices)
+{
+	ASSERT(!indices.empty());
+	indices.Sort();
+	RFOREACH(idx, indices)
+		RemovePoint(indices[idx]);
+}
+
+void PointCloud::RemovePointsOutside(const OBB3f &obb)
+{
 	ASSERT(obb.IsValid());
 	RFOREACH(i, points)
 		if (!obb.Intersects(points[i]))

@@ -65,16 +65,16 @@ public:
 	CImage()			{}
 	virtual ~CImage()	{}
 
-	virtual HRESULT		Reset(Size width, Size height, PIXELFORMAT pixFormat, Size levels = 1, bool bAllocate = false);
-	virtual HRESULT		Reset(LPCTSTR szFileName, IMCREATE mode);
-	virtual HRESULT		Reset(IOSTREAMPTR& pStream);
+	virtual bool		Reset(Size width, Size height, PIXELFORMAT pixFormat, Size levels = 1, bool bAllocate = false);
+	virtual bool		Reset(LPCTSTR szFileName, IMCREATE mode);
+	virtual bool		Reset(IOSTREAMPTR& pStream);
 	virtual void		Close();
 
-	virtual HRESULT		ReadHeader();
-	virtual HRESULT		ReadData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
+	virtual bool		ReadHeader();
+	virtual bool		ReadData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
 
-	virtual HRESULT		WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
-	virtual HRESULT		WriteData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
+	virtual bool		WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
+	virtual bool		WriteData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
 
 	const IOSTREAMPTR&	GetStream() const		{ return m_pStream; }
 	IOSTREAMPTR&		GetStream()				{ return m_pStream; }

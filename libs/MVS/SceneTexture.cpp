@@ -681,7 +681,7 @@ IIndexArr MeshTexture::SelectBestView(const FaceDataArr& faceDatas, FIndex fid, 
 	});
 	
 	#endif
-	IIndexArr cameras(MIN(minCommonCameras, faceDatas.size()));
+	IIndexArr cameras(MINF(minCommonCameras, faceDatas.size()));
 	FOREACH(i, cameras)
 		cameras[i] = faceDatas[scorePodium[i]].idxView;
 	return cameras;
@@ -1931,7 +1931,7 @@ void MeshTexture::LocalSeamLeveling()
 						inline RasterPatch(Image32F3& _image, Image8U& _mask, const Image32F3& _image0, const Image8U3& _image1,
 							const TexCoord& _p0, const TexCoord& _p0Adj, const TexCoord& _p1, const TexCoord& _p1Adj)
 							: image(_image), mask(_mask), image0(_image0), image1(_image1),
-							p0(_p0), p0Dir(_p0Adj-_p0), p1(_p1), p1Dir(_p1Adj-_p1), length((float)norm(p0Dir)), sampler() {}
+							p0(_p0), p0Dir(_p0Adj-_p0), p1(_p1), p1Dir(_p1Adj-_p1), length((float)norm(p0Dir)) {}
 						inline void operator()(const ImageRef& pt) {
 							const float l((float)norm(TexCoord(pt)-p0)/length);
 							// compute mean color
@@ -2136,7 +2136,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 					// try again with a bigger texture
 					textureSize *= 2;
 					if (maxTextureSize > 0)
-						textureSize = std::max(textureSize, maxTextureSize);
+						textureSize = MAXF(textureSize, maxTextureSize);
 					unplacedRects.JoinRemove(newPlacedRects);
 				}
 			}

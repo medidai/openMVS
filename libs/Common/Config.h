@@ -15,6 +15,16 @@
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+// Helper macros for stringification
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
+#define OpenMVS_VERSION TOSTRING(OpenMVS_MAJOR_VERSION) "." TOSTRING(OpenMVS_MINOR_VERSION) "." TOSTRING(OpenMVS_PATCH_VERSION)
+
+#define OpenMVS_VERSION_AT_LEAST(x,y,z) \
+	(OpenMVS_MAJOR_VERSION>x || (OpenMVS_MAJOR_VERSION==x && \
+	(OpenMVS_MINOR_VERSION>y || (OpenMVS_MINOR_VERSION==y && OpenMVS_PATCH_VERSION>=z))))
+
 #ifdef _MSC_VER
 
 // Modify the following defines if you have to target a platform prior to the ones specified below.
@@ -180,7 +190,7 @@
 #	define COLD
 #	define THREADLOCAL __declspec(thread)
 #	define FORCEINLINE __forceinline
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
 #	define ALIGN(n) __attribute__((aligned(n)))
 #	define NOINITVTABLE
 #	define DECRESTRICT

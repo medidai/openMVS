@@ -1,7 +1,7 @@
 /*
  * Camera.h
  *
- * Copyright (c) 2014-2015 SEACAVE
+ * Copyright (c) 2014-2025 SEACAVE
  *
  * Author(s):
  *
@@ -29,59 +29,115 @@
  *      containing it.
  */
 
-#ifndef _VIEWER_CAMERA_H_
-#define _VIEWER_CAMERA_H_
-
-
-// I N C L U D E S /////////////////////////////////////////////////
-
-
-// D E F I N E S ///////////////////////////////////////////////////
-
-
-// S T R U C T S ///////////////////////////////////////////////////
+#pragma once
 
 namespace VIEWER {
 
-class Camera
-{
+/**
+ * Simple camera class for 3D rendering.
+ * 
+ * This class provides basic camera functionality for view and projection matrices,
+ * camera state management, and scene viewing. The camera supports both perspective
+ * and orthographic projections.
+ * 
+ * Navigation is handled by external control classes (e.g., ArcballControls) that
+ * manipulate the camera's position, target, and orientation.
+ */
+class Camera {
 public:
 	EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-	cv::Size size;
-	AABB3d boxScene;
-	Eigen::Vector3d centerScene;
-	Eigen::Quaterniond rotation;
-	Eigen::Vector3d center;
-	double dist, radius;
-	float fov, fovDef;
-	float scaleF, scaleFDef;
+private:
+	// Camera state
+	Eigen::Vector3d position;
+	Eigen::Vector3d target;
+	Eigen::Vector3d up;
+
+	// Scene bounds
+	Eigen::Vector3f sceneCenter;
+	Eigen::Vector3f sceneSize;
+
+	// Projection parameters
+	cv::Size size; // viewport size
+	double fov, nearPlane, farPlane;
+	bool orthographic;
+
+	// Camera view mode as viewer camera ID
 	MVS::IIndex prevCamID, currentCamID, maxCamID;
 
+	// Saved camera state for restoring after camera view mode
+	struct CameraState {
+		Eigen::Vector3d position;
+		Eigen::Vector3d target;
+		Eigen::Vector3d up;
+		cv::Size size;
+		double fov;
+		bool orthographic;
+	};
+	std::optional<CameraState> savedState;
+
+	// Camera view mode callback
+	std::function<void(MVS::IIndex)> cameraViewModeCallback;
+
 public:
-	Camera(const AABB3d& _box=AABB3d(true), const Point3d& _center=Point3d::ZERO, float _scaleF=1, float _fov=40);
+	Camera();
 
+	// Core functionality
+	void SetSize(const cv::Size& newSize) { size = newSize; }
+	void SetFOV(double fov);
+	void SetNearFar(double nearPlane, double farPlane);
+	void SetOrthographic(bool ortho);
+
+	// Matrix generation
+	Eigen::Matrix3d GetRotationMatrix() const;
+	Eigen::Matrix4d GetViewMatrix() const;
+	Eigen::Matrix4d GetProjectionMatrix() const;
+
+	// Scene setup
 	void Reset();
-	void Resize(const cv::Size&);
-	void SetFOV(float _fov);
+	void SetSceneBounds(const Point3f& center, const Point3f& size);
+	void SetTarget(const Point3f& newTarget);
+	void SetLookAt(const Eigen::Vector3d& eye, const Eigen::Vector3d& target, const Eigen::Vector3d& up);
 
+	// Ray casting
+	Ray3d GetPickingRay(const Eigen::Vector2d& screenPos) const;
+
+	// Getters
+	const Eigen::Vector3d& GetPosition() const { return position; }
+	const Eigen::Vector3d& GetTarget() const { return target; }
+	const Eigen::Vector3d& GetUp() const { return up; }
+	const Eigen::Vector3f& GetSceneCenter() const { return sceneCenter; }
+	const Eigen::Vector3f& GetSceneSize() const { return sceneSize; }
 	const cv::Size& GetSize() const { return size; }
+	double GetFOV() const { return fov; }
+	bool IsOrthographic() const { return orthographic; }
 
-	Eigen::Vector3d GetPosition() const;
-	Eigen::Matrix3d GetRotation() const;
-	Eigen::Matrix4d GetLookAt() const;
+	// Camera view mode functionality
+	bool IsCameraViewMode() const { return currentCamID != NO_ID; }
+	void SetCameraViewMode(MVS::IIndex camID);
+	void SetCameraFromSceneData(const MVS::Image& imageData);
+	void DisableCameraViewMode();
+	void SaveCurrentState();
+	bool RestoreSavedState();
+	bool HasSavedState() const { return savedState.has_value(); }
+	MVS::IIndex GetCurrentCamID() const { return currentCamID; }
+	void SetCurrentCamID(MVS::IIndex camID) { 
+		prevCamID = currentCamID; 
+		currentCamID = camID; 
+	}
+	void SetMaxCamID(MVS::IIndex maxID) { maxCamID = maxID; }
+	void SetCameraViewModeCallback(std::function<void(MVS::IIndex)> callback) { 
+		cameraViewModeCallback = callback; 
+	}
 
-	void GetLookAt(Eigen::Vector3d& eye, Eigen::Vector3d& center, Eigen::Vector3d& up) const;
-	void Rotate(const Eigen::Vector2d& pos, const Eigen::Vector2d& prevPos);
-	void Translate(const Eigen::Vector2d& pos, const Eigen::Vector2d& prevPos);
+	// Camera navigation
+	void NextCamera();
+	void PreviousCamera();
 
-	bool IsCameraViewMode() const { return prevCamID != currentCamID && currentCamID != NO_ID; }
-
-protected:
-	void ProjectOnSphere(double radius, Eigen::Vector3d& p) const;
+private:
+	// Static helper function for computing look-at matrix
+	static Eigen::Matrix4d ComputeLookAtMatrix(const Eigen::Vector3d& eye, const Eigen::Vector3d& center, const Eigen::Vector3d& up);
 };
 /*----------------------------------------------------------------*/
 
 } // namespace VIEWER
-
-#endif // _VIEWER_CAMERA_H_

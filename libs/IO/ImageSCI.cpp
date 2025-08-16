@@ -41,7 +41,7 @@ CImageSCI::~CImageSCI()
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageSCI::ReadHeader()
+bool CImageSCI::ReadHeader()
 {
 	// read header
 	((ISTREAM*)m_pStream)->setPos(0);
@@ -49,7 +49,7 @@ HRESULT CImageSCI::ReadHeader()
 	m_pStream->read(&sciInfo, sizeof(SCIINFOHEADER));
 	if (sciInfo.dwHeader != IMAGE_SCI_HEADER) {
 		LOG(LT_IMAGE, "error: invalid SCI image");
-		return _INVALIDFILE;
+		return false;
 	}
 	m_width = sciInfo.shWidth;
 	m_height = sciInfo.shHeight;
@@ -58,12 +58,12 @@ HRESULT CImageSCI::ReadHeader()
 	m_format = (PIXELFORMAT)sciInfo.byFormat;
 	m_stride = GetStride(m_format);
 	m_lineWidth = GetDataSizes(0, m_dataWidth, m_dataHeight);
-	return _OK;
+	return true;
 } // ReadHeader
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageSCI::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
+bool CImageSCI::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
 {
 	// write header
 	CImage::WriteHeader(imageFormat, width, height, numLevels);
@@ -71,8 +71,8 @@ HRESULT CImageSCI::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height,
 	const SCIINFOHEADER sciInfo = {IMAGE_SCI_HEADER, (uint16_t)m_width, (uint16_t)m_height, (uint8_t)m_format, m_numLevels, 0, 0};
 	if (sizeof(SCIINFOHEADER) != m_pStream->write(&sciInfo, sizeof(SCIINFOHEADER))) {
 		LOG(LT_IMAGE, "error: failed writing the SCI image");
-		return _INVALIDFILE;
+		return false;
 	}
-	return _OK;
+	return true;
 } // WriteHeader
 /*----------------------------------------------------------------*/
