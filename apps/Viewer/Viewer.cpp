@@ -1,7 +1,7 @@
 /*
  * Viewer.cpp
  *
- * Copyright (c) 2014-2015 SEACAVE
+ * Copyright (c) 2014-2025 SEACAVE
  *
  * Author(s):
  *
@@ -213,16 +213,16 @@ int main(int argc, LPCTSTR* argv)
 
 	// create viewer
 	Scene viewer;
-	if (!viewer.Init(cv::Size(1280, 720), APPNAME,
-			OPT::strInputFileName.empty() ? NULL : MAKE_PATH_SAFE(OPT::strInputFileName).c_str(),
-			OPT::strGeometryFileName.empty() ? NULL : MAKE_PATH_SAFE(OPT::strGeometryFileName).c_str()))
+	if (!viewer.Initialize(cv::Size(1280, 720), APPNAME,
+			OPT::strInputFileName.empty() ? OPT::strInputFileName : MAKE_PATH_SAFE(OPT::strInputFileName),
+			OPT::strGeometryFileName.empty() ? OPT::strGeometryFileName : MAKE_PATH_SAFE(OPT::strGeometryFileName)))
 		return EXIT_FAILURE;
 	if (viewer.IsOpen() && !OPT::strOutputFileName.empty()) {
 		// export the scene
 		viewer.Export(MAKE_PATH_SAFE(OPT::strOutputFileName), OPT::strExportType.empty()?LPCTSTR(NULL):OPT::strExportType.c_str());
 	}
 	// enter viewer loop
-	viewer.Loop();
+	viewer.Run();
 	return EXIT_SUCCESS;
 }
 /*----------------------------------------------------------------*/

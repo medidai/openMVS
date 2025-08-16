@@ -1429,46 +1429,6 @@ inline TPoint3<TTO> cvtPoint3(const TPoint3<TFROM>& p) {
 	return TPoint3<TTO>(TTO(p.x), TTO(p.y), TTO(p.z));
 }
 
-// TPixel operators
-template <typename TYPE>
-inline TPixel<TYPE> operator/(const TPixel<TYPE>& pt0, const TPixel<TYPE>& pt1) {
-	return TPixel<TYPE>(pt0.r/pt1.r, pt0.g/pt1.g, pt0.b/pt1.b);
-}
-template <typename TYPE>
-inline TPixel<TYPE>& operator/=(TPixel<TYPE>& pt0, const TPixel<TYPE>& pt1) {
-	pt0.r/=pt1.r; pt0.g/=pt1.g; pt0.b/=pt1.b;
-	return pt0;
-}
-template <typename TYPE>
-inline TPixel<TYPE> operator*(const TPixel<TYPE>& pt0, const TPixel<TYPE>& pt1) {
-	return TPixel<TYPE>(pt0.r*pt1.r, pt0.g*pt1.g, pt0.b*pt1.b);
-}
-template <typename TYPE>
-inline TPixel<TYPE>& operator*=(TPixel<TYPE>& pt0, const TPixel<TYPE>& pt1) {
-	pt0.r*=pt1.r; pt0.g*=pt1.g; pt0.b*=pt1.b;
-	return pt0;
-}
-
-// TColor operators
-template <typename TYPE>
-inline TColor<TYPE> operator/(const TColor<TYPE>& pt0, const TColor<TYPE>& pt1) {
-	return TColor<TYPE>(pt0.r/pt1.r, pt0.g/pt1.g, pt0.b/pt1.b, pt0.a/pt1.a);
-}
-template <typename TYPE>
-inline TColor<TYPE>& operator/=(TColor<TYPE>& pt0, const TColor<TYPE>& pt1) {
-	pt0.r/=pt1.r; pt0.g/=pt1.g; pt0.b/=pt1.b; pt0.a/=pt1.a;
-	return pt0;
-}
-template <typename TYPE>
-inline TColor<TYPE> operator*(const TColor<TYPE>& pt0, const TColor<TYPE>& pt1) {
-	return TColor<TYPE>(pt0.r*pt1.r, pt0.g*pt1.g, pt0.b*pt1.b, pt0.a*pt1.a);
-}
-template <typename TYPE>
-inline TColor<TYPE>& operator*=(TColor<TYPE>& pt0, const TColor<TYPE>& pt1) {
-	pt0.r*=pt1.r; pt0.g*=pt1.g; pt0.b*=pt1.b; pt0.a*=pt1.a;
-	return pt0;
-}
-
 // TMatrix operators
 template <typename TYPE, int m, int n>
 inline TMatrix<TYPE,m,n> operator + (const TMatrix<TYPE,m,n>& m1, const TMatrix<TYPE,m,n>& m2) {
@@ -3457,251 +3417,6 @@ TYPE InvertMatrix3x3(const TYPE* m, TYPE* mi) {
 
 // C L A S S  //////////////////////////////////////////////////////
 
-#ifdef _USE_EIGEN
-
-///Compute a rotation exponential using the Rodrigues Formula.
-///The rotation axis is given by \f$\vec{w}\f$, and the rotation angle must
-///be computed using \f$ \theta = |\vec{w}|\f$. This is provided as a separate
-///function primarily to allow fast and rough matrix exponentials using fast
-///and rough approximations to \e A and \e B.
-///
-///@param w Vector about which to rotate.
-///@param A \f$\frac{\sin \theta}{\theta}\f$
-///@param B \f$\frac{1 - \cos \theta}{\theta^2}\f$
-///@param R Matrix to hold the return value.
-///@relates SO3
-template <typename Precision>
-inline void eigen_SO3_exp(const typename Eigen::SO3<Precision>::Vec3& w, typename Eigen::SO3<Precision>::Mat3& R) {
-	static const Precision one_6th(1.0/6.0);
-	static const Precision one_20th(1.0/20.0);
-	//Use a Taylor series expansion near zero. This is required for
-	//accuracy, since sin t / t and (1-cos t)/t^2 are both 0/0.
-	Precision A, B;
-	const Precision theta_sq(w.squaredNorm());
-	if (theta_sq < Precision(1e-8)) {
-		A = Precision(1) - one_6th * theta_sq;
-		B = Precision(0.5);
-	} else {
-		if (theta_sq < Precision(1e-6)) {
-			B = Precision(0.5) - Precision(0.25) * one_6th * theta_sq;
-			A = Precision(1) - theta_sq * one_6th*(Precision(1) - one_20th * theta_sq);
-		} else {
-			const Precision theta(sqrt(theta_sq));
-			const Precision inv_theta(Precision(1)/theta);
-			A = sin(theta) * inv_theta;
-			B = (Precision(1) - cos(theta)) * (inv_theta * inv_theta);
-		}
-	}
-	{
-	const Precision wx2(w(0)*w(0));
-	const Precision wy2(w(1)*w(1));
-	const Precision wz2(w(2)*w(2));
-	R(0,0) = Precision(1) - B*(wy2 + wz2);
-	R(1,1) = Precision(1) - B*(wx2 + wz2);
-	R(2,2) = Precision(1) - B*(wx2 + wy2);
-	}
-	{
-	const Precision a(A*w[2]);
-	const Precision b(B*(w[0]*w[1]));
-	R(0,1) = b - a;
-	R(1,0) = b + a;
-	}
-	{
-	const Precision a(A*w[1]);
-	const Precision b(B*(w[0]*w[2]));
-	R(0,2) = b + a;
-	R(2,0) = b - a;
-	}
-	{
-	const Precision a(A*w[0]);
-	const Precision b(B*(w[1]*w[2]));
-	R(1,2) = b - a;
-	R(2,1) = b + a;
-	}
-}
-template <typename Precision>
-inline typename Eigen::SO3<Precision>::Mat3 Eigen::SO3<Precision>::exp(const Vec3& w) const {
-	Mat3 result;
-	eigen_SO3_exp<Precision>(w, result);
-	return result;
-}
-
-/// Take the logarithm of the matrix, generating the corresponding vector in the Lie Algebra.
-/// See the Detailed Description for details of this vector.
-template <typename Precision>
-inline void eigen_SO3_ln(const typename Eigen::SO3<Precision>::Mat3& R, typename Eigen::SO3<Precision>::Vec3& w) {
-	const Precision cos_angle((R(0,0) + R(1,1) + R(2,2) - Precision(1)) * Precision(0.5));
-	w(0) = (R(2,1)-R(1,2))*Precision(0.5);
-	w(1) = (R(0,2)-R(2,0))*Precision(0.5);
-	w(2) = (R(1,0)-R(0,1))*Precision(0.5);
-
-	const Precision sin_angle_abs(sqrt(w.squaredNorm()));
-	if (cos_angle > Precision(M_SQRT1_2)) {           // [0 - Pi/4] use asin
-		if (sin_angle_abs > Precision(0))
-			w *= asin(sin_angle_abs) / sin_angle_abs;
-	} else if (cos_angle > Precision(-M_SQRT1_2)) {   // [Pi/4 - 3Pi/4] use acos, but antisymmetric part
-		if (sin_angle_abs > Precision(0))
-			w *= acos(cos_angle) / sin_angle_abs;
-	} else {                                       // rest use symmetric part
-		// antisymmetric part vanishes, but still large rotation, need information from symmetric part
-		const Precision angle(Precision(M_PI) - asin(sin_angle_abs));
-		const Precision d0(R(0,0) - cos_angle);
-		const Precision d1(R(1,1) - cos_angle);
-		const Precision d2(R(2,2) - cos_angle);
-		typename Eigen::SO3<Precision>::Vec3 r2;
-		if (d0*d0 > d1*d1 && d0*d0 > d2*d2) {      // first is largest, fill with first column
-			r2(0) = d0;
-			r2(1) = (R(1,0)+R(0,1))*Precision(0.5);
-			r2(2) = (R(0,2)+R(2,0))*Precision(0.5);
-		} else if (d1*d1 > d2*d2) {                // second is largest, fill with second column
-			r2(0) = (R(1,0)+R(0,1))*Precision(0.5);
-			r2(1) = d1;
-			r2(2) = (R(2,1)+R(1,2))*Precision(0.5);
-		} else {                                   // third is largest, fill with third column
-			r2(0) = (R(0,2)+R(2,0))*Precision(0.5);
-			r2(1) = (R(2,1)+R(1,2))*Precision(0.5);
-			r2(2) = d2;
-		}
-		// flip, if we point in the wrong direction!
-		if (r2.dot(w) < Precision(0))
-			r2 *= Precision(-1);
-		w = r2 * (angle/r2.norm());
-	}
-}
-template <typename Precision>
-inline typename Eigen::SO3<Precision>::Vec3 Eigen::SO3<Precision>::ln() const {
-	Vec3 result;
-	eigen_SO3_ln<Precision>(mat, result);
-	return result;
-}
-
-/// Write an SO3 to a stream
-/// @relates SO3
-template <typename Precision>
-inline std::ostream& operator<<(std::ostream& os, const Eigen::SO3<Precision>& rhs) {
-	return os << rhs.get_matrix();
-}
-/// Read from SO3 to a stream
-/// @relates SO3
-template <typename Precision>
-inline std::istream& operator>>(std::istream& is, Eigen::SO3<Precision>& rhs) {
-	is >> rhs.mat;
-	rhs.coerce();
-	return is;
-}
-
-/// Right-multiply by a Vector
-/// @relates SO3
-template <typename P, int O>
-inline Eigen::Matrix<P,3,1,O> operator*(const Eigen::SO3<P>& lhs, const Eigen::Matrix<P,3,1,O>& rhs) {
-	return lhs.get_matrix() * rhs;
-}
-/// Left-multiply by a Vector
-/// @relates SO3
-template <typename P, int O>
-inline Eigen::Matrix<P,3,1,O> operator*(const Eigen::Matrix<P,3,1,O>& lhs, const Eigen::SO3<P>& rhs) {
-	return lhs * rhs.get_matrix();
-}
-/// Right-multiply by a matrix
-/// @relates SO3
-template <typename P, int C, int O>
-inline Eigen::Matrix<P,3,C,O> operator*(const Eigen::SO3<P>& lhs, const Eigen::Matrix<P,3,C,O>& rhs) {
-	return lhs.get_matrix() * rhs;
-}
-/// Left-multiply by a matrix
-/// @relates SO3
-template <typename P, int R, int O>
-inline Eigen::Matrix<P,R,3,O> operator*(const Eigen::Matrix<P,R,3,O>& lhs, const Eigen::SO3<P>& rhs) {
-	return lhs * rhs.get_matrix();
-}
-/*----------------------------------------------------------------*/
-
-
-/// Exponentiate an angle in the Lie algebra to generate a new SO2.
-template <typename Precision>
-inline void eigen_SO2_exp(const Precision& d, typename Eigen::SO2<Precision>::Mat2& R) {
-	R(0,0) = R(1,1) = cos(d);
-	R(1,0) = sin(d);
-	R(0,1) = -R(1,0);
-}
-template <typename Precision>
-inline typename Eigen::SO2<Precision>::Mat2 Eigen::SO2<Precision>::exp(const Precision& d) const {
-	Mat2 result;
-	eigen_SO2_exp<Precision>(d, result);
-	return result;
-}
-
-/// Extracts the rotation angle from the SO2
-template <typename Precision>
-inline void eigen_SO2_ln(const typename Eigen::SO2<Precision>::Mat2& R, Precision& d) {
-	d = atan2(R(1,0), R(0,0));
-}
-template <typename Precision>
-inline Precision Eigen::SO2<Precision>::ln() const {
-	Precision d;
-	eigen_SO2_ln<Precision>(mat, d);
-	return d;
-}
-
-/// Write an SO2 to a stream
-/// @relates SO2
-template <typename Precision>
-inline std::ostream& operator<<(std::ostream& os, const Eigen::SO2<Precision> & rhs) {
-	return os << rhs.get_matrix();
-}
-/// Read from SO2 to a stream
-/// @relates SO2
-template <typename Precision>
-inline std::istream& operator>>(std::istream& is, Eigen::SO2<Precision>& rhs) {
-	is >> rhs.mat;
-	rhs.coerce();
-	return is;
-}
-
-/// Right-multiply by a Vector
-/// @relates SO2
-template <typename P, int O>
-inline Eigen::Matrix<P,2,1,O> operator*(const Eigen::SO2<P>& lhs, const Eigen::Matrix<P,2,1,O>& rhs) {
-	return lhs.get_matrix() * rhs;
-}
-/// Left-multiply by a Vector
-/// @relates SO2
-template <typename P, int O>
-inline Eigen::Matrix<P,2,1,O> operator*(const Eigen::Matrix<P,2,1,O>& lhs, const Eigen::SO2<P>& rhs) {
-	return lhs * rhs.get_matrix();
-}
-/// Right-multiply by a Matrix
-/// @relates SO2
-template <typename P, int C, int O>
-inline Eigen::Matrix<P,2,C,O> operator*(const Eigen::SO2<P>& lhs, const Eigen::Matrix<P,2,C,O>& rhs) {
-	return lhs.get_matrix() * rhs;
-}
-/// Left-multiply by a Matrix
-/// @relates SO2
-template <typename P, int R, int O>
-inline Eigen::Matrix<P,R,2,O> operator*(const Eigen::Matrix<P,R,2,O>& lhs, const Eigen::SO2<P>& rhs) {
-	return lhs * rhs.get_matrix();
-}
-/*----------------------------------------------------------------*/
-
-namespace Eigen {
-
-template <typename Derived>
-std::istream& operator >> (std::istream& st, MatrixBase<Derived>& m) {
-	for (int i = 0; i < m.rows(); ++i)
-		for (int j = 0; j < m.cols(); ++j)
-			st >> m(i, j);
-	return st;
-}
-
-} // namespace Eigen
-/*----------------------------------------------------------------*/
-
-#endif // _USE_EIGEN
-
-
-// C L A S S  //////////////////////////////////////////////////////
-
 #ifdef _USE_BOOST
 
 namespace boost {
@@ -3847,11 +3562,46 @@ namespace boost {
 		inline void load(Archive& ar, Eigen::Matrix<Scalar,_Rows,_Cols,_Options,_MaxRows,_MaxCols>& M, const unsigned int /*version*/) {
 			ar >> make_nvp("data", make_array(M.data(), _Rows*_Cols));
 		}
-		// The function that causes boost::serialization to look for separate
-		// save() and load() functions when serializing and Eigen matrix.
+		// The function that causes boost::serialization to look for separate save() and load() functions
 		template<class Archive, class Scalar, int _Rows, int _Cols, int _Options, int _MaxRows, int _MaxCols>
 		inline void serialize(Archive& ar, Eigen::Matrix<Scalar,_Rows,_Cols,_Options,_MaxRows,_MaxCols>& M, const unsigned int version) {
 			split_free(ar, M, version);
+		}
+
+		// Serialization support for Eigen::SO2
+		template<class Archive, typename Precision>
+		inline void save(Archive& ar, const Eigen::SO2<Precision>& so, const unsigned int /*version*/) {
+			Precision comp(so.ln());
+			ar << comp;
+		}
+		template<class Archive, typename Precision>
+		inline void load(Archive& ar, Eigen::SO2<Precision>& so, const unsigned int /*version*/) {
+			Precision comp;
+			ar >> comp;
+			so.exp(comp);
+		}
+		// The function that causes boost::serialization to look for separate save() and load() functions
+		template<class Archive, typename Precision>
+		inline void serialize(Archive& ar, Eigen::SO2<Precision>& so, const unsigned int version) {
+			split_free(ar, so, version);
+		}
+
+		// Serialization support for Eigen::SO3
+		template<class Archive, typename Precision>
+		inline void save(Archive& ar, const Eigen::SO3<Precision>& so, const unsigned int /*version*/) {
+			Precision comp(so.ln());
+			ar << comp;
+		}
+		template<class Archive, typename Precision>
+		inline void load(Archive& ar, Eigen::SO3<Precision>& so, const unsigned int /*version*/) {
+			Precision comp;
+			ar >> comp;
+			so.exp(comp);
+		}
+		// The function that causes boost::serialization to look for separate save() and load() functions
+		template<class Archive, typename Precision>
+		inline void serialize(Archive& ar, Eigen::SO3<Precision>& so, const unsigned int version) {
+			split_free(ar, so, version);
 		}
 		#endif // _USE_EIGEN
 

@@ -65,13 +65,14 @@ public:
 
 public:
 	inline Scene(unsigned _nMaxThreads=0)
-		: obb(true), nMaxThreads(Thread::getMaxThreads(_nMaxThreads)) {}
+		: obb(true), transform(Matrix4x4::IDENTITY), nMaxThreads(Thread::getMaxThreads(_nMaxThreads)) {}
 
 	void Release();
 	bool IsValid() const;
 	bool IsEmpty() const;
 	bool ImagesHaveNeighbors() const;
 	bool IsBounded() const { return obb.IsValid(); }
+	bool HasTransform() const { return transform != Matrix4x4::IDENTITY; }
 
 	bool LoadInterface(const String& fileName);
 	bool SaveInterface(const String& fileName, int version=-1) const;

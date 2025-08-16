@@ -50,25 +50,25 @@ namespace SEACAVE { extern int g_nVerbosityLevel; }
 
 #if TD_TIMER == TD_TIMER_OFF
 #define TD_TIMER_START()
-#define TD_TIMER_UPDATE()
+#define TD_TIMER_UPDATE(n)
 #define TD_TIMER_GET() 0
 #define TD_TIMER_GET_INT() 0
 #define TD_TIMER_GET_FMT() String()
 #define TD_TIMER_STARTD()
-#define TD_TIMER_UPDATED()
+#define TD_TIMER_UPDATED(n)
 #endif
 #if TD_TIMER == TD_TIMER_ON
 #define TD_TIMER_START()	TIMER_START()
-#define TD_TIMER_UPDATE()	TIMER_UPDATE()
+#define TD_TIMER_UPDATE(n)	TIMER_UPDATE(n)
 #define TD_TIMER_GET()		TIMER_GET()
 #define TD_TIMER_GET_INT()	TIMER_GET_INT()
 #define TD_TIMER_GET_FMT()	TIMER_GET_FORMAT()
 #if TD_VERBOSE == TD_VERBOSE_OFF
 #define TD_TIMER_STARTD()
-#define TD_TIMER_UPDATED()
+#define TD_TIMER_UPDATED(n)
 #else
 #define TD_TIMER_STARTD()	TIMER_START()
-#define TD_TIMER_UPDATED()	TIMER_UPDATE()
+#define TD_TIMER_UPDATED(n)	TIMER_UPDATE(n)
 #endif
 #endif
 

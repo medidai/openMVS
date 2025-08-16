@@ -2211,7 +2211,7 @@ static bool CanCollapseEdge(Vertex::Halfedge_handle v0v1)
 			t3 = REPLACE_POINT(t3, p0, p1, p_middle);
 			a2 = CGAL::cross_product(t2-t1, t3-t2);
 
-			if ((v_norm(a2) != 0) && (v_angle(a1, a2) > PI/2))
+			if ((v_norm(a2) != 0) && (v_angle(a1, a2) > HALF_PI))
 				return false;
 		}
 	}
@@ -2317,7 +2317,7 @@ static void SplitEdge(Polyhedron& p, Vertex::Halfedge_handle h, int mode=1)
 		const double ratio(0.5);
 		p_midddle = p1 + (p2-p1) * ratio;
 	} else { // projection of the 3rd vertex
-		const double ratio(v_norm(p3-p2) * cos(OppositeAngle(h->next())) / v_norm(p1-p2));
+		const double ratio(v_norm(p3-p2) * COS(OppositeAngle(h->next())) / v_norm(p1-p2));
 		p_midddle = p2 + (p1-p2) * ratio;
 	}
 
@@ -2882,7 +2882,7 @@ static void ComputeVertexLaplacian(Vertex& v)
 
 		float theta_1((float)v_angle(e, e_next));
 		float theta_2((float)v_angle(e, e_prev));
-		float w((tan(theta_1/2)+tan(theta_2/2))/v_norm(e));
+		float w((TAN(theta_1/2)+TAN(theta_2/2))/v_norm(e));
 
 		w_total += w;
 		result_laplacian = result_laplacian + w*e;
@@ -3680,6 +3680,7 @@ Mesh::FIndex Mesh::RemoveDegenerateFaces(unsigned maxIterations, Type thArea) {
 }
 /*----------------------------------------------------------------*/
 
+
 // crop mesh such that none of its faces is touching or outside the given bounding-box
 void Mesh::RemoveFacesOutside(const OBB3f& obb) {
 	ASSERT(obb.IsValid());
@@ -3705,10 +3706,15 @@ void Mesh::RemoveFaces(FaceIdxArr& facesRemove, bool bUpdateLists)
 			if (idxLast == idxF)
 				continue;
 			faces.RemoveAt(idxF);
+			if (!faceNormals.empty())
+				faceNormals.RemoveAt(idxF);
 			if (!faceTexcoords.empty())
 				faceTexcoords.RemoveAt(idxF * 3, 3);
+			if (!faceTexindices.empty())
+				faceTexindices.RemoveAt(idxF);
 			idxLast = idxF;
 		}
+		vertexFaces.Release();
 	} else {
 		ASSERT(vertices.size() == vertexFaces.size());
 		RFOREACHPTR(pIdxF, facesRemove) {
@@ -3739,8 +3745,12 @@ void Mesh::RemoveFaces(FaceIdxArr& facesRemove, bool bUpdateLists)
 				}
 			}
 			faces.RemoveAt(idxF);
+			if (!faceNormals.empty())
+				faceNormals.RemoveAt(idxF);
 			if (!faceTexcoords.empty())
 				faceTexcoords.RemoveAt(idxF * 3, 3);
+			if (!faceTexindices.empty())
+				faceTexindices.RemoveAt(idxF);
 			idxLast = idxF;
 		}
 	}
@@ -3762,8 +3772,8 @@ void Mesh::RemoveVertices(VertexIdxArr& vertexRemove, bool bUpdateLists)
 			if (idxV < idxVM) {
 				// update all faces of the moved vertex
 				const FaceIdxArr& vf(vertexFaces[idxVM]);
-				FOREACHPTR(pIdxF, vf)
-					GetVertex(faces[*pIdxF], idxVM) = idxV;
+				for (const FIndex idxF : vf)
+					GetVertex(faces[idxF], idxVM) = idxV;
 			}
 			vertexFaces.RemoveAt(idxV);
 			vertices.RemoveAt(idxV);
@@ -3780,8 +3790,8 @@ void Mesh::RemoveVertices(VertexIdxArr& vertexRemove, bool bUpdateLists)
 		if (idxV < idxVM) {
 			// update all faces of the moved vertex
 			const FaceIdxArr& vf(vertexFaces[idxVM]);
-			FOREACHPTR(pIdxF, vf)
-				GetVertex(faces[*pIdxF], idxVM) = idxV;
+			for (const FIndex idxF : vf)
+				GetVertex(faces[idxF], idxVM) = idxV;
 		}
 		if (!vertexFaces.empty()) {
 			facesRemove.Join(vertexFaces[idxV]);
@@ -4364,19 +4374,23 @@ Mesh Mesh::SubMesh(const FaceIdxArr& chunk) const
 /*----------------------------------------------------------------*/
 
 // extract one sub-mesh for each texture, i.e. for each value of faceTexindices;
-std::vector<Mesh> Mesh::SplitMeshPerTextureBlob() const {
-
+std::vector<Mesh> Mesh::SplitMeshPerTextureBlob(FaceIdxArr* mapFaceSubsetIndices) const {
 	ASSERT(HasTexture());
 	if (texturesDiffuse.size() == 1)
 		return {*this};
+	if (mapFaceSubsetIndices)
+		mapFaceSubsetIndices->resize(faces.size());
 	ASSERT(faceTexindices.size() == faces.size());
 	std::vector<Mesh> submeshes;
 	submeshes.reserve(texturesDiffuse.size());
 	FOREACH(texId, texturesDiffuse) {
 		FaceIdxArr chunk;
 		FOREACH(idxFace, faceTexindices) {
-			if (faceTexindices[idxFace] == texId)
+			if (faceTexindices[idxFace] == texId) {
+				if (mapFaceSubsetIndices)
+					(*mapFaceSubsetIndices)[idxFace] = chunk.size();
 				chunk.push_back(idxFace);
+			}
 		}
 		Mesh submesh = SubMesh(chunk);
 		submesh.texturesDiffuse.emplace_back(texturesDiffuse[texId]);
@@ -4410,16 +4424,16 @@ bool Mesh::TransferTexture(Mesh& mesh, const FaceIdxArr& faceSubsetIndices, unsi
 		}
 	}
 	Image8U mask(mesh.texturesDiffuse.back().size(), uint8_t(255));
-	const FIndex num_faces(faceSubsetIndices.empty() ? mesh.faces.size() : faceSubsetIndices.size());
+	const FIndex numFaces(faceSubsetIndices.empty() ? mesh.faces.size() : faceSubsetIndices.size());
 	if (vertices == mesh.vertices && faces == mesh.faces) {
 		// the two meshes are identical, only the texture coordinates are different;
 		// directly transfer the texture onto the new coordinates
 		#ifdef MESH_USE_OPENMP
 		#pragma omp parallel for schedule(dynamic)
-		for (int_t i=0; i<(int_t)num_faces; ++i) {
+		for (int_t i=0; i<(int_t)numFaces; ++i) {
 			const FIndex idx((FIndex)i);
 		#else
-		FOREACHRAW(idx, num_faces) {
+		FOREACHRAW(idx, numFaces) {
 		#endif
 			const FIndex idxFace(faceSubsetIndices.empty() ? idx : faceSubsetIndices[idx]);
 			struct RasterTriangle {
@@ -4525,10 +4539,10 @@ bool Mesh::TransferTexture(Mesh& mesh, const FaceIdxArr& faceSubsetIndices, unsi
 		#endif
 		#ifdef MESH_USE_OPENMP
 		#pragma omp parallel for schedule(dynamic)
-		for (int_t i=0; i<(int_t)num_faces; ++i) {
+		for (int_t i=0; i<(int_t)numFaces; ++i) {
 			const FIndex idx((FIndex)i);
 		#else
-		FOREACHRAW(idx, num_faces) {
+		FOREACHRAW(idx, numFaces) {
 		#endif
 			const FIndex idxFace(faceSubsetIndices.empty() ? idx : faceSubsetIndices[idx]);
 			struct RasterTriangle {
@@ -4610,6 +4624,27 @@ bool Mesh::TransferTexture(Mesh& mesh, const FaceIdxArr& faceSubsetIndices, unsi
 	}
 	return true;
 } // TransferTexture
+/*----------------------------------------------------------------*/
+
+// compute the memory size occupied by the mesh (in bytes)
+size_t MVS::Mesh::GetMemorySize() const {
+	if (IsEmpty())
+		return 0;
+	size_t nBytes = vertices.GetMemorySize();
+	nBytes += faces.GetMemorySize();
+	nBytes += vertexNormals.GetMemorySize();
+	nBytes += vertexVertices.GetMemorySize();
+	nBytes += vertexFaces.GetMemorySize();
+	nBytes += vertexBoundary.GetMemorySize();
+	nBytes += faceNormals.GetMemorySize();
+	nBytes += faceFaces.GetMemorySize();
+	nBytes += faceTexcoords.GetMemorySize();
+	nBytes += faceTexindices.GetMemorySize();
+	nBytes += texturesDiffuse.GetMemorySize();
+	for (const Image8U3& textureDiffuse: texturesDiffuse)
+		nBytes += textureDiffuse.memory_size();
+	return nBytes;
+}
 /*----------------------------------------------------------------*/
 
 

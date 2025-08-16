@@ -52,6 +52,7 @@ class MVS_API PointCloud
 {
 public:
 	typedef IDX Index;
+	typedef SEACAVE::cList<Index,Index,0,8,Index> IndexArr;
 
 	typedef TPoint3<float> Point;
 	typedef CLISTDEF0IDX(Point,Index) PointArr;
@@ -96,6 +97,7 @@ public:
 	inline size_t GetSize() const { ASSERT(points.size() == pointViews.size() || pointViews.empty()); return points.size(); }
 
 	void RemovePoint(IDX);
+	void RemovePoints(IndexArr&);
 	void RemovePointsOutside(const OBB3f&);
 	void RemoveMinViews(uint32_t thMinViews);
 

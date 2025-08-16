@@ -24,10 +24,10 @@ public:
 	CImageBMP();
 	virtual ~CImageBMP();
 
-	HRESULT		ReadHeader();
-	HRESULT		ReadData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
-	HRESULT		WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
-	HRESULT		WriteData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
+	bool		ReadHeader();
+	bool		ReadData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
+	bool		WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
+	bool		WriteData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
 }; // class CImageBMP
 /*----------------------------------------------------------------*/
 

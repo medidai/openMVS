@@ -57,9 +57,10 @@ public:
 	template <typename CTYPE>
 	inline TOBB(const TOBB<CTYPE, DIMS>&);
 
+	inline void Reset();
 	inline void Set(const AABB&); // build from AABB
 	inline void Set(const MATRIX& rot, const POINT& ptMin, const POINT& ptMax); // build from rotation matrix from world to local, and local min/max corners
-	inline void Set(const POINT* pts, size_t n); // build from points
+	inline void Set(const POINT* pts, size_t n, int k = 0); // build from points; if k (number of nearest neighbors) set, filter and use only surface points
 	inline void Set(const POINT* pts, size_t n, const TRIANGLE* tris, size_t s); // build from triangles
 	inline void Set(const MATRIX& C, const POINT* pts, size_t n); // build from covariance matrix
 	inline void SetRotation(const MATRIX& C); // build rotation only from covariance matrix
@@ -89,6 +90,9 @@ public:
 	inline TYPE GetVolume() const;
 
 	bool Intersects(const POINT&) const;
+
+    static std::vector<TYPE> ComputeSurfacePointsScores(const POINT* pts, size_t n, int k = 32);
+	static std::vector<POINT> FilterSurfacePoints(const POINT* pts, size_t n, int k = 32, TYPE percentile = 0.1);
 
 	inline TYPE& operator [] (BYTE i) { ASSERT(i<numScalar); return m_rot.data()[i]; }
 	inline TYPE operator [] (BYTE i) const { ASSERT(i<numScalar); return m_rot.data()[i]; }

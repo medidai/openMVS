@@ -55,6 +55,8 @@ void Scene::Release()
 	images.Release();
 	pointcloud.Release();
 	mesh.Release();
+	obb.Reset();
+	transform = Matrix4x4f::IDENTITY;
 }
 
 bool Scene::IsValid() const
@@ -1536,7 +1538,7 @@ bool Scene::ExportLinesPLY(const String& fileName, const CLISTDEF0IDX(Line3f,uin
 		v.x = line.pt2.x(); v.y = line.pt2.y(); v.z = line.pt2.z();
 		ply.put_element(&v);
 	}
-	
+
 	// describe what properties go into the edge elements
 	if (colors) {
 		ply.describe_property("edge", 5, edge_props);
@@ -1555,7 +1557,7 @@ bool Scene::ExportLinesPLY(const String& fileName, const CLISTDEF0IDX(Line3f,uin
 			ply.put_element(&edge);
 		}
 	}
-	
+
 	// write to file
 	return ply.header_complete();
 } // ExportLinesPLY
@@ -2357,12 +2359,12 @@ bool Scene::ComputeTowerCylinder(Point2f& centerPoint, float& fRadius, float& fR
 			if (pz < fMinPointsZ)
 				fMinPointsZ = pz;
 			if (pz > fMaxPointsZ)
-				fMaxPointsZ = pz;			
+				fMaxPointsZ = pz;
 		}
 	}
 	zMin = MINF(zMin, fMinPointsZ);
 	zMax = MAXF(aabbOutsideCameras.ptMax.z(), fMaxPointsZ);
-	
+
 	// calculate tower radius as median distance from tower center to cameras
 	FloatArr cameraDistancesToMiddle(cameras2D.size());
 	FOREACH (camIdx, cameras2D)
@@ -2392,7 +2394,7 @@ size_t Scene::DrawCircle(PointCloud& pc, PointCloud::PointArr& outCircle, const 
 	for (unsigned pIdx = 0; pIdx < nTargetPoints; ++pIdx) {
 		const float fAngle(fStartAngle + fAngleBetweenPoints * pIdx);
 		ASSERT(fAngle <= FTWO_PI);
-		const Normal n(cos(fAngle), sin(fAngle), 0);
+		const Normal n(COS(fAngle), SIN(fAngle), 0);
 		ASSERT(ISEQUAL(norm(n), 1.f), "Norm = ", norm(n));
 		const Point3f newPoint(circleCenter + circleRadius * n);
 		// select cameras seeing this point
@@ -2428,8 +2430,8 @@ PointCloud Scene::BuildTowerMesh(const PointCloud& origPointCloud, const Point2f
 	PointCloud::PointArr circlePoints;
 	Mesh::VertexVerticesArr meshCircles;
 	if (bFixRadius) {
-		const unsigned nTargetPoints(MAX(10, ROUND2INT(FTWO_PI * fRadius * nTargetDensity))); // how many points on each circle
-		const float fAngleBetweenPoints(FTWO_PI / nTargetPoints); // the angle between neighbor points on the circle	
+		const unsigned nTargetPoints(MAXF(10, ROUND2INT(FTWO_PI * fRadius * nTargetDensity))); // how many points on each circle
+		const float fAngleBetweenPoints(FTWO_PI / nTargetPoints); // the angle between neighbor points on the circle
 		for (unsigned cIdx = 0; cIdx < nTargetCircles; ++cIdx) {
 			const Point3f circleCenter(centerPoint, zMin + fCircleFrequence * cIdx); // center point of the circle
 			const float fStartAngle(fAngleBetweenPoints * SEACAVE::random()); // starting angle for the first point
@@ -2474,8 +2476,8 @@ PointCloud Scene::BuildTowerMesh(const PointCloud& origPointCloud, const Point2f
 			} else {
 				if (pDistances.size() > 2) {
 					pDistances.Sort();
-					const size_t topIdx(MIN(pDistances.size() - 1, CEIL2INT<size_t>(pDistances.size() * 0.95f)));
-					const size_t botIdx(MAX(1u, FLOOR2INT<unsigned>(pDistances.size() * 0.5f)));
+					const size_t topIdx(MINF(pDistances.size() - 1, CEIL2INT<size_t>(pDistances.size() * 0.95f)));
+					const size_t botIdx(MAXF(1u, FLOOR2INT<unsigned>(pDistances.size() * 0.5f)));
 					float avgTopDistance(0);
 					for (size_t i = botIdx; i < topIdx; ++i)
 						avgTopDistance += pDistances[i];
@@ -2509,7 +2511,7 @@ PointCloud Scene::BuildTowerMesh(const PointCloud& origPointCloud, const Point2f
 			float circleRadius(circleRadii[rIdx]);
 			const float circleZ(zMax - fCircleFrequence * rIdx);
 			const Point3f circleCenter(centerPoint, circleZ); // center point of the circle
-			const unsigned nTargetPoints(MAX(10, ROUND2INT(FTWO_PI * circleRadius * nTargetDensity))); // how many points on each circle
+			const unsigned nTargetPoints(MAXF(10, ROUND2INT(FTWO_PI * circleRadius * nTargetDensity))); // how many points on each circle
 			const float fAngleBetweenPoints(FTWO_PI / nTargetPoints); // the angle between neighbor points on the circle
 			const float fStartAngle(fAngleBetweenPoints * SEACAVE::random()); // starting angle for the first point
 			DrawCircle(towerPC, circlePoints, circleCenter, circleRadius, nTargetPoints, fStartAngle, fAngleBetweenPoints);
@@ -2527,7 +2529,7 @@ PointCloud Scene::BuildTowerMesh(const PointCloud& origPointCloud, const Point2f
 			}
 		}
 	}
-	
+
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	if (VERBOSITY_LEVEL > 2) {
 		// Build faces from meshCircles

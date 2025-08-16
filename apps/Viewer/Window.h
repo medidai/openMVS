@@ -1,7 +1,7 @@
 /*
  * Window.h
  *
- * Copyright (c) 2014-2015 SEACAVE
+ * Copyright (c) 2014-2025 SEACAVE
  *
  * Author(s):
  *
@@ -29,69 +29,62 @@
  *      containing it.
  */
 
-#ifndef _VIEWER_WINDOW_H_
-#define _VIEWER_WINDOW_H_
-
-
-// I N C L U D E S /////////////////////////////////////////////////
+#pragma once
 
 #include "Camera.h"
-#include "Image.h"
-
-
-// D E F I N E S ///////////////////////////////////////////////////
-
-
-// S T R U C T S ///////////////////////////////////////////////////
+#include "ArcballControls.h"
+#include "FirstPersonControls.h"
+#include "SelectionController.h"
+#include "Renderer.h"
+#include "UI.h"
 
 namespace VIEWER {
 
-class Window
-{
+// Forward declarations
+class Scene;
+
+class Window {
 public:
-	GLFWwindow* window; // window handle
-	Camera camera; // current camera
-	Eigen::Vector2d pos, prevPos; // current and previous mouse position (normalized)
-	Eigen::Matrix4d transform; // view matrix corresponding to the currently selected image
-	cv::Size size; // resolution in pixels, sometimes not equal to window resolution, ex. on Retina display
-	double sizeScale; // window/screen resolution scale
-
-	enum INPUT : unsigned {
-		INP_NA = 0,
-		INP_MOUSE_LEFT    = (1 << 0),
-		INP_MOUSE_MIDDLE  = (1 << 1),
-		INP_MOUSE_RIGHT   = (1 << 2),
+	enum ControlMode {
+		CONTROL_ARCBALL,
+		CONTROL_FIRST_PERSON,
+		CONTROL_SELECTION,
+		CONTROL_NONE
 	};
-	Flags inputType;
 
-	enum SPARSE {
-		SPR_NONE   = 0,
-		SPR_POINTS = (1 << 0),
-		SPR_LINES  = (1 << 1),
-		SPR_ALL    = SPR_POINTS|SPR_LINES
-	};
-	SPARSE sparseType;
-	unsigned minViews;
-	float pointSize;
-	float cameraBlend;
-	bool bRenderCameras;
-	bool bRenderCameraTrajectory;
-	bool bRenderImageVisibility;
-	bool bRenderViews;
-	bool bRenderSolid;
-	bool bRenderTexture;
-	bool bRenderBounds;
+private:
+	GLFWwindow* window;
+	String title;
 
-	enum COLORSOURCE {
-		COL_IMAGE = 0,
-		COL_DEPTH,
-		COL_CONFIDENCE,
-		COL_COMPOSITE,
-		COL_NORMAL
-	};
-	COLORSOURCE colorSource;
-	float colorThreshold;
+	#ifdef _MSC_VER
+	// Cached Windows icon handles
+	HICON hIconBig;
+	HICON hIconSmall;
+	#endif
 
+	// Device pixel ratio for Retina/high-DPI displays
+	Eigen::Vector2d devicePixelRatio;
+
+	// Core systems
+	Camera camera;
+	std::unique_ptr<ArcballControls> arcballControls;
+	std::unique_ptr<FirstPersonControls> firstPersonControls;
+	std::unique_ptr<SelectionController> selectionController;
+	std::unique_ptr<Renderer> renderer;
+	std::unique_ptr<UI> ui;
+
+	// Control mode
+	ControlMode currentControlMode;
+
+	// Input state
+	Eigen::Vector2d lastMousePos;
+	bool firstMouse;
+
+	// Timing
+	double lastFrame;
+
+public:
+	// Selection state
 	enum SELECTION {
 		SEL_NA = 0,
 		SEL_POINT,
@@ -101,76 +94,97 @@ public:
 	SELECTION selectionType;
 	Point3f selectionPoints[4];
 	double selectionTimeClick, selectionTime;
-	IDX selectionIdx;
+	IDX selectionIdx; // Index of selected point/triangle/camera (NO_ID if none) (if camera, the index is in the Viewer scene images)
+	MVS::IIndex selectedNeighborCamera; // Index of neighbor camera to highlight (NO_ID if none) (index is in the Viewer scene images)
 
-	typedef DELEGATE<bool (LPCTSTR, LPCTSTR)> ClbkOpenScene;
-	ClbkOpenScene clbkOpenScene;
-	typedef DELEGATE<bool (LPCTSTR, bool)> ClbkSaveScene;
-	ClbkSaveScene clbkSaveScene;
-	typedef DELEGATE<bool (LPCTSTR, LPCTSTR)> ClbkExportScene;
-	ClbkExportScene clbkExportScene;
-	typedef DELEGATE<void (void)> ClbkCenterScene;
-	ClbkCenterScene clbkCenterScene;
-	typedef DELEGATE<void (const Ray3&, int)> ClbkRayScene;
-	ClbkRayScene clbkRayScene;
-	typedef DELEGATE<void (void)> ClbkCompilePointCloud;
-	ClbkCompilePointCloud clbkCompilePointCloud;
-	typedef DELEGATE<void (void)> ClbkCompileMesh;
-	ClbkCompileMesh clbkCompileMesh;
-	typedef DELEGATE<void (void)> ClbkCompileBounds;
-	ClbkCompileBounds clbkCompileBounds;
-	typedef DELEGATE<void (void)> ClbkTogleSceneBox;
-	ClbkTogleSceneBox clbkTogleSceneBox;
-	typedef DELEGATE<void (void)> ClbkCropToBounds;
-	ClbkCropToBounds clbkCropToBounds;
-
-	typedef std::unordered_map<GLFWwindow*,Window*> WindowsMap;
-	static WindowsMap g_mapWindows;
+	// Settings
+	Eigen::Vector4f clearColor;
+	MVS::IIndex minViews;
+	float pointSize;
+	float pointNormalLength;
+	float imageOverlayOpacity;
+	bool renderOnlyOnChange;
+	bool showCameras;
+	bool showPointCloud;
+	bool showPointCloudNormals;
+	bool showMesh;
+	bool showMeshWireframe;
+	bool showMeshTextured;
+	std::vector<bool> meshSubMeshVisible; // Control visibility of individual sub-meshes (using unsigned char instead of bool for ImGui compatibility)
 
 public:
 	Window();
 	~Window();
 
+	bool Initialize(const cv::Size& size, const String& title, Scene& scene);
 	void Release();
-	void ReleaseClbk();
+	void ResetView();
+	void Reset();
 	inline bool IsValid() const { return window != NULL; }
 
-	inline GLFWwindow* GetWindow() { return window; }
+	// Main loop
+	void Run();
+	bool ShouldClose() const;
+	void SwapBuffers();
+	void PollEvents();
 
-	bool Init(const cv::Size&, LPCTSTR name);
-	void SetCamera(const Camera&);
-	void SetName(LPCTSTR);
-	void SetVisible(bool);
-	bool IsVisible() const;
-	void Reset(SPARSE sparseType=SPR_ALL, unsigned minViews=2);
+	// Rendering
+	void UploadRenderData();
+	void Render();
 
-	void CenterCamera(const Point3&);
+	// Camera access
+	Camera& GetCamera() { return camera; }
+	const Camera& GetCamera() const { return camera; }
 
-	void UpdateView(const ImageArr&, const MVS::ImageArr&);
-	void UpdateView(const Eigen::Matrix3d& R, const Eigen::Vector3d& t);
-	void UpdateMousePosition(double xpos, double ypos);
+	// Control access
+	ControlMode GetControlMode() const { return currentControlMode; }
+	void SetControlMode(ControlMode mode);
+	ArcballControls& GetArcballControls() const { return *arcballControls; }
+	FirstPersonControls& GetFirstPersonControls() { return *firstPersonControls; }
+	SelectionController& GetSelectionController() const { return *selectionController; }
 
-	cv::Size GetSize() const;
-	void Resize(const cv::Size&);
-	static void Resize(GLFWwindow* window, int width, int height);
-	void Key(int k, int scancode, int action, int mod);
-	static void Key(GLFWwindow* window, int k, int scancode, int action, int mod);
-	void MouseButton(int button, int action, int mods);
-	static void MouseButton(GLFWwindow* window, int button, int action, int mods);
-	void MouseMove(double xpos, double ypos);
-	static void MouseMove(GLFWwindow* window, double xpos, double ypos);
-	void Scroll(double xoffset, double yoffset);
-	static void Scroll(GLFWwindow* window, double xoffset, double yoffset);
-	void Drop(int count, const char** paths);
-	static void Drop(GLFWwindow* window, int count, const char** paths);
+	// Renderer access
+	Renderer& GetRenderer() { return *renderer; }
+	const Renderer& GetRenderer() const { return *renderer; }
 
-protected:
-	bool IsShiftKeyPressed() const;
-	bool IsCtrlKeyPressed() const;
-	bool IsAltKeyPressed() const;
+	// UI access
+	UI& GetUI() { return *ui; }
+	const UI& GetUI() const { return *ui; }
+
+	// Utility
+	void SetTitle(const String& title);
+	void SetVisible(bool visible);
+	void RequestAttention(); // Request window attention (flash in taskbar)
+	void Focus(); // Bring window to front and give it focus
+	const cv::Size& GetSize() const { return camera.GetSize(); }
+	void SetSceneBounds(const Point3f& center, const Point3f& size);
+	GLFWwindow* GetGLFWWindow() const { return window; }
+	Scene& GetScene() const { return GetScene(window); }
+	static Scene& GetScene(GLFWwindow* window);
+	static void RequestRedraw(); // Post an event to trigger redraw
+
+	// Cursor visibility helpers
+	static void SetCursorVisible(bool visible);
+
+private:
+	// GLFW callbacks
+	static void FramebufferSizeCallback(GLFWwindow* window, int width, int height);
+	static void MouseCallback(GLFWwindow* window, double xpos, double ypos);
+	static void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+	static void ScrollCallback(GLFWwindow* window, double xoffset, double yoffset);
+	static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
+	static void DropCallback(GLFWwindow* window, int count, const char** paths);
+
+	void HandleMouseMove(double xpos, double ypos);
+	void HandleMouseButton(int button, int action, int mods);
+	void HandleScroll(double yoffset);
+	void HandleKeyboard(int key, int action, int mods);
+	void HandleFileDrop(int count, const char** paths);
+
+	double UpdateTiming();
+	void UpdateDevicePixelRatio();
+	Eigen::Vector2d NormalizeMousePos(double x, double y) const;
 };
 /*----------------------------------------------------------------*/
 
 } // namespace VIEWER
-
-#endif // _VIEWER_WINDOW_H_

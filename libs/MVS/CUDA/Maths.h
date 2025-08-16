@@ -85,88 +85,88 @@ inline float rsqrtf(float x) {
 #endif
 
 // CUDA helper math functions
-inline __host__ __device__ float2 make_float2(float s) {
+__host__ __device__ inline float2 make_float2(float s) {
 	return make_float2(s, s);
 }
-inline __host__ __device__ float2 make_float2(int2 a) {
+__host__ __device__ inline float2 make_float2(int2 a) {
 	return make_float2(float(a.x), float(a.y));
 }
-inline __host__ __device__ float3 make_float3(int3 a) {
+__host__ __device__ inline float3 make_float3(int3 a) {
 	return make_float3(float(a.x), float(a.y), float(a.z));
 }
 inline __device__ __host__ int clamp(int f, int a, int b) {
 	return max(a, min(f, b));
 }
-inline __host__ __device__ float2 operator-(float2& a) {
+__host__ __device__ inline float2 operator-(float2& a) {
 	return make_float2(-a.x, -a.y);
 }
-inline __host__ __device__ int2 operator-(int2& a) {
+__host__ __device__ inline int2 operator-(int2& a) {
 	return make_int2(-a.x, -a.y);
 }
-inline __host__ __device__ float3 operator-(float3& a) {
+__host__ __device__ inline float3 operator-(float3& a) {
 	return make_float3(-a.x, -a.y, -a.z);
 }
-inline __host__ __device__ int3 operator-(int3& a) {
+__host__ __device__ inline int3 operator-(int3& a) {
 	return make_int3(-a.x, -a.y, -a.z);
 }
-inline __host__ __device__ int3 operator-(int3 a, int b) {
+__host__ __device__ inline int3 operator-(int3 a, int b) {
 	return make_int3(a.x - b, a.y - b, a.z - b);
 }
-inline __host__ __device__ float2 operator-(float2 a, float2 b) {
+__host__ __device__ inline float2 operator-(float2 a, float2 b) {
 	return make_float2(a.x - b.x, a.y - b.y);
 }
-inline __host__ __device__ float3 operator-(float3 a, float b) {
+__host__ __device__ inline float3 operator-(float3 a, float b) {
 	return make_float3(a.x - b, a.y - b, a.z - b);
 }
-inline __host__ __device__ float3 operator-(float3 a, float3 b) {
+__host__ __device__ inline float3 operator-(float3 a, float3 b) {
 	return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
-inline __host__ __device__ float2 operator+(float2 a, float b) {
+__host__ __device__ inline float2 operator+(float2 a, float b) {
 	return make_float2(a.x + b, a.y + b);
 }
-inline __host__ __device__ float3 operator+(float3 a, float b) {
+__host__ __device__ inline float3 operator+(float3 a, float b) {
 	return make_float3(a.x + b, a.y + b, a.z + b);
 }
-inline __host__ __device__ int2 operator+(int2 a, int2 b) {
+__host__ __device__ inline int2 operator+(int2 a, int2 b) {
 	return make_int2(a.x + b.x, a.y + b.y);
 }
-inline __host__ __device__ int3 operator+(int3 a, int3 b) {
+__host__ __device__ inline int3 operator+(int3 a, int3 b) {
 	return make_int3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
-inline __host__ __device__ float3 operator+(float3 a, float3 b) {
+__host__ __device__ inline float3 operator+(float3 a, float3 b) {
 	return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
-inline __host__ __device__ float2 operator*(float2 a, float b) {
+__host__ __device__ inline float2 operator*(float2 a, float b) {
 	return make_float2(a.x * b, a.y * b);
 }
-inline __host__ __device__ float3 operator*(float3 a, float b) {
+__host__ __device__ inline float3 operator*(float3 a, float b) {
 	return make_float3(a.x * b, a.y * b, a.z * b);
 }
-inline __host__ __device__ float2 operator/(float2 a, float b) {
+__host__ __device__ inline float2 operator/(float2 a, float b) {
 	return make_float2(a.x / b, a.y / b);
 }
-inline __host__ __device__ float3 operator/(float3 a, float b) {
+__host__ __device__ inline float3 operator/(float3 a, float b) {
 	return make_float3(a.x / b, a.y / b, a.z / b);
 }
-inline __host__ __device__ float dot(float2 a, float2 b) {
+__host__ __device__ inline float dot(float2 a, float2 b) {
 	return a.x * b.x + a.y * b.y;
 }
-inline __host__ __device__ float dot(float3 a, float3 b) {
+__host__ __device__ inline float dot(float3 a, float3 b) {
 	return a.x * b.x + a.y * b.y + a.z * b.z;
 }
-inline __host__ __device__ float length(float2 v) {
+__host__ __device__ inline float length(float2 v) {
 	return sqrtf(dot(v, v));
 }
-inline __host__ __device__ float length(float3 v) {
+__host__ __device__ inline float length(float3 v) {
 	return sqrtf(dot(v, v));
 }
-inline __host__ __device__ float2 normalize(float2 v) {
+__host__ __device__ inline float2 normalize(float2 v) {
 	return v * rsqrtf(dot(v, v));
 }
-inline __host__ __device__ float3 normalize(float3 v) {
+__host__ __device__ inline float3 normalize(float3 v) {
 	return v * rsqrtf(dot(v, v));
 }
-inline __host__ __device__ float3 cross(float3 a, float3 b) {
+__host__ __device__ inline float3 cross(float3 a, float3 b) {
 	return make_float3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
 }
 /*----------------------------------------------------------------*/
@@ -177,8 +177,10 @@ namespace MVS {
 namespace CUDA {
 
 // common point and matrix types
-typedef Eigen::Matrix<int, 2, 1> Point2i;
-typedef Eigen::Matrix<int, 3, 1> Point3i;
+typedef Eigen::Matrix<int32_t, 2, 1> Point2i;
+typedef Eigen::Matrix<int32_t, 3, 1> Point3i;
+typedef Eigen::Matrix<uint32_t, 2, 1> Point2u;
+typedef Eigen::Matrix<uint32_t, 3, 1> Point3u;
 typedef Eigen::Matrix<float, 2, 1> Point2;
 typedef Eigen::Matrix<float, 3, 1> Point3;
 typedef Eigen::Matrix<float, 4, 1> Point4;
@@ -239,31 +241,22 @@ __device__ inline Point3i FloorToInt3(const Point3& v) {
 
 
 template <typename T>
-__device__ constexpr T Square(const T x) {
+__host__ __device__ constexpr T Square(const T x) {
 	return x * x;
 }
 
 template <typename T>
-__device__ constexpr void Swap(T& a, T& b) {
+__host__ __device__ constexpr void Swap(T& a, T& b) {
 	const T c(a);
 	a = b;
 	b = c;
 }
 
-// mod is always positive, whereas % is the remainder, which can be positive or negative
-template <typename T>
-__device__ T inline Mod(T a, T b) {
-	const T result = a % b;
-	if (result < 0)
-		return result + b;
-	return result;
-}
-
 // linear interpolation
-inline __device__ __host__ float lerp(float a, float b, float t) {
+__host__ __device__ inline float lerp(float a, float b, float t) {
 	return a + (b-a) * t;
 }
-inline __device__ __host__ Point3 lerp(Point3 a, Point3 b, float t) {
+__host__ __device__ inline Point3 lerp(Point3 a, Point3 b, float t) {
 	return a + (b-a) * t;
 }
 
@@ -283,24 +276,24 @@ inline __device__ Point3i GetThreadIndex3() {
 #endif
 
 // convert 2D to 1D coordinates and back
-__device__ inline int Point2Idx(const Point2i& p, int width) {
+__host__ __device__ inline int Point2Idx(const Point2i& p, int width) {
 	return p.y() * width + p.x();
 }
-__device__ inline int Point2Idx(int stride, const Point2i& pixel, int numChannels = 1) {
+__host__ __device__ inline int Point2Idx(int stride, const Point2i& pixel, int numChannels = 1) {
 	return pixel.y() * stride + pixel.x() * numChannels;
 }
-__device__ inline int Point2Idx(int width, int channels, const Point2i& pixel) {
+__host__ __device__ inline int Point2Idx(int width, int channels, const Point2i& pixel) {
 	return pixel.y() * (width * channels) + pixel.x() * channels;
 }
-__device__ inline Point2i Idx2Point(int idx, int width) {
+__host__ __device__ inline Point2i Idx2Point(int idx, int width) {
 	return Point2i(idx % width, idx / width);
 }
 
 // check if a pixel is inside the image
-__device__ inline bool IsInImage(const int x, const int y, const int width, const int height) {
+__host__ __device__ inline bool IsInImage(const int x, const int y, const int width, const int height) {
 	return x >= 0 && y >= 0 && x < width && y < height;
 }
-__device__ inline bool IsInImage(const Point2i& pixel, const Point2i& size) {
+__host__ __device__ inline bool IsInImage(const Point2i& pixel, const Point2i& size) {
 	return pixel.x() >= 0 && pixel.y() >= 0 && pixel.x() < size.x() && pixel.y() < size.y();
 }
 /*----------------------------------------------------------------*/

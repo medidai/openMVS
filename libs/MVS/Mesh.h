@@ -113,6 +113,14 @@ public:
 			octree.ResetItems();
 		}
 	};
+	struct FacesInserterAABB : FacesInserter {
+		Box aabb;
+		FacesInserterAABB(FaceIdxArr& _cameraFaces, const Box& _aabb)
+			: FacesInserter(_cameraFaces), aabb(_aabb) {}
+		inline bool Intersects(const typename Octree::POINT_TYPE& center, typename Octree::Type radius) const {
+			return aabb.Intersects(Box(center, radius));
+		}
+	};
 
 	struct FaceChunk {
 		FaceIdxArr faces;
@@ -197,7 +205,7 @@ public:
 	void RemoveVertices(VertexIdxArr& vertexRemove, bool bUpdateLists=false);
 	VIndex RemoveDuplicatedVertices(VertexIdxArr* duplicatedVertices=NULL);
 	VIndex RemoveUnreferencedVertices(bool bUpdateLists=false);
-	std::vector<Mesh> SplitMeshPerTextureBlob() const;
+	std::vector<Mesh> SplitMeshPerTextureBlob(FaceIdxArr* mapFaceSubsetIndices = NULL) const;
 	void ConvertTexturePerVertex(Mesh&) const;
 
 	TexIndex GetFaceTextureIndex(FIndex idxF) const { return faceTexindices.empty() ? 0 : faceTexindices[idxF]; }
@@ -239,6 +247,8 @@ public:
 	Mesh SubMesh(const FaceIdxArr& faces) const;
 
 	bool TransferTexture(Mesh& mesh, const FaceIdxArr& faceSubsetIndices={}, unsigned borderSize=3, unsigned textureSize=4096);
+
+	size_t GetMemorySize() const;
 
 	// file IO
 	bool Load(const String& fileName);

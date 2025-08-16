@@ -591,7 +591,7 @@ float DepthEstimator::ScorePixelImage(const DepthData::ViewData& image1, Depth d
 		}
 	}
 	ASSERT(ISFINITE(score));
-	return MIN(2.f, score);
+	return MINF(2.f, score);
 }
 
 // compute pixel's NCC score
@@ -1691,7 +1691,7 @@ void MVS::EstimateConfidenceFromDepth(const DepthData& depthData, ConfidenceMap&
 						depthDiffValues.push_back(ABS(depth-depthN));
 					}
 			depthDiffValues.Sort();
-			const int s = MIN(n, (int)depthDiffValues.size());
+			const int s = MINF(n, (int)depthDiffValues.size());
 			float confidenceDiff = 0;
 			for (int k = 0; k < s; k++)
 				confidenceDiff += depthDiffValues[k]/depthDiffValues.size();

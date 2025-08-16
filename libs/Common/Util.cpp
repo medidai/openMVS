@@ -9,6 +9,9 @@
 #include "Util.h"
 #ifdef _MSC_VER
 #include <Shlobj.h>
+#if defined(NTDDI_VERSION) && NTDDI_VERSION >= NTDDI_VISTA
+#include <KnownFolders.h>
+#endif
 #ifndef _USE_WINSDKOS
 #define _USE_WINSDKOS
 #include <VersionHelpers.h>
@@ -67,32 +70,97 @@ const Flags Util::ms_CPUFNC(InitCPU());
 String Util::getHomeFolder()
 {
 	#ifdef _MSC_VER
+	// Use SHGetKnownFolderPath for Windows Vista+ (more modern and reliable)
+	#if defined(NTDDI_VERSION) && NTDDI_VERSION >= NTDDI_VISTA
+	PWSTR pszPath = NULL;
+	if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Profile, 0, NULL, &pszPath))) {
+		String dir(toString(pszPath) + PATH_SEPARATOR);
+		CoTaskMemFree(pszPath);
+		return ensureUnifySlash(dir);
+	}
+	#endif
+	// Fallback to legacy API for older Windows versions
 	TCHAR homedir[MAX_PATH];
-	if (SHGetSpecialFolderPath(0, homedir, CSIDL_PROFILE, TRUE) != TRUE)
-		return String();
+	if (SHGetSpecialFolderPath(0, homedir, CSIDL_PROFILE, TRUE) == TRUE) {
+		String dir(String(homedir) + PATH_SEPARATOR);
+		return ensureUnifySlash(dir);
+	}
+	// Final fallback: try environment variable
+	TCHAR* userProfile = _tgetenv(_T("USERPROFILE"));
+	if (userProfile != NULL) {
+		String dir(String(userProfile) + PATH_SEPARATOR);
+		return ensureUnifySlash(dir);
+	}
 	#else
-	const char *homedir;
-	if ((homedir = getenv("HOME")) == NULL)
-		homedir = getpwuid(getuid())->pw_dir;
+	// Unix-like systems (Linux, macOS, etc.)
+	// First try environment variable
+	const char *homedir = getenv("HOME");
+	if (homedir != NULL && homedir[0] != '\0') {
+		String dir(String(homedir) + PATH_SEPARATOR);
+		return ensureUnifySlash(dir);
+	}
+	// Fallback to getpwuid() with error checking
+	struct passwd *pw = getpwuid(getuid());
+	if (pw != NULL && pw->pw_dir != NULL && pw->pw_dir[0] != '\0') {
+		String dir(String(pw->pw_dir) + PATH_SEPARATOR);
+		return ensureUnifySlash(dir);
+	}
+	// Last resort fallbacks
+	#ifdef __APPLE__
+	// On macOS, try /Users/<username>
+	const char* username = getenv("USER");
+	if (username != NULL && username[0] != '\0') {
+		String dir(String("/Users/") + String(username) + PATH_SEPARATOR);
+		return ensureUnifySlash(dir);
+	}
+	#endif
 	#endif // _MSC_VER
-	String dir(String(homedir) + PATH_SEPARATOR);
-	return ensureUnifySlash(dir);
+	// If all else fails, return empty string
+	return String();
 }
 
 String Util::getApplicationFolder()
 {
+	const auto AddAppName = [](const String& dir) -> String {
+		// Append application name to the directory
+		String path = dir + PATH_SEPARATOR + _T("OpenMVS");
+		ensureValidFolderPath(path);
+		ensureFolder(path);
+		return path;
+	};
 	#ifdef _MSC_VER
+	// Use SHGetKnownFolderPath for Windows Vista+ (more modern and reliable)
+	#if defined(NTDDI_VERSION) && NTDDI_VERSION >= NTDDI_VISTA
+	PWSTR pszPath = NULL;
+	if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &pszPath))) {
+		String dir(toString(pszPath));
+		CoTaskMemFree(pszPath);
+		return AddAppName(dir);
+	}
+	#endif
+	// Fallback to legacy API for older Windows versions
 	TCHAR appdir[MAX_PATH];
-	if (SHGetSpecialFolderPath(0, appdir, CSIDL_APPDATA, TRUE) != TRUE)
-		return String();
-	String dir(String(appdir) + PATH_SEPARATOR);
+	if (SHGetSpecialFolderPath(0, appdir, CSIDL_APPDATA, TRUE) == TRUE)
+		return AddAppName(appdir);
+	// Final fallback: try environment variable
+	TCHAR* appData = _tgetenv(_T("APPDATA"));
+	if (appData != NULL)
+		return AddAppName(appData);
 	#else
-	const char *homedir;
-	if ((homedir = getenv("HOME")) == NULL)
-		homedir = getpwuid(getuid())->pw_dir;
-	String dir(String(homedir) + PATH_SEPARATOR + String(_T(".config")) + PATH_SEPARATOR);
+	// Unix-like systems (Linux, macOS, etc.)
+	String homeDir = getHomeFolder();
+	if (!homeDir.empty()) {
+		#ifdef __APPLE__
+		// macOS: use ~/Library/Application Support/
+		return AddAppName(homeDir + String(_T("Library")) + PATH_SEPARATOR + String(_T("Application Support")));
+		#else
+		// Linux and other Unix: use ~/.config/ (XDG Base Directory Specification)
+		return AddAppName(homeDir + String(_T(".config")));
+		#endif
+	}
 	#endif // _MSC_VER
-	return ensureUnifySlash(dir);
+	// Fallback: return home directory if specific app folder detection fails
+	return getHomeFolder();
 }
 
 String Util::getCurrentFolder()
@@ -527,13 +595,13 @@ bool OSSupportsAVX()
 // print details about the current build and PC
 void Util::LogBuild()
 {
-	LOG(_T("OpenMVS %s v%u.%u.%u"),
+	LOG(_T("OpenMVS %s v" OpenMVS_VERSION),
 		#ifdef _ENVIRONMENT64
-		_T("x64"),
+		_T("x64")
 		#else
-		_T("x32"),
+		_T("x32")
 		#endif
-		OpenMVS_MAJOR_VERSION, OpenMVS_MINOR_VERSION, OpenMVS_PATCH_VERSION);
+	);
 	#if TD_VERBOSE == TD_VERBOSE_OFF
 	LOG(_T("Build date: ") __DATE__);
 	#else
@@ -624,14 +692,19 @@ Util::MemoryInfo Util::GetMemoryInfo()
 	#elif defined(__APPLE__)                // mac
 
 	int mib[2] ={CTL_HW, HW_MEMSIZE};
-	u_int namelen = sizeof(mib) / sizeof(mib[0]);
 	size_t len = sizeof(size_t);
-	size_t total_mem;
-	if (sysctl(mib, namelen, &total_mem, &len, NULL, 0) < 0) {
+	size_t totalMemory;
+	if (sysctl(mib, 2, &totalMemory, &len, NULL, 0) < 0) {
 		ASSERT(false);
 		return MemoryInfo();
 	}
-	return MemoryInfo(total_mem);
+	mib[1] = HW_USERMEM;
+    size_t freeMemory;
+    if (sysctl(mib, 2, &freeMemory, &len, NULL, 0) == -1) {
+		ASSERT(false);
+        return MemoryInfo();
+    }
+	return MemoryInfo(totalMemory, freeMemory);
 
 	#else // __GNUC__                       // linux
 

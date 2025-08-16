@@ -943,12 +943,13 @@ struct MeanStd {
 	typedef TYPEW TypeW;
 	typedef TYPER TypeR;
 	typedef ARGTYPE ArgType;
-	TYPEW sum, sumSq;
+	TypeW sum, sumSq;
 	size_t size;
 	MeanStd() : sum(0), sumSq(0), size(0) {}
 	MeanStd(const Type* values, size_t _size) : MeanStd() { Compute(values, _size); }
-	void Update(ArgType v) {
-		const TYPEW val(static_cast<TYPEW>(v));
+    bool IsValid() const { return size > 0; }
+    void Update(ArgType v) {
+		const TypeW val(static_cast<TypeW>(v));
 		sum += val;
 		sumSq += SQUARE(val);
 		++size;
@@ -957,13 +958,13 @@ struct MeanStd {
 		for (size_t i=0; i<_size; ++i)
 			Update(values[i]);
 	}
-	TYPEW GetSum() const { return sum; }
-	TYPEW GetMean() const { return static_cast<TYPEW>(sum / static_cast<TypeR>(size)); }
-	TYPEW GetRMS() const { return static_cast<TYPEW>(SQRT(sumSq / static_cast<TypeR>(size))); }
-	TYPEW GetVarianceN() const { return static_cast<TYPEW>(sumSq - SQUARE(sum) / static_cast<TypeR>(size)); }
-	TYPEW GetVariance() const { return static_cast<TYPEW>(GetVarianceN() / static_cast<TypeR>(size)); }
-	TYPEW GetStdDev() const { return SQRT(GetVariance()); }
-	void Clear() { sum = sumSq = TYPEW(0); size = 0; }
+	TypeW GetSum() const { return sum; }
+	TypeW GetMean() const { return static_cast<TypeW>(sum / static_cast<TypeR>(size)); }
+	TypeW GetRMS() const { return static_cast<TypeW>(SQRT(sumSq / static_cast<TypeR>(size))); }
+	TypeW GetVarianceN() const { return static_cast<TypeW>(sumSq - SQUARE(sum) / static_cast<TypeR>(size)); }
+	TypeW GetVariance() const { return static_cast<TypeW>(GetVarianceN() / static_cast<TypeR>(size)); }
+	TypeW GetStdDev() const { return SQRT(GetVariance()); }
+	void Clear() { sum = sumSq = TypeW(0); size = 0; }
 };
 // same as above, but records also min/max values
 template<typename TYPE, typename TYPEW=TYPE, typename ARGTYPE=const TYPE&, typename TYPER=REAL>
@@ -987,6 +988,35 @@ struct MeanStdMinMax : MeanStd<TYPE,TYPEW,ARGTYPE,TYPER> {
 		for (size_t i=0; i<_size; ++i)
 			Update(values[i]);
 	}
+	Type GetMin() const { return minVal; }
+	Type GetMax() const { return maxVal; }
+	Type GetRange() const { return maxVal - minVal; }
+};
+// same as above, but weighted
+template<typename TYPE, typename TYPEWIGHT=TYPE, typename TYPEW=TYPEWIGHT>
+struct WeightedMeanStd {
+    typedef TYPE Type;
+    typedef TYPEWIGHT TypeWight;
+    typedef TYPEW TypeW;
+    TypeW sumOfWeights;
+    TypeW weightedSum;
+    TypeW weightedSumSq;
+    WeightedMeanStd() : sumOfWeights(0), weightedSum(0), weightedSumSq(0) {}
+    bool IsValid() const { return sumOfWeights > 0; }
+    void Update(const Type& v, const TypeWight& w) {
+        const TypeW value(static_cast<TypeW>(v));
+        const TypeW weight(static_cast<TypeW>(w));
+        sumOfWeights += weight;
+        weightedSum += weight * value;
+        weightedSumSq += weight * value * value;
+    }
+    TypeW GetSum() const { return weightedSum; }
+    TypeW GetMean() const { return weightedSum / sumOfWeights; }
+    TypeW GetRMS() const { return SQRT(weightedSumSq / sumOfWeights); }
+    TypeW GetVarianceN() const { return weightedSumSq - SQUARE(weightedSum) / sumOfWeights; }
+    TypeW GetVariance() const { return GetVarianceN() / sumOfWeights; }
+    TypeW GetStdDev() const { return SQRT(GetVariance()); }
+    void Clear() { weightedSum = weightedSumSq = sumOfWeights = TypeW(0); }
 };
 /*----------------------------------------------------------------*/
 

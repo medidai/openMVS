@@ -90,6 +90,17 @@ public:
 	static inline Type GetTimeMs() {
 		return GetTimeFactor() * GetSysTime();
 	}
+	// get elapsed time since the given sys-time (in milliseconds)
+	static inline Type GetTimeElapsedMs(SysType t) {
+		return GetTimeFactor() * (GetSysTime() - t);
+	}
+	// get elapsed time since the given sys-time (in milliseconds) and update the sys-time
+	static inline Type GetTimeElapsedMsUpdate(SysType& t) {
+		const SysType nTime = GetSysTime();
+		const Type fElapsed = GetTimeFactor() * (nTime - t);
+		t = nTime;
+		return fElapsed;
+	}
 	// get current time in seconds
 	static inline Type GetTime() {
 		return 0.001f * GetTimeFactor() * GetSysTime();

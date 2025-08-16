@@ -1955,8 +1955,6 @@ public:
 		SEACAVE::CUDA::MemDevice depthMap;
 		SEACAVE::CUDA::MemDevice faceMap;
 		SEACAVE::CUDA::MemDevice baryMap;
-		inline View() {}
-		inline View(View&) {}
 	};
 	typedef CLISTDEF2(View) ViewsArr;
 
@@ -2530,8 +2528,7 @@ void MeshRefineCUDA::ProjectMesh(
 {
 	View& view = views[idxImage];
 	// init depth-map
-	const float fltMax(FLT_MAX);
-	reportCudaError(cuMemsetD32(view.depthMap, (uint32_t&)fltMax, size.area()));
+	reportCudaError(cuMemsetD32(view.depthMap, CastF2I(FLT_MAX).i, size.area()));
 	// fetch only the faces viewed by this camera
 	Mesh::FaceIdxArr faceIDsView(0, (FIndex)cameraFaces.size());
 	for (auto idxFace : cameraFaces)
