@@ -137,8 +137,11 @@ public:
 
 	// construct a list from the contents of the range [first, last)
 	template <class InputIt>
-	cList(InputIt first, InputIt last, bool /*dummy*/) : _size(std::distance(first, last)), _vectorSize(_size), _vector((TYPE*)operator new[](static_cast<size_t>(_size) * sizeof(TYPE)))
+	cList(InputIt first, InputIt last, bool /*dummy*/) : _size(0), _vectorSize(std::distance(first, last)), _vector(NULL)
 	{
+		if (_vectorSize == 0)
+			return;
+		_vector = (TYPE*)(operator new[] (static_cast<size_t>(_vectorSize) * sizeof(TYPE)));
 		while (first != last)
 			Insert(*first++);
 	}

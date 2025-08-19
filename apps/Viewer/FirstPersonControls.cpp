@@ -157,36 +157,22 @@ void FirstPersonControls::processMovement(double deltaTime) {
 	Eigen::Vector3d right = getRight();
 	Eigen::Vector3d up = Eigen::Vector3d(0, 1, 0); // World up for flying
 
-	bool moved = false;
-
 	// WASD movement
-	if (keys[GLFW_KEY_W]) {
+	if (keys[GLFW_KEY_W])
 		move(forward, velocity);
-		moved = true;
-	}
-	if (keys[GLFW_KEY_S]) {
+	if (keys[GLFW_KEY_S])
 		move(-forward, velocity);
-		moved = true;
-	}
-	if (keys[GLFW_KEY_A]) {
+	if (keys[GLFW_KEY_A])
 		move(-right, velocity);
-		moved = true;
-	}
-	if (keys[GLFW_KEY_D]) {
+	if (keys[GLFW_KEY_D])
 		move(right, velocity);
-		moved = true;
-	}
 
 	// Vertical movement (flying)
 	if (keys[GLFW_KEY_Q] || keys[GLFW_KEY_E]) {
-		if (keys[GLFW_KEY_Q]) {
+		if (keys[GLFW_KEY_Q])
 			move(-up, velocity);
-			moved = true;
-		}
-		if (keys[GLFW_KEY_E]) {
+		if (keys[GLFW_KEY_E])
 			move(up, velocity);
-			moved = true;
-		}
 	}
 }
 

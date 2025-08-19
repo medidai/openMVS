@@ -1132,9 +1132,6 @@ void Renderer::RenderCameras(const Window& window) {
 
 	cameraShader->Use();
 
-	// Get the currently selected camera from the window's camera
-	MVS::IIndex selectedCamID = window.GetCamera().GetCurrentCamID();
-
 	cameraVAO->Bind();
 	cameraEBO->Bind();
 
