@@ -802,7 +802,7 @@ bool Scene::EstimatePointCloudNormals(bool bRefine)
 	// estimate normals using the views per point
 	#ifdef SCENE_USE_OPENMP
 	#pragma omp parallel for
-	for (int64_t _ID=0; _ID<pointcloud.points.size(); ++_ID) {
+	for (int64_t _ID=0; _ID<(int64_t)pointcloud.points.size(); ++_ID) {
 		const IIndex ID(static_cast<IIndex>(_ID));
 	#else
 	FOREACH(ID, pointcloud.points) {
@@ -836,7 +836,7 @@ bool Scene::EstimatePointCloudNormals(bool bRefine)
 	bool bImagesReloaded(false);
 	#ifdef SCENE_USE_OPENMP
 	#pragma omp parallel for
-	for (int64_t _idx=0; _idx<images.size(); ++_idx) {
+	for (int64_t _idx=0; _idx<(int64_t)images.size(); ++_idx) {
 		const IIndex idx(static_cast<IIndex>(_idx));
 	#else
 	FOREACH(idx, images) {
@@ -952,7 +952,7 @@ bool Scene::EstimatePointCloudNormals(bool bRefine)
 
 	#ifdef SCENE_USE_OPENMP
 	#pragma omp parallel for
-	for (int64_t _ID=0; _ID<pointcloud.points.size(); ++_ID) {
+	for (int64_t _ID=0; _ID<(int64_t)pointcloud.points.size(); ++_ID) {
 		const IIndex ID(static_cast<IIndex>(_ID));
 	#else
 	FOREACH(ID, pointcloud.points) {

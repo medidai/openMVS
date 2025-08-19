@@ -748,10 +748,8 @@ void UI::ShowHelpDialog() {
 		// Detect macOS for platform-specific shortcuts
 		#ifdef __APPLE__
 		const bool isMacOS = true;
-		const char* cmdKey = "Cmd";
 		#else
 		const bool isMacOS = false;
-		const char* cmdKey = "Ctrl";
 		#endif
 
 		// File Operations
