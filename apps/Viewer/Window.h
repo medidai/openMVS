@@ -100,6 +100,7 @@ public:
 	// Settings
 	Eigen::Vector4f clearColor;
 	MVS::IIndex minViews;
+	float cameraSize;
 	float pointSize;
 	float pointNormalLength;
 	float imageOverlayOpacity;
