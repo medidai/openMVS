@@ -230,7 +230,7 @@ void UI::ShowMainMenuBar(Window& window) {
 			ImGui::MenuItem("Scene Info", nullptr, &showSceneInfo);
 			ImGui::MenuItem("Camera Info", nullptr, &showCameraInfoDialog);
 			ImGui::MenuItem("Camera Controls", nullptr, &showCameraControls);
-			ImGui::MenuItem("Selection Controls", nullptr, &showSelectionControls);
+			ImGui::MenuItem("Selection Dialog", nullptr, &showSelectionDialog);
 			ImGui::MenuItem("Render Settings", nullptr, &showRenderSettings);
 			ImGui::MenuItem("Performance Overlay", nullptr, &showPerformanceOverlay);
 			ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
@@ -376,6 +376,10 @@ void UI::ShowCameraControls(Window& window) {
 			window.RequestRedraw();
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Toggle camera frustum display (C key)");
+		if (ImGui::SliderFloat("Camera Size", &window.cameraSize, 0.0001f, 0.1f, "%.4f"))
+			window.GetRenderer().UploadCameras(window);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Adjust camera size");
 
 		// Arcball sensitivity controls (only show when in arcball mode)
 		if (window.GetControlMode() == Window::CONTROL_ARCBALL) {
@@ -828,6 +832,7 @@ void UI::ShowHelpDialog() {
 		ImGui::Text("  Single click        Select point/face/camera");
 		ImGui::Text("  Double-click        Focus on selection");
 		ImGui::Text("                      (or enter camera view for cameras)");
+		ImGui::Text("  Selection Dialog    Select point/face/camera by index");
 		ImGui::Separator();
 
 		// Selection Tools
@@ -1065,6 +1070,24 @@ void UI::ShowCameraInfoDialog(Window& window) {
 				window.selectedNeighborCamera == NO_ID ? "NA" : String::FormatString("%.2f", R2D(ACOS(ComputeAngle(
 					mvs_scene.images[images[window.selectionIdx].idx].camera.Direction().ptr(),
 					mvs_scene.images[images[window.selectedNeighborCamera].idx].camera.Direction().ptr())))).c_str());
+			if (window.selectedNeighborCamera != NO_ID && window.selectionType == Window::SEL_CAMERA) {
+				// Compute and display relative pose if a neighbor camera is selected
+				const Image& mainView = images[window.selectionIdx];
+				const Image& neighView = images[window.selectedNeighborCamera];
+				const MVS::Camera& camMain = mvs_scene.images[mainView.idx].camera;
+				const MVS::Camera& camNeigh = mvs_scene.images[neighView.idx].camera;
+				RMatrix poseR;
+				CMatrix poseC;
+				ComputeRelativePose(camMain.R, camMain.C, camNeigh.R, camNeigh.C, poseR, poseC);
+				Point3 eulerAngles;
+				poseR.GetRotationAnglesZYX(eulerAngles.x, eulerAngles.y, eulerAngles.z);
+				ImGui::Separator();
+				ImGui::Text("Relative Pose (Neighbor wrt Main)");
+				ImGui::Text("  Position: %.3g, %.3g, %.3g (%.3g distance)",
+					poseC.x, poseC.y, poseC.z, norm(poseC));
+				ImGui::Text("  Rotation (ZYX): %.1f°, %.1f°, %.1f°",
+					R2D(eulerAngles.x), R2D(eulerAngles.y), R2D(eulerAngles.z));
+			}
 			if (!imageData.neighbors.empty()) {
 				// Create a scrollable region for the neighbors list
 				ImGui::BeginChild("NeighborsScrollRegion", ImVec2(0, 220), true, ImGuiWindowFlags_HorizontalScrollbar);
@@ -1520,7 +1543,7 @@ void UI::ShowSelectionOverlay(const Window& window) {
 					ImGui::Text("  image size: %ux%u", imageData.width, imageData.height);
 					ImGui::Text("  intrinsics: fx %.1f, fy %.1f", camera.K(0, 0), camera.K(1, 1));
 					ImGui::Text("             cx %.1f, cy %.1f", camera.K(0, 2), camera.K(1, 2));
-					ImGui::Text("  position: %.3f, %.3f, %.3f", camera.C.x, camera.C.y, camera.C.z);
+					ImGui::Text("  position: %.3g, %.3g, %.3g", camera.C.x, camera.C.y, camera.C.z);
 					ImGui::Text("  rotation: %.1f°, %.1f°, %.1f°", 
 						R2D(eulerAngles.x), R2D(eulerAngles.y), R2D(eulerAngles.z));
 					ImGui::Text("  avg depth: %.2g", imageData.avgDepth);
@@ -1684,6 +1707,9 @@ void SettingsReadLine(ImGuiContext*, ImGuiSettingsHandler* handler, void* entry,
 	else if (sscanf(line, "ClearColor=%f,%f,%f,%f", &x, &y, &z, &w) == 4) {
 		window.clearColor = Eigen::Vector4f(x, y, z, w);
 	}
+	else if (sscanf(line, "CameraSize=%f", &x) == 1) {
+		window.cameraSize = x;
+	}
 	else if (sscanf(line, "PointSize=%f", &x) == 1) {
 		window.pointSize = x;
 	}
@@ -1729,6 +1755,7 @@ void SettingsWriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuf
 	buf->appendf("ClearColor=%f,%f,%f,%f\n", 
 		window.clearColor[0], window.clearColor[1], 
 		window.clearColor[2], window.clearColor[3]);
+	buf->appendf("CameraSize=%f\n", window.cameraSize);
 	buf->appendf("PointSize=%f\n", window.pointSize);
 	buf->appendf("EstimateSfMNormals=%d\n", 
 		window.GetScene().estimateSfMNormals ? 1 : 0);

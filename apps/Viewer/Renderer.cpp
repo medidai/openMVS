@@ -748,7 +748,7 @@ void Renderer::UploadCameras(const Window& window) {
 		return;
 
 	// Generate camera frustum geometry
-	const float depth = window.GetCamera().GetSceneSize().norm() * 0.01f; // Camera scale factor
+	const float depth = window.GetCamera().GetSceneSize().norm() * window.cameraSize;
 	cameraIndexCount = 0;
 	std::vector<float> cameraVertices;
 	std::vector<float> cameraColors;
@@ -789,7 +789,7 @@ void Renderer::UploadImageOverlays(const Window& window) {
 		return;
 
 	// Calculate camera frustum depth (same as used in UploadCameras)
-	const float depth = window.GetCamera().GetSceneSize().norm() * 0.01f;
+	const float depth = window.GetCamera().GetSceneSize().norm() * window.cameraSize;
 
 	// Collect all overlay geometry for images with valid textures
 	std::vector<float> allVertices;
