@@ -42,6 +42,11 @@
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+// Configuration
+#ifndef _RELEASE
+#define OPENGL_DEBUG_ENABLE
+#endif
+
 // Macros for convenient usage
 #ifdef OPENGL_DEBUG_ENABLE
 #define GL_CHECK(call) \
@@ -77,11 +82,6 @@
 // 4. Use EnableOpenGLDebugOutput() for OpenGL 4.3+ debug contexts
 
 namespace OPENGL_DEBUG {
-
-// Configuration
-#ifndef _RELEASE
-	#define OPENGL_DEBUG_ENABLE
-#endif
 
 // Error checking function
 inline std::pair<GLenum, std::string> GetOpenGLError() {

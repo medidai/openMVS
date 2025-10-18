@@ -39,6 +39,7 @@ Camera::Camera()
 	: position(0, 0, 5)
 	, target(0, 0, 0)
 	, up(0, 1, 0)
+	, sceneDistance(1.f)
 	, size(800, 600)
 	, fov(45.0)
 	, nearPlane(0.1)
@@ -112,11 +113,8 @@ Eigen::Matrix4d Camera::GetProjectionMatrix() const {
 }
 
 void Camera::Reset() {
-	// Calculate center and size
-	const float maxSize = sceneSize.maxCoeff();
-
 	// Position camera to view the entire scene
-	double distance = maxSize / (2.0 * TAN(D2R(fov) * 0.5)) * 1.5; // 1.5x for padding
+	const double distance = sceneSize.norm() / (2.0 * TAN(D2R(fov) * 0.5)) * 1.5; // 1.5x for padding
 
 	savedState.reset();
 	target = sceneCenter.cast<double>();

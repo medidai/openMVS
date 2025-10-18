@@ -102,8 +102,10 @@ public:
 	void RemoveMinViews(uint32_t thMinViews);
 
 	Box GetAABB() const;
-	Box GetAABB(const Box& bound) const;
+	Box GetAABB(const Box& bound, unsigned minViews=0) const;
 	Box GetAABB(unsigned minViews) const;
+	Box GetAABB(float minPercentile, float maxPercentile, unsigned minViews=0) const;
+	Box GetPercentileAABB(float minPercentile, float maxPercentile, unsigned minViews=0) const;
 	Point GetCenter() const;
 
 	Planef EstimateGroundPlane(const ImageArr& images, float planeThreshold=0, const String& fileExportPlane="") const;

@@ -126,6 +126,7 @@ public:
 	void AddNoiseCameraPoses(float epsPosition, float epsRotation);
 	Scene SubScene(const IIndexArr& idxImages) const;
 	Scene& CropToROI(const OBB3f&, unsigned minNumPoints = 3);
+	float ComputeDistanceCameras2Scene(float depthPercentile = 0.1f, bool bForceRecompute = false, bool bUseROI = true);
 
 	// Estimate and set region-of-interest
 	bool EstimateROI(int nEstimateROI=0, float scale=1.f);

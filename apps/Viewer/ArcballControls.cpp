@@ -45,7 +45,7 @@ ArcballControls::ArcballControls(Camera& cam)
 	, radiusFactor(0.67)
 	, sensitivity(1.0)
 	, rotationSensitivity(1.0)
-	, zoomSensitivity(2.0)
+	, zoomSensitivity(1.0)
 	, panSensitivity(1.0)
 	, enableGizmos(true)
 	, gizmosActive(false)
@@ -217,17 +217,17 @@ void ArcballControls::rotateArcball(const Eigen::Vector2d& delta) {
 	double dotProduct = CLAMP(startCursorPosition.dot(currentCursorPosition), -1.0, 1.0);
 	double angle = ACOS(dotProduct);
 
-	// Apply sensitivity and rotation speed
-	angle *= sensitivity * rotationSensitivity;
+	// Apply rotation speed
+	angle *= rotationSensitivity;
 
 	// Apply the rotation
 	rotate(rotationAxis, angle);
 }
 
 void ArcballControls::panCamera(const Eigen::Vector2d& delta) {
-	Eigen::Vector3d cameraPos = camera.GetPosition();
-	Eigen::Vector3d cameraTarget = camera.GetTarget();
-	Eigen::Vector3d cameraUp = camera.GetUp();
+	const Eigen::Vector3d& cameraPos = camera.GetPosition();
+	const Eigen::Vector3d& cameraTarget = camera.GetTarget();
+	const Eigen::Vector3d& cameraUp = camera.GetUp();
 
 	Eigen::Vector3d forward = (cameraTarget - cameraPos).normalized();
 	Eigen::Vector3d right = forward.cross(cameraUp).normalized();
@@ -241,7 +241,8 @@ void ArcballControls::panCamera(const Eigen::Vector2d& delta) {
 }
 
 void ArcballControls::zoomCamera(double delta) {
-	zoom(delta * zoomSensitivity);
+	const double speed = MAXF(0.001, 0.15 * (camera.GetTarget() - camera.GetPosition()).norm() * zoomSensitivity);
+	zoom(delta * speed);
 }
 
 void ArcballControls::changeFOV(double delta) {
@@ -284,18 +285,18 @@ void ArcballControls::pan(const Eigen::Vector3d& delta) {
 }
 
 void ArcballControls::zoom(double delta) {
-	Eigen::Vector3d cameraPos = camera.GetPosition();
-	Eigen::Vector3d target = camera.GetTarget();
+	const Eigen::Vector3d& cameraPos = camera.GetPosition();
+	const Eigen::Vector3d& target = camera.GetTarget();
 	Eigen::Vector3d direction = (target - cameraPos).normalized();
 	Eigen::Vector3d newPos = cameraPos + direction * delta * sensitivity;
 
 	// Prevent zooming too close to the target
 	// Compute dynamic minimum distance as a percentage of the scene size
-	const double sceneSize = camera.GetSceneSize().norm();
-	const double minDistance = MAXF(0.01, sceneSize * 0.01); // 1% of scene size, minimum 0.01
-	if ((newPos - target).norm() < minDistance)
+	const double distance = (newPos - target).norm();
+	if (distance < camera.GetNearPlane())
 		return;
-
+	if (distance > camera.GetFarPlane())
+		return;
 	camera.SetLookAt(newPos, target, camera.GetUp());
 }
 

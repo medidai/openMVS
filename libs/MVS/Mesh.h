@@ -169,6 +169,8 @@ public:
 
 	Box GetAABB() const;
 	Box GetAABB(const Box& bound) const;
+	Box GetAABB(float minPercentile, float maxPercentile) const;
+	Box GetPercentileAABB(float minPercentile, float maxPercentile) const;
 	Vertex GetCenter() const;
 
 	void ListIncidentVertices();

@@ -194,8 +194,6 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	Util::ensureValidPath(OPT::strPointCloudFileName);
 	Util::ensureValidPath(OPT::strMeshFileName);
 	Util::ensureValidPath(OPT::strOutputFileName);
-	if (OPT::strMeshFileName.empty() && (ARCHIVE_TYPE)OPT::nArchiveType == ARCHIVE_MVS && strInputFileNameExt == MVS_EXT && OPT::nNormalizeCoordinates == 0)
-		OPT::strMeshFileName = Util::getFileFullName(OPT::strInputFileName) + _T(".ply");
 	if (OPT::strOutputFileName.empty())
 		OPT::strOutputFileName = Util::getFileName(OPT::strInputFileName) + _T("_transformed") MVS_EXT;
 

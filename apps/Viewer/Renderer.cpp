@@ -746,18 +746,16 @@ static void CreateCameraFrustumGeometry(
 void Renderer::UploadCameras(const Window& window) {
 	if (window.GetScene().GetImages().empty())
 		return;
+	const float depth = window.GetCamera().GetSceneDistance() * window.cameraSize;
 
 	// Generate camera frustum geometry
-	const float depth = window.GetCamera().GetSceneSize().norm() * window.cameraSize;
 	cameraIndexCount = 0;
 	std::vector<float> cameraVertices;
 	std::vector<float> cameraColors;
 	std::vector<uint32_t> cameraIndices;
-
 	// Use white colors for normal camera rendering
 	const Eigen::Vector3f centerColor(1.f, 1.f, 1.f);   // White for center
 	const Eigen::Vector3f frustumColor(1.f, 1.f, 0.f);  // Yellow for frustum
-
 	for (const auto& image : window.GetScene().GetImages()) {
 		const MVS::Image& imageData = window.GetScene().GetScene().images[image.idx];
 		ASSERT(imageData.IsValid());
@@ -776,28 +774,21 @@ void Renderer::UploadCameras(const Window& window) {
 		);
 		cameraIndexCount += 20; // 10 lines * 2 indices per line
 	}
-
+	// Upload camera geometry to GPU buffers
 	if (cameraIndexCount) {
 		cameraVBO->SetData(cameraVertices);
 		cameraColorVBO->SetData(cameraColors);
 		cameraEBO->SetData(cameraIndices);
 	}
-}
-
-void Renderer::UploadImageOverlays(const Window& window) {
-	if (window.GetScene().GetImages().empty())
-		return;
-
-	// Calculate camera frustum depth (same as used in UploadCameras)
-	const float depth = window.GetCamera().GetSceneSize().norm() * window.cameraSize;
 
 	// Collect all overlay geometry for images with valid textures
+	imageOverlayIndexCount = 0;
 	std::vector<float> allVertices;
 	std::vector<uint32_t> allIndices;
 	for (const auto& image : window.GetScene().GetImages()) {
 		const MVS::Image& imageData = window.GetScene().GetScene().images[image.idx];
 		ASSERT(imageData.IsValid());
-		// Get frustum corners using the same helper function as UploadCameras
+		// Get frustum corners using the same helper function as CreateCameraFrustumGeometry
 		std::array<Point3f, 4> worldCorners = ComputeCameraFrustumCorners(imageData, depth);
 		// Create quad vertices for this overlay
 		const uint32_t baseVertex = allVertices.size() / 5;
@@ -811,22 +802,22 @@ void Renderer::UploadImageOverlays(const Window& window) {
 			// Map image corners to texture coordinates:
 			// top-left -> (0,0), top-right -> (1,0), bottom-right -> (1,1), bottom-left -> (0,1)
 			switch(i) {
-				case 0: // top-left corner
-					allVertices.push_back(0.f); // U
-					allVertices.push_back(0.f); // V (top of image)
-					break;
-				case 1: // top-right corner
-					allVertices.push_back(1.f); // U
-					allVertices.push_back(0.f); // V (top of image)
-					break;
-				case 2: // bottom-right corner
-					allVertices.push_back(1.f); // U
-					allVertices.push_back(1.f); // V (bottom of image)
-					break;
-				case 3: // bottom-left corner
-					allVertices.push_back(0.f); // U
-					allVertices.push_back(1.f); // V (bottom of image)
-					break;
+			case 0: // top-left corner
+				allVertices.push_back(0.f); // U
+				allVertices.push_back(0.f); // V (top of image)
+				break;
+			case 1: // top-right corner
+				allVertices.push_back(1.f); // U
+				allVertices.push_back(0.f); // V (top of image)
+				break;
+			case 2: // bottom-right corner
+				allVertices.push_back(1.f); // U
+				allVertices.push_back(1.f); // V (bottom of image)
+				break;
+			case 3: // bottom-left corner
+				allVertices.push_back(0.f); // U
+				allVertices.push_back(1.f); // V (bottom of image)
+				break;
 			}
 		}
 		// Add indices for this quad (2 triangles)
@@ -838,12 +829,9 @@ void Renderer::UploadImageOverlays(const Window& window) {
 		allIndices.push_back(baseVertex + 3); // bottom-left
 		imageOverlayIndexCount += 6; // 2 triangles * 3 indices each
 	}
-
 	// Upload all overlay geometry to GPU buffers
 	if (imageOverlayIndexCount) {
-		imageOverlayVBO->Bind();
 		imageOverlayVBO->SetData(allVertices);
-		imageOverlayEBO->Bind();
 		imageOverlayEBO->SetData(allIndices);
 	}
 }
@@ -857,26 +845,27 @@ void Renderer::UploadSelection(const Window& window) {
 	std::vector<float> selectionVertices;
 	const MVS::Scene& scene = window.GetScene().GetScene();
 	if (window.selectionType == Window::SEL_POINT) {
-		ASSERT(scene.pointcloud.IsValid() && scene.IsValid());
-		// Get the selected point and its views
-		const MVS::PointCloud::Point& selectedPoint = scene.pointcloud.points[window.selectionIdx];
-		const MVS::PointCloud::ViewArr& pointViews = scene.pointcloud.pointViews[window.selectionIdx];
-		// Create line geometry from each camera seeing this point to the point
-		selectionVertices.reserve(pointViews.size() * 6); // 2 points per line, 3 coordinates per point
-		for (const MVS::PointCloud::View& viewIdx : pointViews) {
-			ASSERT(viewIdx < scene.images.size());
-			const MVS::Image& imageData = scene.images[viewIdx];
-			ASSERT(imageData.IsValid());
-			// Add line from camera center to the selected point
-			const Point3f& cameraCenter = imageData.camera.C;
-			// First vertex: camera center
-			selectionVertices.insert(selectionVertices.end(), {
-				cameraCenter.x, cameraCenter.y, cameraCenter.z
-			});
-			// Second vertex: selected point
-			selectionVertices.insert(selectionVertices.end(), {
-				selectedPoint.x, selectedPoint.y, selectedPoint.z
-			});
+		ASSERT(scene.pointcloud.IsValid());
+		if (scene.IsValid()) {
+			// Create line geometry from each camera seeing this point to the point
+			const MVS::PointCloud::Point& selectedPoint = scene.pointcloud.points[window.selectionIdx];
+			const MVS::PointCloud::ViewArr& pointViews = scene.pointcloud.pointViews[window.selectionIdx];
+			selectionVertices.reserve(pointViews.size() * 6); // 2 points per line, 3 coordinates per point
+			for (const MVS::PointCloud::View& viewIdx : pointViews) {
+				ASSERT(viewIdx < scene.images.size());
+				const MVS::Image& imageData = scene.images[viewIdx];
+				ASSERT(imageData.IsValid());
+				// Add line from camera center to the selected point
+				const Point3f& cameraCenter = imageData.camera.C;
+				// First vertex: camera center
+				selectionVertices.insert(selectionVertices.end(), {
+					cameraCenter.x, cameraCenter.y, cameraCenter.z
+				});
+				// Second vertex: selected point
+				selectionVertices.insert(selectionVertices.end(), {
+					selectedPoint.x, selectedPoint.y, selectedPoint.z
+				});
+			}
 		}
 	}
 	// Handle triangle selection
@@ -900,11 +889,9 @@ void Renderer::UploadSelection(const Window& window) {
 	// Handle camera selection
 	else if (window.selectionType == Window::SEL_CAMERA) {
 		const Image& image = window.GetScene().GetImages()[window.selectionIdx];
-		ASSERT(!scene.images.empty() && image.idx < scene.images.size());
 		const MVS::Image& selectedImage = scene.images[image.idx];
-		ASSERT(selectedImage.IsValid())
-		const Point3f sceneSize = window.GetCamera().GetSceneSize();
-		const float depth = norm(sceneSize) * 0.01f;
+		ASSERT(selectedImage.IsValid());
+		const float depth = window.GetCamera().GetSceneDistance() * window.cameraSize * 10.f;
 		// Get frustum corners
 		std::array<Point3f, 4> worldCorners = ComputeCameraFrustumCorners(selectedImage, depth);
 		// Reserve space for lines: 4 (center to corners) + 4 (corner rectangle) = 8 lines × 2 vertices × 3 coordinates = 48 floats
@@ -932,11 +919,9 @@ void Renderer::UploadSelection(const Window& window) {
 	// Add neighbor camera geometry if selected
 	if (window.selectedNeighborCamera != NO_ID) {
 		const Image& image = window.GetScene().GetImages()[window.selectedNeighborCamera];
-		ASSERT(!scene.images.empty() && image.idx < scene.images.size());
 		const MVS::Image& neighborImage = scene.images[image.idx];
 		ASSERT(neighborImage.IsValid());
-		const Point3f sceneSize = window.GetCamera().GetSceneSize();
-		const float depth = norm(sceneSize) * 0.01f;
+		const float depth = window.GetCamera().GetSceneDistance() * window.cameraSize * 10.f;
 		// Get frustum corners for the neighbor camera
 		std::array<Point3f, 4> worldCorners = ComputeCameraFrustumCorners(neighborImage, depth);
 		// Lines from camera center to each corner (4 lines)
@@ -1189,6 +1174,26 @@ void Renderer::RenderImageOverlays(const Window& window) {
 }
 
 void Renderer::RenderSelection(const Window& window) {
+	// Highlight selected point in point cloud if applicable
+	if (window.showPointCloud && window.selectionType == Window::SEL_POINT && pointCount > 0) {
+		// Use the geometry selection shader for highlighting
+		geometrySelectionShader->Use();
+		geometrySelectionShader->SetBool("useHighlight", true);
+		geometrySelectionShader->SetFloat("highlightOpacity", 0.8f);
+
+		// Set highlight size and color for points (red)
+		geometrySelectionShader->SetVector3("highlightColor", Eigen::Vector3f(1.f, 0.f, 0.f));
+		geometrySelectionShader->SetFloat("pointSize", window.pointSize * 3.f);
+
+		// We need access to the actual point cloud data to extract selected point
+		pointCloudVAO->Bind();
+
+		// Render selected point individually using glDrawArrays with offset
+		GL_CHECK(glDrawArrays(GL_POINTS, window.selectionIdx, 1));
+
+		pointCloudVAO->Unbind();
+	}
+
 	// Only render if we have selection geometry
 	if (selectionPrimitiveCount == 0)
 		return;
@@ -1482,24 +1487,17 @@ void Renderer::RenderSelectedGeometry(const Window& window) {
 	// Render selected points with highlighting
 	const auto& selectedPointIndices = selectionController.getSelectedPointIndices();
 	if (window.showPointCloud && !selectedPointIndices.empty() && pointCount > 0) {
-		// Set highlight color for points (bright red)
-		geometrySelectionShader->SetVector3("highlightColor", Eigen::Vector3f(1.f, 0.1f, 0.1f));
+		// Set highlight size and color for points (red)
+		geometrySelectionShader->SetVector3("highlightColor", Eigen::Vector3f(1.f, 0.f, 0.f));
 		geometrySelectionShader->SetFloat("pointSize", window.pointSize * 2.5f);
-
-		// Create a temporary VBO with only selected point data
-		std::vector<float> selectedPoints;
-		selectedPoints.reserve(selectedPointIndices.size() * 3);
 
 		// We need access to the actual point cloud data to extract selected points
 		// For now, we'll use a different approach - render individual points
 		pointCloudVAO->Bind();
-		GL_CHECK(glEnable(GL_PROGRAM_POINT_SIZE));
 
 		// Render each selected point individually using glDrawArrays with offset
-		for (const auto& pointIdx : selectedPointIndices) {
-			if (pointIdx < pointCount)
-				GL_CHECK(glDrawArrays(GL_POINTS, pointIdx, 1));
-		}
+		for (const auto& pointIdx : selectedPointIndices)
+			GL_CHECK(glDrawArrays(GL_POINTS, pointIdx, 1));
 
 		pointCloudVAO->Unbind();
 	}
@@ -1507,7 +1505,7 @@ void Renderer::RenderSelectedGeometry(const Window& window) {
 	// Render selected faces with highlighting (wireframe overlay)
 	const auto& selectedFaceIndices = selectionController.getSelectedFaceIndices();
 	if (window.showMesh && !selectedFaceIndices.empty() && !meshFaceCounts.empty()) {
-		// Set highlight color for faces (bright orange/yellow)
+		// Set highlight color for faces (red)
 		geometrySelectionShader->SetVector3("highlightColor", Eigen::Vector3f(1.f, 0.f, 0.f));
 
 		// Render as wireframe overlay to show selection

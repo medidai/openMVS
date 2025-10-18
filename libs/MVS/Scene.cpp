@@ -2214,8 +2214,55 @@ Scene& Scene::CropToROI(const OBB3f& obb, unsigned minNumPoints)
 	}
 	return *this = SubScene(idxImages);
 }
-/*----------------------------------------------------------------*/
 
+// compute the average distance between cameras and scene (or ROI if specified and exists):
+// - depthPercentile: percentile of closest points to consider for each image (0-1)
+// - bForceRecompute: force recomputation even if already available for each image
+// - bUseROI: use the ROI if it exists, otherwise use the entire scene
+// return the average depth over all images
+float Scene::ComputeDistanceCameras2Scene(float depthPercentile, bool bForceRecompute, bool bUseROI)
+{
+	// for each image, compute the average distance between the camera and the scene points it sees;
+	// the average is computed on the Nth percentile of the closest points
+	const OBB3f* pObb = bUseROI && IsBounded() ? &obb : NULL;
+	REAL sumDepth = 0;
+	unsigned nImages = 0;
+	#ifdef SCENE_USE_OPENMP
+	#pragma omp parallel for reduction(+:sumDepth,nImages) //schedule(dynamic)
+	for (int64_t _idx=0; _idx<(int64_t)images.size(); ++_idx) {
+		const IIndex idx(static_cast<IIndex>(_idx));
+	#else
+	FOREACH(idx, images) {
+	#endif
+		Image& imageData = images[idx];
+		if (!imageData.IsValid())
+			continue;
+		if (bForceRecompute || imageData.avgDepth <= 0) {
+			// recompute average depth
+			FloatArr depths;
+			FOREACH(idxPoint, pointcloud.points) {
+				const PointCloud::ViewArr& views = pointcloud.pointViews[idxPoint];
+				for (PointCloud::View idxView: views) {
+					if (idxView != idx)
+						continue;
+					const Point3f& point = pointcloud.points[idxPoint];
+					if (!pObb || pObb->Intersects(point))
+						depths.emplace_back(imageData.camera.PointDepth(point));
+					break;
+				}
+			}
+			if (depths.empty()) {
+				imageData.avgDepth = 0;
+				continue;
+			}
+			imageData.avgDepth = depths.GetNth(ROUND2INT<IDX>((depths.size()-1) * depthPercentile));
+		}
+		sumDepth += static_cast<REAL>(imageData.avgDepth);
+		++nImages;
+	}
+	return nImages == 0 ? 0.f : static_cast<float>(sumDepth / nImages);
+}
+/*----------------------------------------------------------------*/
 
 // estimate region-of-interest based on camera positions, directions and sparse points
 // scale specifies the ratio of the ROI's diameter

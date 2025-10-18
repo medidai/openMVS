@@ -143,7 +143,6 @@ public:
 	void UploadPointCloud(const MVS::PointCloud& pointcloud, float normalLength);
 	void UploadMesh(MVS::Mesh& mesh);
 	void UploadCameras(const Window& window);
-	void UploadImageOverlays(const Window& window);
 	void UploadSelection(const Window& window);
 	void UploadBounds(const MVS::Scene& scene);
 
