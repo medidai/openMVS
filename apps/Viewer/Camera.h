@@ -56,6 +56,7 @@ private:
 	// Scene bounds
 	Eigen::Vector3f sceneCenter;
 	Eigen::Vector3f sceneSize;
+	float sceneDistance; // average distance from camera to scene
 
 	// Projection parameters
 	cv::Size size; // viewport size
@@ -96,6 +97,7 @@ public:
 	// Scene setup
 	void Reset();
 	void SetSceneBounds(const Point3f& center, const Point3f& size);
+	void SetSceneDistance(float distance) { sceneDistance = distance; }
 	void SetTarget(const Point3f& newTarget);
 	void SetLookAt(const Eigen::Vector3d& eye, const Eigen::Vector3d& target, const Eigen::Vector3d& up);
 
@@ -108,6 +110,9 @@ public:
 	const Eigen::Vector3d& GetUp() const { return up; }
 	const Eigen::Vector3f& GetSceneCenter() const { return sceneCenter; }
 	const Eigen::Vector3f& GetSceneSize() const { return sceneSize; }
+	float GetSceneDistance() const { return sceneDistance; }
+	double GetNearPlane() const { return nearPlane; }
+	double GetFarPlane() const { return farPlane; }
 	const cv::Size& GetSize() const { return size; }
 	double GetFOV() const { return fov; }
 	bool IsOrthographic() const { return orthographic; }

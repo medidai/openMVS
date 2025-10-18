@@ -41,7 +41,7 @@ SelectionController::SelectionController(Camera& cam)
 	, currentState(STATE_IDLE)
 	, selectionStart(0, 0)
 	, selectionEnd(0, 0)
-	, circleRadius(0.0f)
+	, circleRadius(0.f)
 	, currentCameraIdxForHighlight(NO_ID)
 	, pendingSelectionIsAdditive(false)
 	, pendingSelectionIsSubtractive(false)
@@ -157,7 +157,7 @@ void SelectionController::clearSelection() {
 	facesSelected.clear();
 	selectionStart = Eigen::Vector2d(0, 0);
 	selectionEnd = Eigen::Vector2d(0, 0);
-	circleRadius = 0.0f;
+	circleRadius = 0.f;
 	currentCameraIdxForHighlight = NO_ID;
 
 	runChangeCallback();

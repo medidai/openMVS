@@ -120,12 +120,23 @@ PointCloud::Box PointCloud::GetAABB() const
 	return box;
 }
 // same, but only for points inside the given AABB
-PointCloud::Box PointCloud::GetAABB(const Box& bound) const
+// optionally consider only points with more than the given number of views
+PointCloud::Box PointCloud::GetAABB(const Box& bound, unsigned minViews) const
 {
 	Box box(true);
-	for (const Point& X: points)
-		if (bound.Intersects(X))
-			box.InsertFull(X);
+	if (!pointViews.empty() && minViews > 0) {
+		FOREACH(idx, points) {
+			if (pointViews[idx].size() < minViews)
+				continue;
+			const Point& X = points[idx];
+			if (bound.Intersects(X))
+				box.InsertFull(X);
+		}
+	} else {
+		for (const Point& X: points)
+			if (bound.Intersects(X))
+				box.InsertFull(X);
+	}
 	return box;
 }
 // compute the axis-aligned bounding-box of the point-cloud
@@ -139,6 +150,59 @@ PointCloud::Box PointCloud::GetAABB(unsigned minViews) const
 		if (pointViews[idx].size() >= minViews)
 			box.InsertFull(points[idx]);
 	return box;
+}
+// compute the axis-aligned bounding-box of the point-cloud
+// considering only points within the given percentile range per axis
+// optionally with more than the given number of views
+PointCloud::Box PointCloud::GetAABB(float minPercentile, float maxPercentile, unsigned minViews) const
+{
+	// get percentile bounds for each axis
+	const Box percentileBounds(GetPercentileAABB(minPercentile, maxPercentile, minViews));
+	// compute AABB from points within percentile bounds
+	return GetAABB(percentileBounds, minViews);
+}
+// compute the percentile axis-aligned bounding-box of the point-cloud
+// optionally with more than the given number of views
+PointCloud::Box PointCloud::GetPercentileAABB(float minPercentile, float maxPercentile, unsigned minViews) const
+{
+	ASSERT(minPercentile >= 0.f && minPercentile <= 1.f);
+	ASSERT(maxPercentile >= 0.f && maxPercentile <= 1.f);
+	ASSERT(minPercentile < maxPercentile);
+	// collect points that meet the minViews requirement
+	typedef CLISTDEF0IDX(Point::Type,Index) Scalars;
+	Scalars x, y, z;
+	x.reserve(points.size());
+	y.reserve(points.size());
+	z.reserve(points.size());
+	if (!pointViews.empty() && minViews > 0) {
+		FOREACH(idx, points) {
+			if (pointViews[idx].size() >= minViews) {
+				const Point& X = points[idx];
+				x.push_back(X.x);
+				y.push_back(X.y);
+				z.push_back(X.z);
+			}
+		}
+	} else {
+		for (const Point& X: points) {
+			x.push_back(X.x);
+			y.push_back(X.y);
+			z.push_back(X.z);
+		}
+	}	
+	if (x.empty())
+		return Box(true);
+	// compute percentile indices
+	x.Sort();
+	y.Sort();
+	z.Sort();
+	const float numPoints(x.size() - 1);
+	const Index idxMin(MAXF(Index(0), ROUND2INT<Index>(minPercentile * numPoints)));
+	const Index idxMax(MINF(static_cast<Index>(numPoints), ROUND2INT<Index>(maxPercentile * numPoints)));
+	// return percentile bounds for each axis
+	return Box(
+		Box::POINT(x[idxMin], y[idxMin], z[idxMin]),
+		Box::POINT(x[idxMax], y[idxMax], z[idxMax]));
 }
 
 // compute the center of the point-cloud as the median

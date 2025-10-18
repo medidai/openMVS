@@ -50,14 +50,13 @@ Window::Window()
 	, devicePixelRatio(1.0, 1.0)
 	, currentControlMode(CONTROL_ARCBALL)
 	, lastMousePos(0, 0)
-	, firstMouse(true)
 	, lastFrame(0.0)
 	, selectionType(SEL_NA)
 	, selectionIdx(NO_IDX)
 	, selectedNeighborCamera(NO_ID)
 	, clearColor(0.3f, 0.4f, 0.5f, 1.f)
 	, minViews(2)
-	, cameraSize(0.01f)
+	, cameraSize(0.1f)
 	, pointSize(3.f)
 	, pointNormalLength(0.02f)
 	, imageOverlayOpacity(0.5f)
@@ -153,6 +152,9 @@ bool Window::Initialize(const cv::Size& size, const String& windowTitle, Scene& 
 	glfwSetKeyCallback(window, KeyCallback);
 	glfwSetDropCallback(window, DropCallback);
 
+	// Try to enable OpenGL debug output for automatic error checking
+	GL_ENABLE_DEBUG_OUTPUT();
+
 	// Initialize core systems
 	arcballControls = std::make_unique<ArcballControls>(camera);
 	firstPersonControls = std::make_unique<FirstPersonControls>(camera);
@@ -165,9 +167,6 @@ bool Window::Initialize(const cv::Size& size, const String& windowTitle, Scene& 
 		DEBUG("Failed to initialize renderer");
 		return false;
 	}
-
-	// Try to enable OpenGL debug output for automatic error checking
-	GL_ENABLE_DEBUG_OUTPUT();
 
 	// Initialize UI
 	if (!ui->Initialize(*this, "#version 330")) {
@@ -309,15 +308,10 @@ void Window::UploadRenderData() {
 		meshSubMeshVisible.assign(renderer->GetMeshSubMeshCount(), true);
 	}
 
-	// Upload cameras if visible
-	if (!scene.GetScene().images.empty()) {
+	// Upload cameras if visible, and
+	// upload image overlays for cameras with valid textures
+	if (!scene.GetScene().images.empty())
 		renderer->UploadCameras(*this);
-	}
-
-	// Upload image overlays for cameras with valid textures
-	if (!scene.GetScene().images.empty()) {
-		renderer->UploadImageOverlays(*this);
-	}
 
 	// Upload bounds if available
 	renderer->UploadBounds(scene.GetScene());
@@ -407,10 +401,12 @@ void Window::Render() {
 	// End frame
 	renderer->EndFrame();
 
+	#ifndef OPENGL_DEBUG_ENABLE
 	// Manual error check as backup (this will be redundant if debug context is enabled)
 	auto [error, errorString] = OPENGL_DEBUG::GetOpenGLError();
 	if (error != GL_NO_ERROR)
 		DEBUG("OpenGL Error in Render(): %s", errorString.c_str());
+	#endif
 }
 
 void Window::SetTitle(const String& newTitle) {
@@ -443,7 +439,7 @@ void Window::Focus() {
 
 void Window::SetSceneBounds(const Point3f& center, const Point3f& size) {
 	camera.SetSceneBounds(center, size);
-	arcballControls->setSensitivity(norm(size) * 0.03);
+	arcballControls->setSensitivity(norm(size) * 0.1);
 	firstPersonControls->setMovementSpeed(norm(size) * 0.1);
 }
 
@@ -497,11 +493,6 @@ void Window::HandleMouseMove(double xpos, double ypos) {
 	// Skip UI if it wants to capture mouse
 	if (ui->WantCaptureMouse())
 		return;
-
-	if (firstMouse) {
-		lastMousePos = Eigen::Vector2d(xpos, ypos);
-		firstMouse = false;
-	}
 
 	// Normalize mouse position to [-1, 1] range
 	Eigen::Vector2d normalizedPos = NormalizeMousePos(xpos, ypos);

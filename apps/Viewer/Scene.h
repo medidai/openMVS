@@ -78,7 +78,7 @@ public:
 	// Scene management
 	bool Open(const String& fileName, String geometryFileName = {});
 	bool Save(const String& fileName = String(), bool bRescaleImages = false);
-	bool Export(const String& fileName, const String& exportType = String()) const;
+	bool Export(const String& fileName, const String& exportType = String(), bool bViews = true) const;
 
 	// Geometry operations
 	void RemoveSelectedGeometry();

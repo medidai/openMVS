@@ -234,14 +234,12 @@ bool Scene::Open(const String& fileName, String geometryFileName) {
 		sceneCenter = bounds.GetCenter();
 	} else {
 		if (!scene.pointcloud.IsEmpty()) {
-			bounds = scene.pointcloud.GetAABB(MINF(3u,scene.nCalibratedImages));
-			if (bounds.IsEmpty())
-				bounds = scene.pointcloud.GetAABB();
+			bounds = scene.pointcloud.GetAABB(0.1f, 0.9f);
 			sceneCenter = scene.pointcloud.GetCenter();
 		}
 		if (!scene.mesh.IsEmpty()) {
 			scene.mesh.ComputeNormalFaces();
-			bounds.Insert(scene.mesh.GetAABB());
+			bounds.Insert(scene.mesh.GetAABB(0.1f, 0.9f));
 			sceneCenter = scene.mesh.GetCenter();
 		}
 	}
@@ -270,7 +268,10 @@ bool Scene::Open(const String& fileName, String geometryFileName) {
 	}
 
 	// Set images size for camera view mode
-	window.GetCamera().SetMaxCamID(images.size());
+	if (!images.empty()) {
+		window.GetCamera().SetMaxCamID(images.size());
+		window.GetCamera().SetSceneDistance(scene.ComputeDistanceCameras2Scene(0.1f, true));
+	}
 
 	// Set up camera view mode callback
 	window.GetCamera().SetCameraViewModeCallback([this](MVS::IIndex camID) {
@@ -326,14 +327,14 @@ bool Scene::Save(const String& _fileName, bool bRescaleImages) {
 	return true;
 }
 
-bool Scene::Export(const String& _fileName, const String& exportType) const {
+bool Scene::Export(const String& _fileName, const String& exportType, bool bViews) const {
 	if (!IsOpen())
 		return false;
 	ASSERT(!sceneName.IsEmpty());
 	String lastFileName;
 	const String fileName(!_fileName.empty() ? _fileName : sceneName);
 	const String baseFileName(Util::getFileFullName(fileName));
-	const bool bPoints(scene.pointcloud.Save(lastFileName=(baseFileName+_T("_pointcloud.ply")), nArchiveType==ARCHIVE_MVS));
+	const bool bPoints(scene.pointcloud.Save(lastFileName=(baseFileName+_T("_pointcloud.ply")), nArchiveType==ARCHIVE_MVS && bViews));
 	const bool bMesh(scene.mesh.Save(lastFileName=(baseFileName+_T("_mesh")+(!exportType.empty()?exportType.c_str():(Util::getFileExt(fileName)==_T(".obj")?_T(".obj"):_T(".ply")))), cList<String>(), true));
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	if (VERBOSITY_LEVEL > 2 && (bPoints || bMesh))
@@ -381,8 +382,7 @@ void Scene::CropToBounds()
 		return;
 	scene.pointcloud.RemovePointsOutside(scene.obb);
 	scene.mesh.RemoveFacesOutside(scene.obb);
-	AABB3f bounds = scene.obb.GetAABB();
-	window.SetSceneBounds(bounds.GetCenter(), bounds.GetSize());
+	window.SetSceneBounds(scene.obb.GetCenter(), scene.obb.GetSize());
 }
 
 void Scene::TogleSceneBox()
@@ -395,9 +395,9 @@ void Scene::TogleSceneBox()
 	if (scene.IsBounded())
 		scene.obb = OBB3f(true);
 	else if (!scene.mesh.IsEmpty())
-		scene.obb.Set(EnlargeAABB(scene.mesh.GetAABB()));
+		scene.obb.Set(EnlargeAABB(scene.mesh.GetAABB(0.1f, 0.9f)));
 	else if (!scene.pointcloud.IsEmpty())
-		scene.obb.Set(EnlargeAABB(scene.pointcloud.GetAABB(window.minViews)));
+		scene.obb.Set(EnlargeAABB(scene.pointcloud.GetAABB(0.1f, 0.9f)));
 	window.GetRenderer().UploadBounds(scene);
 }
 
@@ -482,7 +482,7 @@ void Scene::OnCastRay(const Ray3d& ray, int button, int action, int mods) {
 		}
 		if (window.showPointCloud && !octPoints.IsEmpty()) {
 			// find ray intersection with the points
-			const MVS::IIndex minViews(CLAMP(window.minViews, 1u, scene.images.size()));
+			const MVS::IIndex minViews(scene.images.empty() ? 0u : CLAMP(window.minViews, 1u, scene.images.size()));
 			const MVS::IntersectRayPoints intRay(octPoints, ray, scene.pointcloud, minViews);
 			if (intRay.pick.IsValid() && intRay.pick.dist < minDist) {
 				window.selectionType = Window::SEL_POINT;

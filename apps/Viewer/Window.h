@@ -78,7 +78,6 @@ private:
 
 	// Input state
 	Eigen::Vector2d lastMousePos;
-	bool firstMouse;
 
 	// Timing
 	double lastFrame;

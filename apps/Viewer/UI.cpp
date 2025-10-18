@@ -112,6 +112,7 @@ bool UI::Initialize(Window& window, const String& glslVersion) {
 	// Setup Platform/Renderer backends
 	ImGui_ImplGlfw_InitForOpenGL(window.GetGLFWWindow(), true);
 	ImGui_ImplOpenGL3_Init(glslVersion);
+	ImGui::LoadIniSettingsFromDisk(io.IniFilename);
 
 	return true;
 }
@@ -376,7 +377,7 @@ void UI::ShowCameraControls(Window& window) {
 			window.RequestRedraw();
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Toggle camera frustum display (C key)");
-		if (ImGui::SliderFloat("Camera Size", &window.cameraSize, 0.0001f, 0.1f, "%.4f"))
+		if (ImGui::SliderFloat("Camera Size", &window.cameraSize, 0.005f, 0.5f, "%.4f"))
 			window.GetRenderer().UploadCameras(window);
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Adjust camera size");
@@ -388,7 +389,7 @@ void UI::ShowCameraControls(Window& window) {
 			ArcballControls& arcballControls = window.GetArcballControls();
 			// General Sensitivity input
 			float sensitivity = (float)arcballControls.getSensitivity();
-			if (ImGui::InputFloat("Sensitivity", &sensitivity, 0.1f, 1.f, "%.3f"))
+			if (ImGui::InputFloat("Sensitivity", &sensitivity, 0.1f, 5.f, "%.2f"))
 				arcballControls.setSensitivity(MAXF(0.001f, sensitivity));
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Overall sensitivity multiplier");
@@ -400,7 +401,7 @@ void UI::ShowCameraControls(Window& window) {
 				ImGui::SetTooltip("Rotation sensitivity");
 			// Zoom Sensitivity slider
 			float zoomSensitivity = (float)arcballControls.getZoomSensitivity();
-			if (ImGui::SliderFloat("Zoom", &zoomSensitivity, 0.1f, 10.f, "%.2f"))
+			if (ImGui::SliderFloat("Zoom", &zoomSensitivity, 0.1f, 5.f, "%.2f"))
 				arcballControls.setZoomSensitivity(zoomSensitivity);
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Zoom/scroll sensitivity");
@@ -901,6 +902,7 @@ void UI::ShowExportDialog(Scene& scene) {
 		ImGui::Separator();
 
 		static int exportFormat = 0;
+		static bool bExportViews = true;
 		const char* formatOptions[] = { "PLY Point Cloud", "PLY Mesh", "OBJ Mesh", "GLTF Mesh" };
 		ImGui::Combo("Export Format", &exportFormat, formatOptions, IM_ARRAYSIZE(formatOptions));
 
@@ -915,6 +917,13 @@ void UI::ShowExportDialog(Scene& scene) {
 		case 0: // PLY Point Cloud
 			if (hasPointCloud) {
 				ImGui::Text("✓ Point cloud: %zu points", mvs_scene.pointcloud.points.size());
+				if (!mvs_scene.pointcloud.pointViews.empty()) {
+					ImGui::Text("✓ Point views available");
+					ImGui::SameLine();
+					ImGui::Checkbox("Export", &bExportViews);
+				}
+				if (!mvs_scene.pointcloud.pointWeights.empty())
+					ImGui::Text("✓ Point weights available");
 				if (!mvs_scene.pointcloud.colors.empty())
 					ImGui::Text("✓ Point colors available");
 				if (!mvs_scene.pointcloud.normals.empty())
@@ -957,7 +966,7 @@ void UI::ShowExportDialog(Scene& scene) {
 				// Ensure the filename has the correct extension
 				String baseFileName = Util::getFileFullName(filename);
 				String finalFileName = baseFileName + exportType;
-				scene.Export(finalFileName, exportType);
+				scene.Export(finalFileName, exportType, bExportViews);
 			}
 			showExportDialog = false;
 		}
@@ -1502,10 +1511,10 @@ void UI::ShowSelectionOverlay(const Window& window) {
 			if (!mvs_scene.pointcloud.pointViews.empty() && window.selectionIdx < mvs_scene.pointcloud.pointViews.size()) {
 				const MVS::PointCloud::ViewArr& views = mvs_scene.pointcloud.pointViews[window.selectionIdx];
 				if (!views.empty()) {
-					ImGui::Text("  views: %u", (unsigned)views.size());
+					ImGui::Text("  views: %u", views.size());
 					// Show first few views to avoid overwhelming the display
-					int maxViewsToShow = MINF(8, (int)views.size());
-					for (int v = 0; v < maxViewsToShow; ++v) {
+					const unsigned maxViewsToShow = MINF(8u, views.size());
+					for (unsigned v = 0; v < maxViewsToShow; ++v) {
 						const MVS::PointCloud::View idxImage = views[v];
 						if (idxImage < mvs_scene.images.size()) {
 							const MVS::Image& imageData = mvs_scene.images[idxImage];
@@ -1518,8 +1527,8 @@ void UI::ShowSelectionOverlay(const Window& window) {
 								fileName.c_str(), x.x, x.y, conf);
 						}
 					}
-					if ((int)views.size() > maxViewsToShow)
-						ImGui::Text("    ... and %d more", (int)views.size() - maxViewsToShow);
+					if (views.size() > maxViewsToShow && mvs_scene.IsValid())
+						ImGui::Text("    ... and %u more", views.size() - maxViewsToShow);
 				}
 			}
 			break; }

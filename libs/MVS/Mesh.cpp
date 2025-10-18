@@ -205,6 +205,47 @@ Mesh::Box Mesh::GetAABB(const Box& bound) const
 			box.InsertFull(X);
 	return box;
 }
+// compute the axis-aligned bounding-box of the mesh
+// considering only vertices within the given percentile range per axis
+Mesh::Box Mesh::GetAABB(float minPercentile, float maxPercentile) const
+{
+	// get percentile bounds for each axis
+	const Box percentileBounds(GetPercentileAABB(minPercentile, maxPercentile));
+	// compute AABB from vertices within percentile bounds
+	return GetAABB(percentileBounds);
+}
+// compute the percentile axis-aligned bounding-box of the mesh
+// considering only vertices within the given percentile range per axis
+Mesh::Box Mesh::GetPercentileAABB(float minPercentile, float maxPercentile) const
+{
+	ASSERT(minPercentile >= 0.f && minPercentile <= 1.f);
+	ASSERT(maxPercentile >= 0.f && maxPercentile <= 1.f);
+	ASSERT(minPercentile < maxPercentile);
+	// collect points per axis
+	typedef CLISTDEF0IDX(Type,VIndex) Scalars;
+	Scalars x, y, z;
+	x.reserve(vertices.size());
+	y.reserve(vertices.size());
+	z.reserve(vertices.size());
+	for (const Vertex& X: vertices) {
+		x.push_back(X.x);
+		y.push_back(X.y);
+		z.push_back(X.z);
+	}
+	if (x.empty())
+		return Box(true);
+	// compute percentile indices
+	x.Sort();
+	y.Sort();
+	z.Sort();
+	const float numPoints(x.size() - 1);
+	const VIndex idxMin(MAXF(VIndex(0), ROUND2INT<VIndex>(minPercentile * numPoints)));
+	const VIndex idxMax(MINF(static_cast<VIndex>(numPoints), ROUND2INT<VIndex>(maxPercentile * numPoints)));
+	// return percentile bounds for each axis
+	return Box(
+		Box::POINT(x[idxMin], y[idxMin], z[idxMin]),
+		Box::POINT(x[idxMax], y[idxMax], z[idxMax]));
+}
 
 // compute the center of the point-cloud as the median
 Mesh::Vertex Mesh::GetCenter() const

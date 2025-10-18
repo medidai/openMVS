@@ -321,9 +321,13 @@ inline void TOBB<TYPE,DIMS>::Translate(const POINT& d)
 template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::Transform(const MATRIX& m)
 {
-	m_rot = m * m_rot;
+	Eigen::Transform<Type, DIMS, Eigen::Affine> transform(m);
+	MATRIX rotation, scaling;
+	transform.computeRotationScaling(&rotation, &scaling);
+	m_rot = rotation * m_rot;
 	m_pos = m * m_pos;
-}
+	m_ext = scaling * m_ext;
+} // Transform
 /*----------------------------------------------------------------*/
 
 
@@ -395,15 +399,7 @@ template <typename TYPE, int DIMS>
 bool TOBB<TYPE,DIMS>::Intersects(const POINT& pt) const
 {
 	const POINT dist(m_rot * (pt - m_pos));
-	if (DIMS == 2) {
-		return ABS(dist[0]) <= m_ext[0]
-			&& ABS(dist[1]) <= m_ext[1];
-	}
-	if (DIMS == 3) {
-		return ABS(dist[0]) <= m_ext[0]
-			&& ABS(dist[1]) <= m_ext[1]
-			&& ABS(dist[2]) <= m_ext[2];
-	}
+	return (dist.array().abs() <= m_ext.array()).all();
 } // Intersects(POINT)
 /*----------------------------------------------------------------*/
 
