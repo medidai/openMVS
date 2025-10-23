@@ -1082,7 +1082,7 @@ bool Scene::EstimateSparseSurface(unsigned kNeighbors, float sizeScale, float no
 	kdtree.buildIndex();
 
 	const uint32_t N = pointcloud.points.size();
-	const unsigned k = std::max<unsigned>(3u, kNeighbors);
+	const unsigned k = MAXF(3u, kNeighbors);
 	const float cosMax = COS(normalAngleMax);
 	const nanoflann::SearchParameters searchParams(0, false);
 

@@ -361,6 +361,140 @@ bool Scene::Export(const String& _fileName, const String& exportType, bool bView
 	return bPoints || bMesh;
 }
 
+bool Scene::RunDensifyWorkflow(const DensifyWorkflowOptions& options) {
+	if (!IsOpen()) {
+		DEBUG("error: no scene loaded");
+		return false;
+	}
+	if (scene.images.empty()) {
+		DEBUG("error: scene has no images to densify");
+		return false;
+	}
+
+	MVS::OPTDENSE::init();
+	MVS::OPTDENSE::update();
+	MVS::OPTDENSE::nResolutionLevel = options.resolutionLevel;
+	MVS::OPTDENSE::nMaxResolution = options.maxResolution;
+	MVS::OPTDENSE::nMinResolution = options.minResolution;
+	MVS::OPTDENSE::nSubResolutionLevels = options.subResolutionLevels;
+	MVS::OPTDENSE::nNumViews = options.numViews;
+	MVS::OPTDENSE::nMinViews = MAXF(1u, options.minViews);
+	MVS::OPTDENSE::nMinViewsTrustPoint = MAXF(1u, options.minViewsTrust);
+	MVS::OPTDENSE::nMinViewsFuse = MAXF(1u, options.minViewsFuse);
+	MVS::OPTDENSE::nEstimationIters = MAXF(1u, options.estimationIters);
+	MVS::OPTDENSE::nEstimationGeometricIters = options.geometricIters;
+	MVS::OPTDENSE::nFuseFilter = CLAMP(options.fuseFilter, 0u, (unsigned)MVS::OPTDENSE::FUSE_DENSEFILTER);
+	MVS::OPTDENSE::fDepthReprojectionErrorThreshold = options.fDepthReprojectionErrorThreshold;
+	MVS::OPTDENSE::nEstimateColors = options.estimateColors ? 2u : 0u;
+	MVS::OPTDENSE::nEstimateNormals = options.estimateNormals ? 2u : 0u;
+	MVS::OPTDENSE::bRemoveDmaps = options.removeDepthMaps;
+	MVS::OPTDENSE::nOptimize = options.postprocess ? (unsigned)MVS::OPTDENSE::OPTIMIZE : 0u;
+
+	if (!scene.DenseReconstruction(options.fusionMode, options.cropToROI, options.borderROI, options.sampleMeshNeighbors)) {
+		DEBUG("error: dense reconstruction failed");
+		return false;
+	}
+
+	UpdateGeometryAfterModification();
+	return true;
+}
+
+bool Scene::RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options) {
+	if (!IsOpen()) {
+		DEBUG("error: no scene loaded");
+		return false;
+	}
+	if (!scene.pointcloud.IsValid()) {
+		DEBUG("error: point-cloud is empty; run densify before reconstructing the mesh");
+		return false;
+	}
+
+	MVS::Scene& mvsScene = scene;
+
+	if (options.constantWeight)
+		mvsScene.pointcloud.pointWeights.Release();
+
+	if (!mvsScene.ReconstructMesh(options.minPointDistance, options.useFreeSpaceSupport, options.useOnlyROI,
+		4, options.thicknessFactor, options.qualityFactor)) {
+		DEBUG("error: mesh reconstruction failed");
+		return false;
+	}
+
+	if (options.cropToROI && mvsScene.IsBounded()) {
+		const size_t numVertices = mvsScene.mesh.vertices.size();
+		const size_t numFaces = mvsScene.mesh.faces.size();
+		mvsScene.mesh.RemoveFacesOutside(mvsScene.obb);
+		VERBOSE("Mesh trimmed to ROI: %u vertices and %u faces removed",
+			(unsigned)(numVertices - mvsScene.mesh.vertices.size()),
+			(unsigned)(numFaces - mvsScene.mesh.faces.size()));
+	}
+
+	float decimate = options.decimateMesh;
+	if (options.targetFaceNum && !mvsScene.mesh.faces.empty())
+		decimate = static_cast<float>(options.targetFaceNum) / mvsScene.mesh.faces.size();
+	decimate = CLAMP(decimate, 0.f, 1.f);
+	if (decimate <= 0.f)
+		decimate = 1.f;
+
+	mvsScene.mesh.Clean(1.f, options.removeSpurious, options.removeSpikes, options.closeHoles, options.smoothSteps, options.edgeLength, false);
+	mvsScene.mesh.Clean(decimate, 0.f, options.removeSpikes, options.closeHoles, 0u, 0.f, false);
+	mvsScene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true);
+
+	UpdateGeometryAfterModification();
+	return true;
+}
+
+bool Scene::RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options) {
+	if (!IsOpen()) {
+		DEBUG("error: no scene loaded");
+		return false;
+	}
+	if (scene.mesh.IsEmpty()) {
+		DEBUG("error: mesh is empty; reconstruct a mesh before refining");
+		return false;
+	}
+
+	if (!scene.RefineMesh(options.resolutionLevel, options.minResolution, options.maxViews,
+		options.decimateMesh, options.closeHoles, options.ensureEdgeSize, options.maxFaceArea,
+		options.scales, options.scaleStep, options.alternatePair, options.regularityWeight,
+		options.rigidityElasticityRatio, options.gradientStep, options.planarVertexRatio,
+		options.reduceMemory)) {
+		DEBUG("error: mesh refinement failed");
+		return false;
+	}
+
+	UpdateGeometryAfterModification();
+	return true;
+}
+
+bool Scene::RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options) {
+	if (!IsOpen()) {
+		DEBUG("error: no scene loaded");
+		return false;
+	}
+	if (scene.mesh.IsEmpty()) {
+		DEBUG("error: mesh is empty; reconstruct or load a mesh before texturing");
+		return false;
+	}
+
+	float decimate = CLAMP(options.decimateMesh, 0.f, 1.f);
+	if (decimate <= 0.f)
+		decimate = 1.f;
+	scene.mesh.Clean(decimate, 0.f, false, options.closeHoles, 0u, 0.f, false);
+	scene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true);
+
+	if (!scene.TextureMesh(options.resolutionLevel, options.minResolution, options.minCommonCameras,
+		options.outlierThreshold, options.ratioDataSmoothness, options.globalSeamLeveling,
+		options.localSeamLeveling, options.textureSizeMultiple, options.rectPackingHeuristic,
+		Pixel8U(options.emptyColor), options.sharpnessWeight, options.ignoreMaskLabel, options.maxTextureSize)) {
+		DEBUG("error: mesh texturing failed");
+		return false;
+	}
+
+	UpdateGeometryAfterModification();
+	return true;
+}
+
 MVS::IIndex Scene::ImageIdxMVS2Viewer(MVS::IIndex idx) const {
 	// Convert MVS image index to viewer index
 	// The list of images in the viewer is a subset of the MVS images,

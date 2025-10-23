@@ -290,7 +290,9 @@ void Window::PollEvents() {
 
 void Window::UploadRenderData() {
 	Scene& scene = GetScene();
-	if (!scene.IsOpen()) return;
+	if (!scene.IsOpen())
+		return;
+	renderer->Reset();
 
 	// Upload point cloud data if needed
 	if (!scene.GetScene().pointcloud.IsEmpty()) {
@@ -351,6 +353,7 @@ void Window::Render() {
 
 		// Show render settings
 		ui->ShowRenderSettings(*this);
+		ui->ShowWorkflowWindows(*this);
 
 		// Render the scene contents
 		if (showPointCloud) {

@@ -64,17 +64,19 @@ bool Renderer::Initialize() {
 		// Set default lighting
 		SetLighting(Eigen::Vector3f(0.f, 0.f, 1.f), 1.f, Eigen::Vector3f(1.f, 1.f, 1.f));
 
+		// Enable point size and line width control
+		GL_CHECK(glEnable(GL_PROGRAM_POINT_SIZE));
+
 		// Enable depth testing
 		GL_CHECK(glEnable(GL_DEPTH_TEST));
 		GL_CHECK(glDepthFunc(GL_LESS));
-
-		// Enable point size and line width control
-		GL_CHECK(glEnable(GL_PROGRAM_POINT_SIZE));
 
 		// Enable blending for transparency
 		GL_CHECK(glEnable(GL_BLEND));
 		GL_CHECK(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
+		GL_CHECK(glDisable(GL_CULL_FACE));
+		GL_CHECK(glFrontFace(GL_CCW));
 		return true;
 	}
 	catch (const std::exception& e) {
@@ -195,6 +197,8 @@ void Renderer::CreateShaders() {
 		#include "shaders/selection.vert"
 		,
 		#include "shaders/selection.frag"
+		,
+		#include "shaders/selection.geom"
 	);
 
 	// 2D overlay shader for SelectionController
@@ -1129,10 +1133,6 @@ void Renderer::RenderImageOverlays(const Window& window) {
 	if (imageOverlayIndexCount == 0)
 		return;
 
-	// Save current GL state
-	GLboolean depthTestEnabled;
-	GL_CHECK(glGetBooleanv(GL_DEPTH_TEST, &depthTestEnabled));
-
 	// Set up for 3D rendering with special handling for transparency
 	GL_CHECK(glDisable(GL_DEPTH_TEST)); // Temporarily disable depth testing to ensure visibility
 	GL_CHECK(glEnable(GL_BLEND));
@@ -1169,8 +1169,7 @@ void Renderer::RenderImageOverlays(const Window& window) {
 	imageOverlayVAO->Unbind();
 
 	// Restore previous depth test state
-	if (depthTestEnabled)
-		GL_CHECK(glEnable(GL_DEPTH_TEST));
+	GL_CHECK(glEnable(GL_DEPTH_TEST));
 }
 
 void Renderer::RenderSelection(const Window& window) {
@@ -1199,7 +1198,12 @@ void Renderer::RenderSelection(const Window& window) {
 		return;
 
 	// Render selection lines
+	GL_CHECK(glDisable(GL_DEPTH_TEST));
+
 	selectionShader->Use();
+	GLint viewport[4] = { 0, 0, 1, 1 };
+	GL_CHECK(glGetIntegerv(GL_VIEWPORT, viewport));
+	selectionShader->SetVector2("viewportSize", Eigen::Vector2f((float)viewport[2], (float)viewport[3]));
 	selectionVAO->Bind();
 
 	// Use different colors for different selection types
@@ -1225,6 +1229,8 @@ void Renderer::RenderSelection(const Window& window) {
 	}
 
 	selectionVAO->Unbind();
+
+	GL_CHECK(glEnable(GL_DEPTH_TEST));
 }
 
 void Renderer::RenderBounds() {
@@ -1250,7 +1256,6 @@ void Renderer::RenderCoordinateAxes(const Camera& camera) {
 	GLint oldViewport[4];
 	GLboolean depthTestEnabled;
 	GL_CHECK(glGetIntegerv(GL_VIEWPORT, oldViewport));
-	GL_CHECK(glGetBooleanv(GL_DEPTH_TEST, &depthTestEnabled));
 
 	// Set up a small viewport in the bottom right corner
 	const int axesSize = 100; // Size of the axes widget
@@ -1294,8 +1299,7 @@ void Renderer::RenderCoordinateAxes(const Camera& camera) {
 
 	// Restore original viewport and depth test state
 	GL_CHECK(glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]));
-	if (depthTestEnabled)
-		GL_CHECK(glEnable(GL_DEPTH_TEST));
+	GL_CHECK(glEnable(GL_DEPTH_TEST));
 }
 
 void Renderer::RenderArcballGizmos(const Camera& camera, const class ArcballControls& controls) {
@@ -1408,12 +1412,7 @@ void Renderer::RenderSelectionOverlay(const Window& window) {
 	if (!selectionOverlayShader || !selectionOverlayVAO || !selectionOverlayVBO)
 		return;
 	// Disable depth testing for 2D overlay
-	GLboolean depthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
-	if (depthTestEnabled)
-		GL_CHECK(glDisable(GL_DEPTH_TEST));
-
-	// Set up 2D rendering state
-	GL_CHECK(glDisable(GL_CULL_FACE));
+	GL_CHECK(glDisable(GL_DEPTH_TEST));
 
 	selectionOverlayShader->Use();
 	selectionOverlayShader->SetVector3("overlayColor", Eigen::Vector3f(1.f, 1.f, 0.f)); // Yellow
@@ -1464,8 +1463,7 @@ void Renderer::RenderSelectionOverlay(const Window& window) {
 	selectionOverlayVAO->Unbind();
 
 	// Restore OpenGL state
-	if (depthTestEnabled)
-		GL_CHECK(glEnable(GL_DEPTH_TEST));
+	GL_CHECK(glEnable(GL_DEPTH_TEST));
 }
 
 void Renderer::RenderSelectedGeometry(const Window& window) {
@@ -1475,7 +1473,6 @@ void Renderer::RenderSelectedGeometry(const Window& window) {
 		return;
 
 	// Enable blending for highlighting effect
-	glIsEnabled(GL_DEPTH_TEST);
 	GL_CHECK(glEnable(GL_BLEND));
 	GL_CHECK(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
