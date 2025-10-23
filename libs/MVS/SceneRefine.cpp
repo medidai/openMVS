@@ -1283,10 +1283,15 @@ bool Scene::RefineMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsig
 					   unsigned nScales, float fScaleStep,
 					   unsigned nAlternatePair, float fRegularityWeight, float fRatioRigidityElasticity, float fGradientStep, float fThPlanarVertex, unsigned nReduceMemory)
 {
-	if (pointcloud.IsEmpty() && !ImagesHaveNeighbors())
+	bool bGeneratedPointcloud(false);
+	if (pointcloud.IsEmpty() && !ImagesHaveNeighbors()) {
 		SampleMeshWithVisibility();
+		bGeneratedPointcloud = true;
+	}
 
 	MeshRefine refine(*this, nReduceMemory, nAlternatePair, fRegularityWeight, fRatioRigidityElasticity, nResolutionLevel, nMinResolution, nMaxViews, nMaxThreads);
+	if (bGeneratedPointcloud)
+		pointcloud.Release();
 	if (!refine.IsValid())
 		return false;
 

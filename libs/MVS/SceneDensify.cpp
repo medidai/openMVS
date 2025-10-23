@@ -1748,8 +1748,12 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 		IIndex numNeighbors(0);
 		ASSERT(!depthData.images.empty() && !depthData.neighbors.empty());
 		#ifdef DENSE_USE_OPENMP
+		bool bAbort(false);
 		#pragma omp parallel for
 		for (int64_t i=0; i<(int64_t)depthData.neighbors.size(); ++i) {
+			#pragma omp flush (bAbort)
+			if (bAbort)
+				continue;
 			const ViewScore& neighbor = depthData.neighbors[(IIndex)i];
 		#else
 		for (const ViewScore& neighbor: depthData.neighbors) {
@@ -1761,17 +1765,19 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 			if (depthDataB.IsEmpty())
 				continue;
 			neighbors[neighbor.ID] = true;
-			if (++numNeighbors >= OPTDENSE::nMaxViewsFuse)
-				#ifdef DENSE_USE_OPENMP
-				continue;
-				#else
-				break;
-				#endif
 			UseMask& useMask = arrUseMask[neighbor.ID];
 			if (!useMask.empty())
 				continue;
 			useMask.create(depthDataB.depthMap.size());
 			useMask.memset(0);
+			if (++numNeighbors >= OPTDENSE::nMaxViewsFuse) {
+				#ifdef DENSE_USE_OPENMP
+				bAbort = true;
+				#pragma omp flush (bAbort)
+				#else
+				break;
+				#endif
+			}
 		}
 		ASSERT(!depthData.IsEmpty());
 		MAYBEUNUSED const Image& imageData = *depthData.images.front().pImageData;

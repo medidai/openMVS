@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include "Window.h"
 
 namespace VIEWER {
@@ -39,6 +40,91 @@ class Scene {
 public:
 	typedef MVS::PointCloud::Octree OctreePoints;
 	typedef MVS::Mesh::Octree OctreeMesh;
+
+public:
+	struct DensifyWorkflowOptions {
+		unsigned resolutionLevel{1};
+		unsigned maxResolution{2560};
+		unsigned minResolution{640};
+		unsigned subResolutionLevels{2};
+		#ifdef _USE_CUDA
+		unsigned numViews{8};
+		#else
+		unsigned numViews{5};
+		#endif
+		unsigned minViews{3};
+		unsigned minViewsTrust{2};
+		unsigned minViewsFuse{2};
+		#ifdef _USE_CUDA
+		unsigned estimationIters{4};
+		#else
+		unsigned estimationIters{3};
+		#endif
+		unsigned geometricIters{2};
+		unsigned fuseFilter{2};
+		bool estimateColors{true};
+		bool estimateNormals{true};
+		bool removeDepthMaps{false};
+		bool postprocess{false};
+		int fusionMode{0};
+		float fDepthReprojectionErrorThreshold{1.2f};
+		bool cropToROI{true};
+		float borderROI{0.f};
+		float sampleMeshNeighbors{0.f};
+	};
+
+	struct ReconstructMeshWorkflowOptions {
+		float minPointDistance{1.5f};
+		bool useFreeSpaceSupport{false};
+		bool useOnlyROI{false};
+		bool constantWeight{true};
+		float thicknessFactor{1.f};
+		float qualityFactor{1.f};
+		float decimateMesh{1.f};
+		unsigned targetFaceNum{0};
+		float removeSpurious{20.f};
+		bool removeSpikes{true};
+		unsigned closeHoles{30};
+		unsigned smoothSteps{2};
+		float edgeLength{0.f};
+		bool cropToROI{true};
+	};
+
+	struct RefineMeshWorkflowOptions {
+		unsigned resolutionLevel{0};
+		unsigned minResolution{640};
+		unsigned maxViews{8};
+		float decimateMesh{0.f};
+		unsigned closeHoles{30};
+		unsigned ensureEdgeSize{1};
+		unsigned maxFaceArea{32};
+		unsigned scales{2};
+		float scaleStep{0.5f};
+		unsigned alternatePair{0};
+		float regularityWeight{0.2f};
+		float rigidityElasticityRatio{0.9f};
+		float gradientStep{45.05f};
+		float planarVertexRatio{0.f};
+		unsigned reduceMemory{1};
+	};
+
+	struct TextureMeshWorkflowOptions {
+		float decimateMesh{1.f};
+		unsigned closeHoles{30};
+		unsigned resolutionLevel{0};
+		unsigned minResolution{640};
+		unsigned minCommonCameras{0};
+		float outlierThreshold{6e-2f};
+		float ratioDataSmoothness{0.1f};
+		bool globalSeamLeveling{true};
+		bool localSeamLeveling{true};
+		unsigned textureSizeMultiple{0};
+		unsigned rectPackingHeuristic{3};
+		uint32_t emptyColor{0x00FF7F27};
+		float sharpnessWeight{0.5f};
+		int ignoreMaskLabel{-1};
+		int maxTextureSize{8192};
+	};
 
 public:
 	ARCHIVE_TYPE nArchiveType;
@@ -52,6 +138,11 @@ public:
 	MVS::Scene scene;
 	Window window;
 	ImageArr images; // scene photos (only valid)
+
+	DensifyWorkflowOptions densifyOptions;
+	ReconstructMeshWorkflowOptions reconstructOptions;
+	RefineMeshWorkflowOptions refineOptions;
+	TextureMeshWorkflowOptions textureOptions;
 
 	OctreePoints octPoints;
 	OctreeMesh octMesh;
@@ -80,12 +171,26 @@ public:
 	bool Save(const String& fileName = String(), bool bRescaleImages = false);
 	bool Export(const String& fileName, const String& exportType = String(), bool bViews = true) const;
 
+	// Workflows
+	bool RunDensifyWorkflow(const DensifyWorkflowOptions& options);
+	bool RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options);
+	bool RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options);
+	bool RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options);
+
 	// Geometry operations
 	void RemoveSelectedGeometry();
 	void SetROIFromSelection(bool aabb = false);
 	MVS::Scene CropToPoints(const MVS::PointCloud::IndexArr& selectedPointIndices, unsigned minPoints = 20) const;
 
 	// Getters
+	DensifyWorkflowOptions& GetDensifyWorkflowOptions() { return densifyOptions; }
+	const DensifyWorkflowOptions& GetDensifyWorkflowOptions() const { return densifyOptions; }
+	ReconstructMeshWorkflowOptions& GetReconstructMeshWorkflowOptions() { return reconstructOptions; }
+	const ReconstructMeshWorkflowOptions& GetReconstructMeshWorkflowOptions() const { return reconstructOptions; }
+	RefineMeshWorkflowOptions& GetRefineMeshWorkflowOptions() { return refineOptions; }
+	const RefineMeshWorkflowOptions& GetRefineMeshWorkflowOptions() const { return refineOptions; }
+	TextureMeshWorkflowOptions& GetTextureMeshWorkflowOptions() { return textureOptions; }
+	const TextureMeshWorkflowOptions& GetTextureMeshWorkflowOptions() const { return textureOptions; }
 	const MVS::Scene& GetScene() const { return scene; }
 	MVS::Scene& GetScene() { return scene; }
 	const ImageArr& GetImages() const { return images; } 

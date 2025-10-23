@@ -56,6 +56,10 @@ private:
 	bool showExportDialog;
 	bool showCameraInfoDialog;
 	bool showSelectionDialog;
+	bool showDensifyWorkflow;
+	bool showReconstructWorkflow;
+	bool showRefineWorkflow;
+	bool showTextureWorkflow;
 
 	// Auto-hiding menu state
 	bool showMainMenu;
@@ -88,6 +92,7 @@ public:
 	void ShowPerformanceOverlay(Window& window);
 	void ShowViewportOverlay(const Window& window);
 	void ShowSelectionOverlay(const Window& window);
+	void ShowWorkflowWindows(Window& window);
 	void ToggleHelpDialog() { showHelpDialog = !showHelpDialog; }
 
 	// Dialogs
@@ -113,6 +118,10 @@ private:
 	void ShowPointCloudControls(Window& window);
 	void ShowMeshControls(Window& window);
 	void ShowSelectionInfo(const Window& window);
+	void ShowDensifyWorkflowWindow(Window& window);
+	void ShowReconstructWorkflowWindow(Window& window);
+	void ShowRefineWorkflowWindow(Window& window);
+	void ShowTextureWorkflowWindow(Window& window);
 
 	// Auto-hiding menu helpers
 	void UpdateMenuVisibility();

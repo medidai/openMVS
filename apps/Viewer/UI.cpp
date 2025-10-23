@@ -39,6 +39,7 @@
 #include <imgui_impl_opengl3.h>
 #include <portable-file-dialogs.h>
 #include <unordered_map>
+#include <algorithm>
 
 using namespace VIEWER;
 
@@ -57,6 +58,10 @@ UI::UI()
 	, showExportDialog(false)
 	, showCameraInfoDialog(false)
 	, showSelectionDialog(false)
+	, showDensifyWorkflow(false)
+	, showReconstructWorkflow(false)
+	, showRefineWorkflow(false)
+	, showTextureWorkflow(false)
 	, showMainMenu(false)
 	, menuWasVisible(false)
 	, menuTriggerHeight(50.f)
@@ -247,6 +252,29 @@ void UI::ShowMainMenuBar(Window& window) {
 			ImGui::Separator();
 			if (ImGui::MenuItem("Reset Camera", "R"))
 				window.ResetView();
+			ImGui::EndMenu();
+		}
+
+		if (ImGui::BeginMenu("Workflow")) {
+			lastMenuInteraction = glfwGetTime();
+			const Scene& scene = window.GetScene();
+			const bool hasScene = scene.IsOpen();
+			const MVS::Scene& mvsScene = scene.GetScene();
+			const bool hasImages = hasScene && mvsScene.IsValid();
+			const bool hasPoints = hasImages && mvsScene.pointcloud.IsValid();
+			const bool hasMesh = hasImages && !mvsScene.mesh.IsEmpty();
+			const auto addWorkflowEntry = [&](const char* label, bool enabled, bool& toggleFlag, const char* tooltip) {
+				if (ImGui::MenuItem(label, nullptr, false, enabled)) {
+					toggleFlag = true;
+				} else
+				if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+					ImGui::SetTooltip("%s", tooltip);
+				}
+			};
+			addWorkflowEntry("Densify Point Cloud", hasImages, showDensifyWorkflow, "Requires calibrated images.");
+			addWorkflowEntry("Reconstruct Mesh", hasPoints, showReconstructWorkflow, "Requires a dense point-cloud.");
+			addWorkflowEntry("Refine Mesh", hasMesh, showRefineWorkflow, "Requires an existing mesh.");
+			addWorkflowEntry("Texture Mesh", hasMesh, showTextureWorkflow, "Requires a mesh and images.");
 			ImGui::EndMenu();
 		}
 
@@ -1681,6 +1709,22 @@ void UI::HandleGlobalKeys(Window& window) {
 			showRenderSettings = false;
 			return;
 		}
+		if (showDensifyWorkflow) {
+			showDensifyWorkflow = false;
+			return;
+		}
+		if (showReconstructWorkflow) {
+			showReconstructWorkflow = false;
+			return;
+		}
+		if (showRefineWorkflow) {
+			showRefineWorkflow = false;
+			return;
+		}
+		if (showTextureWorkflow) {
+			showTextureWorkflow = false;
+			return;
+		}
 
 		// If any popup is open, close it
 		if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup)) {
@@ -1696,6 +1740,446 @@ void UI::HandleGlobalKeys(Window& window) {
 		if (showMainMenu)
 			showMainMenu = false;
 	}
+}
+
+void UI::ShowWorkflowWindows(Window& window) {
+	ShowDensifyWorkflowWindow(window);
+	ShowReconstructWorkflowWindow(window);
+	ShowRefineWorkflowWindow(window);
+	ShowTextureWorkflowWindow(window);
+}
+
+void UI::ShowDensifyWorkflowWindow(Window& window) {
+	if (!showDensifyWorkflow)
+		return;
+
+	Scene& scene = window.GetScene();
+	Scene::DensifyWorkflowOptions& opts = scene.GetDensifyWorkflowOptions();
+	const MVS::Scene& mvsScene = scene.GetScene();
+	const bool hasImages = mvsScene.IsValid();
+	ImGui::SetNextWindowSize(ImVec2(420.f, 0.f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Densify Point Cloud##workflow", &showDensifyWorkflow)) {
+		ImGui::End();
+		return;
+	}
+
+	ImGui::TextUnformatted("Generate a dense point-cloud from the current scene.");
+	ImGui::Separator();
+
+	int resolutionLevel = (int)opts.resolutionLevel;
+	if (ImGui::SliderInt("Resolution Level", &resolutionLevel, 0, 6))
+		opts.resolutionLevel = (unsigned)MAXF(resolutionLevel, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("How many times to scale down the images before dense reconstruction (0=original, 1=half, 2=quarter, etc.).\nHigher values process faster but produce less detail.");
+
+	int maxResolution = (int)opts.maxResolution;
+	if (ImGui::InputInt("Max Resolution", &maxResolution))
+		opts.maxResolution = (unsigned)MAXF(maxResolution, 32);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Maximum image resolution in pixels. Images larger than this will be downscaled to this resolution.\nSet to 0 for no limit.");
+
+	int minResolution = (int)opts.minResolution;
+	if (ImGui::InputInt("Min Resolution", &minResolution)) {
+		minResolution = MAXF(minResolution, 1);
+		if (opts.maxResolution)
+			minResolution = MINF(minResolution, (int)opts.maxResolution);
+		opts.minResolution = (unsigned)minResolution;
+	}
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Minimum image resolution in pixels.\nImages can not be downscaled to a resolution smaller than this.");
+
+	int subLevels = (int)opts.subResolutionLevels;
+	if (ImGui::SliderInt("Sub-resolution Levels", &subLevels, 0, 4))
+		opts.subResolutionLevels = (unsigned)MAXF(subLevels, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Number of additional lower resolution levels to process for better multi-scale depth estimation.\n0 means only process at the selected resolution level.");
+
+	int numViews = (int)opts.numViews;
+	if (ImGui::SliderInt("Number of Views", &numViews, 0, 32))
+		opts.numViews = (unsigned)MAXF(numViews, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Number of neighbor images to use for depth estimation (0 to select valid views).\nMore views increase accuracy, but slow down processing.");
+
+	int minViews = (int)opts.minViews;
+	if (ImGui::SliderInt("Minimum Views Neighbors", &minViews, 1, 6))
+		opts.minViews = (unsigned)MAXF(minViews, 1);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Minimum number of views in which a point must be visible to be considered during neighbor views estimation.\nHigher values produce more similar neighbor views, but may discard some valid points.");
+
+	int minViewsTrust = (int)opts.minViewsTrust;
+	if (ImGui::SliderInt("Trusted Views Initialization", &minViewsTrust, 1, 6))
+		opts.minViewsTrust = (unsigned)MAXF(minViewsTrust, 1);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Minimum number of views for a point to be considered for approximating the depth-maps\nduring initialization (<2 - random initialization).");
+
+	int minViewsFuse = (int)opts.minViewsFuse;
+	if (ImGui::SliderInt("Views for Fusion", &minViewsFuse, 1, 12))
+		opts.minViewsFuse = (unsigned)MAXF(minViewsFuse, 1);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Minimum number of views required to include a depth point in the final fused point cloud.\nHigher values produce cleaner results, but may lose coverage.");
+
+	int estimationIters = (int)opts.estimationIters;
+	if (ImGui::SliderInt("Estimation Iterations", &estimationIters, 1, 10))
+		opts.estimationIters = (unsigned)MAXF(estimationIters, 1);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Number of iterations for photometric refinement of each depth estimate.\nMore iterations improve accuracy, but increase computation time.");
+
+	int geometricIters = (int)opts.geometricIters;
+	if (ImGui::SliderInt("Geometric Iterations", &geometricIters, 0, 5))
+		opts.geometricIters = (unsigned)MAXF(geometricIters, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Number of iterations for geometric consistency filtering (0 disabled).\nMore iterations may produce more accurate results, but increase computation time.");
+
+	const char* fuseLabels[] = { "Merge only", "Fuse", "Dense fuse" };
+	int fuseFilter = (int)opts.fuseFilter;
+	if (ImGui::Combo("Fusion Filter", &fuseFilter, fuseLabels, IM_ARRAYSIZE(fuseLabels)))
+		opts.fuseFilter = (unsigned)fuseFilter;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Fusion quality level:\n- Merge only: Fast, just merge all points\n- Fuse: Standard fusion with outlier removal\n- Dense fuse: Slower but produces the densest, highest quality result,\n.  exploiting neighbor pixel estimates");
+
+	const char* fusionModeLabels[] = {
+		"Depth + Fusion (0)",
+		"Depth only (1)",
+		"Export depth (-1)",
+		"Fuse disparity (-2)"
+	};
+	const int fusionModeValues[] = { 0, 1, -1, -2 };
+	int fusionIndex = 0;
+	for (int i = 0; i < IM_ARRAYSIZE(fusionModeValues); ++i)
+		if (fusionModeValues[i] == opts.fusionMode) { fusionIndex = i; break; }
+	if (ImGui::Combo("Fusion Mode", &fusionIndex, fusionModeLabels, IM_ARRAYSIZE(fusionModeLabels)))
+		opts.fusionMode = fusionModeValues[fusionIndex];
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Processing mode:\n- Depth + Fusion: Complete pipeline (compute depth maps and fuse into point cloud)\n- Depth only: Only generate depth maps\n- Export depth: Save depth maps to disk without fusion\n- Fuse disparity: Fuse existing disparity maps into point cloud");
+
+	ImGui::Checkbox("Estimate Colors", &opts.estimateColors);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Estimate color for each point in the dense cloud based on the source images.\nDisable to skip color computation.");
+	ImGui::Checkbox("Estimate Normals", &opts.estimateNormals);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Store estimated normals for each point.\nNormals are useful for surface reconstruction and visualization.");
+	ImGui::Checkbox("Remove Depth Maps", &opts.removeDepthMaps);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Delete intermediate depth maps after fusion to save disk space.\nDisable to keep depth maps for later inspection or re-fusion.");
+	ImGui::Checkbox("Post-process Depth Maps", &opts.postprocess);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Apply additional filtering and refinement to depth maps before fusion.\nImproves quality but increases processing time.");
+	ImGui::DragFloat("Sample Mesh Neighbors", &opts.sampleMeshNeighbors, 0.25f, -10000.f, 10000.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Number of mesh samples to use for neighbor views estimation.\n- Sampling density per squared unit area (if >0)\n- Absolute number of points (if <0)\n- Use existing vertices as samples (if ==0)");
+	ImGui::Checkbox("Crop to ROI", &opts.cropToROI);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Restrict processing to the Region of Interest (ROI) if defined.\nPoints outside ROI will be discarded.");
+	ImGui::DragFloat("ROI Border (%)", &opts.borderROI, 0.1f, -100.f, 100.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Percentage to expand (positive) or shrink (negative) the ROI border.\nUseful to include context or tighten the bounds.");
+
+	ImGui::Separator();
+	const bool canRun = scene.IsOpen() && hasImages;
+	ImGui::BeginDisabled(!canRun);
+	if (ImGui::Button("Run")) {
+		showDensifyWorkflow = false;
+		scene.RunDensifyWorkflow(opts);
+	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		showDensifyWorkflow = false;
+	if (!canRun)
+		ImGui::TextDisabled("Open a scene with calibrated images.");
+
+	ImGui::End();
+}
+
+void UI::ShowReconstructWorkflowWindow(Window& window) {
+	if (!showReconstructWorkflow)
+		return;
+
+	Scene& scene = window.GetScene();
+	Scene::ReconstructMeshWorkflowOptions& opts = scene.GetReconstructMeshWorkflowOptions();
+	const MVS::Scene& mvsScene = scene.GetScene();
+	const bool hasPoints = mvsScene.IsValid() && mvsScene.pointcloud.IsValid();
+	ImGui::SetNextWindowSize(ImVec2(420.f, 0.f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Reconstruct Mesh##workflow", &showReconstructWorkflow)) {
+		ImGui::End();
+		return;
+	}
+
+	ImGui::TextUnformatted("Build a surface from the dense point-cloud.");
+	ImGui::Separator();
+	ImGui::DragFloat("Min Point Distance", &opts.minPointDistance, 0.1f, 0.f, 20.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Minimum distance in pixels between the projection of two 3D points to consider them different while triangulating (0 - disabled).\nIncrease for smoother, coarser meshes; decrease for finer detail.");
+	ImGui::Checkbox("Use Free-space Support", &opts.useFreeSpaceSupport);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Use camera ray information to carve out empty space and improve surface reconstruction.\nRecommended for outdoor or complex scenes.");
+	ImGui::Checkbox("Integrate Only ROI", &opts.useOnlyROI);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Process only points inside the Region of Interest.\nUseful to focus reconstruction on a specific area and reduce computation.");
+	ImGui::Checkbox("Constant Weight", &opts.constantWeight);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Use uniform weighting for all points instead of confidence-based weighting.\nMay help with uniformly sampled point clouds, but can reduce quality.");
+
+	ImGui::Separator();
+	ImGui::DragFloat("Thickness Factor", &opts.thicknessFactor, 0.05f, 0.f, 10.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Multiplier adjusting the minimum thickness considered during visibility weighting.\nHigher values increase robustness to noise, but can create holes or remove thin surfaces.");
+	ImGui::DragFloat("Quality Factor", &opts.qualityFactor, 0.05f, 0.f, 10.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Multiplier adjusting the quality weight considered during graph-cut.");
+	ImGui::SliderFloat("Decimate Mesh", &opts.decimateMesh, 0.f, 1.f, "%.3f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Reduce mesh complexity after reconstruction (1 = no decimation).\nUseful to create lower-poly meshes for real-time rendering.");
+	int targetFaces = (int)opts.targetFaceNum;
+	if (ImGui::InputInt("Target Face Count", &targetFaces))
+		opts.targetFaceNum = (unsigned)MAXF(targetFaces, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Target number of faces for the output mesh. Set to 0 to use the decimation ratio instead.\nUseful for creating meshes with specific polygon budgets.");
+	ImGui::DragFloat("Remove Spurious", &opts.removeSpurious, 1.f, 0.f, 200.f, "%.1f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Remove spurious surfaces (isolated or floating geometry) with fewer than this many connected faces.\nHigher values remove more isolated pieces (0 - disabled)");
+	ImGui::Checkbox("Remove Spikes", &opts.removeSpikes);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Automatically detect and remove spike artifacts (sharp, thin protrusions) from the mesh. Recommended for cleaner results.");
+	int closeHoles = (int)opts.closeHoles;
+	if (ImGui::InputInt("Close Holes", &closeHoles))
+		opts.closeHoles = (unsigned)MAXF(closeHoles, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Maximum hole size (in edges) to automatically fill.\nLarger values close bigger holes (0 - disabled)");
+	int smoothSteps = (int)opts.smoothSteps;
+	if (ImGui::InputInt("Smooth Iterations", &smoothSteps))
+		opts.smoothSteps = (unsigned)MAXF(smoothSteps, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Number of Laplacian smoothing iterations to apply.\nMore iterations create smoother surfaces, but may lose detail (0 - disabled)");
+	ImGui::DragFloat("Edge Length", &opts.edgeLength, 0.01f, 0.f, 10.f, "%.3f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Target edge length for mesh faces (in scene units).\nControls mesh resolution and uniformity (0 - disabled)");
+
+	ImGui::Separator();
+	ImGui::Checkbox("Crop to ROI", &opts.cropToROI);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Crop the final mesh to the Region of Interest bounds.\nVertices and faces outside the ROI will be removed.");
+
+	ImGui::Separator();
+	const bool canRun = scene.IsOpen() && hasPoints;
+	ImGui::BeginDisabled(!canRun);
+	if (ImGui::Button("Run")) {
+		showReconstructWorkflow = false;
+		scene.RunReconstructMeshWorkflow(opts);
+	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		showReconstructWorkflow = false;
+	if (!canRun)
+		ImGui::TextDisabled("Requires a dense point-cloud.");
+
+	ImGui::End();
+}
+
+void UI::ShowRefineWorkflowWindow(Window& window) {
+	if (!showRefineWorkflow)
+		return;
+
+	Scene& scene = window.GetScene();
+	Scene::RefineMeshWorkflowOptions& opts = scene.GetRefineMeshWorkflowOptions();
+	ImGui::SetNextWindowSize(ImVec2(420.f, 0.f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Refine Mesh##workflow", &showRefineWorkflow)) {
+		ImGui::End();
+		return;
+	}
+
+	ImGui::TextUnformatted("Improve mesh quality using photo-consistency.");
+	ImGui::Separator();
+	int resolutionLevel = (int)opts.resolutionLevel;
+	if (ImGui::SliderInt("Resolution Level", &resolutionLevel, 0, 6))
+		opts.resolutionLevel = (unsigned)MAXF(resolutionLevel, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Image resolution scale for refinement (0=original, 1=half, etc.).\nHigher values are faster but less detailed.\nStart with lower resolution for coarse refinement.");
+	int minResolution = (int)opts.minResolution;
+	if (ImGui::InputInt("Min Resolution", &minResolution))
+		opts.minResolution = (unsigned)MAXF(minResolution, 1);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Minimum image resolution in pixels.\nImages can not be downscaled to a resolution smaller than this.");
+	int maxViews = (int)opts.maxViews;
+	if (ImGui::SliderInt("Max Views", &maxViews, 1, 16))
+		opts.maxViews = (unsigned)MAXF(maxViews, 1);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Maximum number of view neighbors to use during refinement.\nMore views improve accuracy, but increase computation time and memory usage.");
+	ImGui::SliderFloat("Decimate Input", &opts.decimateMesh, 0.f, 1.f, "%.3f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Simplify the input mesh before refinement (0 = no decimation, 1 = maximum).\nUseful for reducing computation on high-poly meshes.");
+	int closeHoles = (int)opts.closeHoles;
+	if (ImGui::InputInt("Close Holes", &closeHoles))
+		opts.closeHoles = (unsigned)MAXF(closeHoles, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Maximum hole size (in edges) to fill before refinement.\nClosing holes prevents artifacts at boundaries (0 - disabled)");
+	int ensureEdge = (int)opts.ensureEdgeSize;
+	if (ImGui::SliderInt("Ensure Edge Size", &ensureEdge, 0, 2))
+		opts.ensureEdgeSize = (unsigned)MAXF(ensureEdge, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Subdivide or collapse edges to ensure uniform size (0=no change, 1=moderate, 2=aggressive).\nHelps create more uniform mesh topology.");
+	int maxFaceArea = (int)opts.maxFaceArea;
+	if (ImGui::InputInt("Max Face Area", &maxFaceArea))
+		opts.maxFaceArea = (unsigned)MAXF(maxFaceArea, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Maximum face area projected in any pair of images that is not subdivided (0 - disabled)");
+	int scales = (int)opts.scales;
+	if (ImGui::SliderInt("Scales", &scales, 1, 5))
+		opts.scales = (unsigned)MAXF(scales, 1);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Number of multi-scale refinement passes.\nMore scales improve convergence from coarse to fine detail.");
+	ImGui::SliderFloat("Scale Step", &opts.scaleStep, 0.1f, 1.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Resolution scaling factor between successive refinement scales.\nLower values create more gradual transitions between scales.");
+	const char* pairModes[] = { "Both references", "Alternate", "Left only", "Right only" };
+	int alternatePair = (int)opts.alternatePair;
+	if (ImGui::Combo("Reference Pair", &alternatePair, pairModes, IM_ARRAYSIZE(pairModes)))
+		opts.alternatePair = (unsigned)alternatePair;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Which image pairs to use as reference during multi-view refinement:\n- Both references: Use all paired views (most accurate)\n- Alternate: Switch between left/right (balanced)\n- Left/Right only: Use only one reference (faster, less accurate)");
+	ImGui::DragFloat("Regularity Weight", &opts.regularityWeight, 0.05f, 0.f, 10.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Weight for mesh regularity term.\nHigher values produce smoother surfaces, but may lose detail.\nLower values preserve sharp features, but can be noisy.");
+	ImGui::DragFloat("Rigidity/Elasticity", &opts.rigidityElasticityRatio, 0.05f, 0.f, 1.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Balance between mesh rigidity and elasticity:\n- 0 = fully elastic (flexible deformation)\n- 1 = fully rigid (minimal deformation)\nAffects how much the mesh can deform.");
+	ImGui::DragFloat("Gradient Step", &opts.gradientStep, 1.f, 0.f, 200.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Step size for gradient descent optimization.\nLarger values converge faster, but may be unstable.\nSmaller values are more stable, but slower.");
+	ImGui::DragFloat("Planar Vertex Ratio", &opts.planarVertexRatio, 0.01f, 0.f, 1.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Ratio of vertices to treat as planar (constrained to move along their normal).\nHigher values preserve flat surfaces better, but reduce flexibility.");
+	int reduceMemory = (int)opts.reduceMemory;
+	if (ImGui::SliderInt("Reduce Memory", &reduceMemory, 0, 3))
+		opts.reduceMemory = (unsigned)MAXF(reduceMemory, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Memory reduction strategy:\n- 0 = no reduction (fastest, most memory)\n- 3 = maximum reduction (slowest, least memory)\nUse higher values for large scenes or limited RAM.");
+
+	ImGui::Separator();
+	const MVS::Scene& mvsScene = scene.GetScene();
+	const bool canRun = scene.IsOpen() && mvsScene.IsValid() && !mvsScene.mesh.IsEmpty();
+	ImGui::BeginDisabled(!canRun);
+	if (ImGui::Button("Run")) {
+		showRefineWorkflow = false;
+		scene.RunRefineMeshWorkflow(opts);
+	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		showRefineWorkflow = false;
+	if (!canRun)
+		ImGui::TextDisabled("Requires an existing mesh.");
+
+	ImGui::End();
+}
+
+void UI::ShowTextureWorkflowWindow(Window& window) {
+	if (!showTextureWorkflow)
+		return;
+
+	Scene& scene = window.GetScene();
+	Scene::TextureMeshWorkflowOptions& opts = scene.GetTextureMeshWorkflowOptions();
+	const MVS::Scene& mvsScene = scene.GetScene();
+	const bool hasMesh = mvsScene.IsValid() && !mvsScene.mesh.IsEmpty();
+	ImGui::SetNextWindowSize(ImVec2(420.f, 0.f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Texture Mesh##workflow", &showTextureWorkflow)) {
+		ImGui::End();
+		return;
+	}
+
+	ImGui::TextUnformatted("Bake textures onto the current mesh.");
+	ImGui::Separator();
+	ImGui::SliderFloat("Decimate Mesh", &opts.decimateMesh, 0.f, 1.f, "%.3f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Simplify the mesh before texturing (0 = no decimation, 1 = maximum).\nReduces polygon count to improve texture mapping efficiency.");
+	int closeHoles = (int)opts.closeHoles;
+	if (ImGui::InputInt("Close Holes", &closeHoles))
+		opts.closeHoles = (unsigned)MAXF(closeHoles, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Maximum hole size (in edges) to fill before texturing.\nPrevents texture artifacts at mesh boundaries (0 - disabled)");
+	int resolutionLevel = (int)opts.resolutionLevel;
+	if (ImGui::SliderInt("Resolution Level", &resolutionLevel, 0, 6))
+		opts.resolutionLevel = (unsigned)MAXF(resolutionLevel, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Image resolution scale for texture extraction (0=original, 1=half, etc.).\nHigher values are faster but produce lower quality textures.");
+	int minResolution = (int)opts.minResolution;
+	if (ImGui::InputInt("Min Resolution", &minResolution))
+		opts.minResolution = (unsigned)MAXF(minResolution, 1);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Minimum image resolution in pixels.\nImages can not be downscaled to a resolution smaller than this.");
+	int minCommon = (int)opts.minCommonCameras;
+	if (ImGui::InputInt("Min Common Cameras", &minCommon))
+		opts.minCommonCameras = (unsigned)MAXF(minCommon, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Minimum number of cameras that must see a face for it to be textured.\nHigher values ensure better texture quality but may leave some faces untextured.");
+	ImGui::DragFloat("Outlier Threshold", &opts.outlierThreshold, 0.005f, 0.f, 1.f, "%.3f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Threshold for rejecting outliers during views to face assignment.\nHigher values are more permissive.");
+	ImGui::DragFloat("Cost Smoothness Ratio", &opts.ratioDataSmoothness, 0.01f, 0.f, 1.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Balance between data term and smoothness term:\n- 0 = prioritize photometric quality\n- 1 = prioritize seam smoothness");
+	ImGui::Checkbox("Global Seam Leveling", &opts.globalSeamLeveling);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Apply global color adjustment to minimize exposure differences between texture patches.\nRecommended for better visual consistency across the entire model.");
+	ImGui::Checkbox("Local Seam Leveling", &opts.localSeamLeveling);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Apply local color blending along texture seams.\nSmooths transitions between patches.\nWorks well with global seam leveling for best results.");
+	int textureMultiple = (int)opts.textureSizeMultiple;
+	if (ImGui::InputInt("Texture Size Multiple", &textureMultiple))
+		opts.textureSizeMultiple = (unsigned)MAXF(textureMultiple, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Texture dimensions will be multiples of this value (0 - power of two)");
+	int packingHeuristic = (int)opts.rectPackingHeuristic;
+	if (ImGui::InputInt("Packing Heuristic", &packingHeuristic))
+		opts.rectPackingHeuristic = (unsigned)MAXF(packingHeuristic, 0);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Algorithm for packing texture patches into atlas:\n- 0 = MaxRects BSSF (best)\n- 1 = MaxRects BL (fast)\n- 2 = Skyline BL\nHigher numbers are faster, but may be less efficient.");
+
+	float color[3] = {
+		((opts.emptyColor >> 16) & 0xFF) / 255.f,
+		((opts.emptyColor >> 8) & 0xFF) / 255.f,
+		(opts.emptyColor & 0xFF) / 255.f
+	};
+	if (ImGui::ColorEdit3("Empty Color", color, ImGuiColorEditFlags_NoAlpha)) {
+		auto toChannel = [](float v) -> uint32_t {
+			if (v < 0.f) v = 0.f;
+			if (v > 1.f) v = 1.f;
+			return (uint32_t)(v * 255.f + 0.5f);
+		};
+		opts.emptyColor = (toChannel(color[0]) << 16) | (toChannel(color[1]) << 8) | toChannel(color[2]);
+	}
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Color to use for unfilled texture regions (areas with no valid projection).\nMagenta is useful for debugging missing texture coverage.");
+	ImGui::SliderFloat("Sharpness Weight", &opts.sharpnessWeight, 0.f, 2.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Sharpness weight to be applied on the texture (0 - disabled, 0.5 - good value).");
+	int ignoreLabel = opts.ignoreMaskLabel;
+	if (ImGui::InputInt("Ignore Mask Label", &ignoreLabel))
+		opts.ignoreMaskLabel = ignoreLabel;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Label value to ignore in the image mask, stored in the MVS scene or next to each image with '.mask.png' extension\n(-1 - auto estimate mask for lens distortion, -2 - disabled)");
+	int maxTexture = opts.maxTextureSize;
+	if (ImGui::InputInt("Max Texture Size", &maxTexture))
+		opts.maxTextureSize = MAXF(0, maxTexture);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Maximum texture atlas size in pixels per dimension.\nMultiple textures are created if needed.\nLarger values allow higher resolution textures, but require more memory (0 - no limit)");
+
+	ImGui::Separator();
+	const bool canRun = scene.IsOpen() && hasMesh;
+	ImGui::BeginDisabled(!canRun);
+	if (ImGui::Button("Run")) {
+		showTextureWorkflow = false;
+		scene.RunTextureMeshWorkflow(opts);
+	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		showTextureWorkflow = false;
+	if (!canRun)
+		ImGui::TextDisabled("Requires a mesh and images.");
+
+	ImGui::End();
 }
 
 void* SettingsReadOpen(ImGuiContext*, ImGuiSettingsHandler* handler, const char* name) {
