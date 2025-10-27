@@ -1208,12 +1208,16 @@ void Renderer::RenderSelection(const Window& window) {
 
 	// Use different colors for different selection types
 	if (window.selectionType == Window::SEL_POINT) {
+		selectionShader->SetFloat("lineWidth", MAXF(window.pointSize*0.5f, 1.f)); // Line width based on point size
 		selectionShader->SetVector3("selectionColor", Eigen::Vector3f(1.f, 0.f, 0.f)); // Red lines for points
 	} else if (window.selectionType == Window::SEL_TRIANGLE) {
+		selectionShader->SetFloat("lineWidth", 2.f);
 		selectionShader->SetVector3("selectionColor", Eigen::Vector3f(1.f, 0.f, 0.f)); // Red lines for triangles
 	} else if (window.selectionType == Window::SEL_CAMERA) {
+		selectionShader->SetFloat("lineWidth", 1.f);
 		selectionShader->SetVector3("selectionColor", Eigen::Vector3f(0.f, 1.f, 1.f)); // Cyan lines for cameras
 	} else {
+		selectionShader->SetFloat("lineWidth", 1.f);
 		selectionShader->SetVector3("selectionColor", Eigen::Vector3f(1.f, 1.f, 0.f)); // Yellow for other selections
 	}
 
@@ -1222,8 +1226,8 @@ void Renderer::RenderSelection(const Window& window) {
 
 	// Render neighbor camera with different color
 	if (window.selectedNeighborCamera != NO_ID) {
+		selectionShader->SetFloat("lineWidth", 1.f);
 		selectionShader->SetVector3("selectionColor", Eigen::Vector3f(1.f, 0.f, 1.f)); // Magenta for neighbor camera
-
 		// Render neighbor camera geometry as lines (starting after primary selection vertices)
 		GL_CHECK(glDrawArrays(GL_LINES, selectionPrimitiveCount, selectionPrimitiveCount));
 	}

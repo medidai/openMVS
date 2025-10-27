@@ -365,10 +365,10 @@ void Window::Render() {
 			renderer->RenderMesh(*this);
 
 		// Render cameras and selection highlights
-		renderer->RenderSelection(*this);
-		renderer->RenderSelectedGeometry(*this);
 		if (showCameras)
 			renderer->RenderCameras(*this);
+		renderer->RenderSelection(*this);
+		renderer->RenderSelectedGeometry(*this);
 
 		// Render bounds if available
 		renderer->RenderBounds();
@@ -389,17 +389,8 @@ void Window::Render() {
 		renderer->RenderCoordinateAxes(camera);
 	}
 
-	// Show performance overlay
-	ui->ShowPerformanceOverlay(*this);
-
-	// Show viewport overlay
-	ui->ShowViewportOverlay(*this);
-
-	// Show selection overlay
-	ui->ShowSelectionOverlay(*this);
-
 	// Render UI
-	ui->Render();
+	ui->Render(*this);
 
 	// End frame
 	renderer->EndFrame();
