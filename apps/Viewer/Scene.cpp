@@ -361,7 +361,7 @@ bool Scene::Export(const String& _fileName, const String& exportType, bool bView
 	return bPoints || bMesh;
 }
 
-bool Scene::RunDensifyWorkflow(const DensifyWorkflowOptions& options) {
+bool Scene::RunDensifyWorkflow(const DensifyWorkflowOptions& options, bool bUpdateGeometry) {
 	if (!IsOpen()) {
 		DEBUG("error: no scene loaded");
 		return false;
@@ -395,11 +395,12 @@ bool Scene::RunDensifyWorkflow(const DensifyWorkflowOptions& options) {
 		return false;
 	}
 
-	UpdateGeometryAfterModification();
+	if (bUpdateGeometry)
+		UpdateGeometryAfterModification();
 	return true;
 }
 
-bool Scene::RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options) {
+bool Scene::RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options, bool bUpdateGeometry) {
 	if (!IsOpen()) {
 		DEBUG("error: no scene loaded");
 		return false;
@@ -440,11 +441,12 @@ bool Scene::RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& opt
 	mvsScene.mesh.Clean(decimate, 0.f, options.removeSpikes, options.closeHoles, 0u, 0.f, false);
 	mvsScene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true);
 
-	UpdateGeometryAfterModification();
+	if (bUpdateGeometry)
+		UpdateGeometryAfterModification();
 	return true;
 }
 
-bool Scene::RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options) {
+bool Scene::RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options, bool bUpdateGeometry) {
 	if (!IsOpen()) {
 		DEBUG("error: no scene loaded");
 		return false;
@@ -463,11 +465,12 @@ bool Scene::RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options) {
 		return false;
 	}
 
-	UpdateGeometryAfterModification();
+	if (bUpdateGeometry)
+		UpdateGeometryAfterModification();
 	return true;
 }
 
-bool Scene::RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options) {
+bool Scene::RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options, bool bUpdateGeometry) {
 	if (!IsOpen()) {
 		DEBUG("error: no scene loaded");
 		return false;
@@ -491,7 +494,8 @@ bool Scene::RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options) {
 		return false;
 	}
 
-	UpdateGeometryAfterModification();
+	if (bUpdateGeometry)
+		UpdateGeometryAfterModification();
 	return true;
 }
 

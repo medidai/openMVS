@@ -567,8 +567,10 @@ Scene::SCENE_TYPE Scene::Load(const String& fileName, bool bImport)
 	#ifdef _USE_BOOST
 	// open the input stream
 	std::ifstream fs(fileName, std::ios::in | std::ios::binary);
-	if (!fs.is_open())
+	if (!fs.is_open()) {
+		VERBOSE("error: unable to open file '%s'", fileName.c_str());
 		return SCENE_NA;
+	}
 	// load project header ID
 	char szHeader[4];
 	fs.read(szHeader, 4);
@@ -595,8 +597,10 @@ Scene::SCENE_TYPE Scene::Load(const String& fileName, bool bImport)
 	uint64_t nReserved;
 	fs.read((char*)&nReserved, sizeof(uint64_t));
 	// serialize in the current state
-	if (!SerializeLoad(*this, fs, (ARCHIVE_TYPE)nType))
+	if (!SerializeLoad(*this, fs, (ARCHIVE_TYPE)nType)) {
+		VERBOSE("error: unable to load project data");
 		return SCENE_NA;
+	}
 	// init images
 	nCalibratedImages = 0;
 	size_t nTotalPixels(0);

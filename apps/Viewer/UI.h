@@ -33,6 +33,8 @@
 
 #include "Camera.h"
 #include "Image.h"
+#include <deque>
+#include <mutex>
 
 namespace VIEWER {
 
@@ -48,6 +50,7 @@ private:
 	bool showCameraControls;
 	bool showSelectionControls;
 	bool showRenderSettings;
+	bool showConsoleOverlay;
 	bool showPerformanceOverlay;
 	bool showViewportOverlay;
 	bool showSelectionOverlay;
@@ -60,6 +63,7 @@ private:
 	bool showReconstructWorkflow;
 	bool showRefineWorkflow;
 	bool showTextureWorkflow;
+	bool showBatchWorkflow;
 
 	// Auto-hiding menu state
 	bool showMainMenu;
@@ -67,6 +71,10 @@ private:
 	float menuTriggerHeight;
 	double lastMenuInteraction;
 	float menuFadeOutDelay;
+
+	// Log console
+	std::deque<String> logBuffer;
+	std::mutex logMutex;
 
 	// Statistics
 	double deltaTime;
@@ -81,7 +89,7 @@ public:
 	void Release();
 
 	void NewFrame(Window& window);
-	void Render();
+	void Render(Window& window);
 
 	// Main UI panels
 	void ShowMainMenuBar(Window& window);
@@ -89,6 +97,7 @@ public:
 	void ShowCameraControls(Window& window);
 	void ShowSelectionControls(Window& window);
 	void ShowRenderSettings(Window& window);
+	void ShowConsoleOverlay(Window& window);
 	void ShowPerformanceOverlay(Window& window);
 	void ShowViewportOverlay(const Window& window);
 	void ShowSelectionOverlay(const Window& window);
@@ -105,6 +114,7 @@ public:
 	static bool ShowSaveFileDialog(String& filename);
 
 	// Input handling
+	void RecordLog(const String& msg);
 	bool WantCaptureMouse() const;
 	bool WantCaptureKeyboard() const;
 	void HandleGlobalKeys(Window& window);
@@ -122,6 +132,7 @@ private:
 	void ShowReconstructWorkflowWindow(Window& window);
 	void ShowRefineWorkflowWindow(Window& window);
 	void ShowTextureWorkflowWindow(Window& window);
+	void ShowBatchWorkflowWindow(Window& window);
 
 	// Auto-hiding menu helpers
 	void UpdateMenuVisibility();

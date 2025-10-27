@@ -172,10 +172,10 @@ public:
 	bool Export(const String& fileName, const String& exportType = String(), bool bViews = true) const;
 
 	// Workflows
-	bool RunDensifyWorkflow(const DensifyWorkflowOptions& options);
-	bool RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options);
-	bool RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options);
-	bool RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options);
+	bool RunDensifyWorkflow(const DensifyWorkflowOptions& options, bool bUpdateGeometry=true);
+	bool RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options, bool bUpdateGeometry=true);
+	bool RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options, bool bUpdateGeometry=true);
+	bool RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options, bool bUpdateGeometry=true);
 
 	// Geometry operations
 	void RemoveSelectedGeometry();

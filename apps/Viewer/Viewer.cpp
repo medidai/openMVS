@@ -76,7 +76,6 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 {
 	// initialize log and console
 	OPEN_LOG();
-	OPEN_LOGCONSOLE();
 
 	// group of options allowed only on command line
 	boost::program_options::options_description generic("Generic options");
@@ -225,4 +224,10 @@ int main(int argc, LPCTSTR* argv)
 	viewer.Run();
 	return EXIT_SUCCESS;
 }
+#ifdef _WIN32
+// bridge WinMain -> main()
+int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+	return main(__argc, const_cast<LPCTSTR*>(__argv));
+}
+#endif
 /*----------------------------------------------------------------*/

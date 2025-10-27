@@ -12,7 +12,7 @@ layout (std140) uniform ViewProjection {
 };
 
 uniform vec2 viewportSize;
-uniform float lineWidth = 3.0;
+uniform float lineWidth = 2.0;
 
 void main() {
     vec4 clip0 = gl_in[0].gl_Position;
@@ -23,22 +23,18 @@ void main() {
     vec2 ndc1 = clip1.xy / clip1.w;
     vec2 segment = ndc1 - ndc0;
 
+    // Ensure segment length and viewport are valid before dividing.
     float segLength = length(segment);
-    if (segLength <= 1e-6 || viewportSize.x <= 0.0 || viewportSize.y <= 0.0 || lineWidth <= 1.0) {
-        // Fall back to thin line rendering
-        gl_Position = clip0;
-        EmitVertex();
-        gl_Position = clip1;
-        EmitVertex();
-        EndPrimitive();
+    if (segLength <= 1e-6 || viewportSize.x <= 0.0 || viewportSize.y <= 0.0)
         return;
-    }
-
     vec2 dir = segment / segLength;
     vec2 perp = vec2(-dir.y, dir.x);
 
-    // Convert half-width from pixels to NDC units
-    float halfWidth = lineWidth * 0.5;
+    // Convert half-width from pixels to NDC units. For very thin lines
+    // (lineWidth <= 1.0) ensure we still produce a one-pixel quad by
+    // clamping halfWidth to at least 0.5. This avoids emitting only two
+    // vertices (no triangle) when the shader output is a triangle_strip.
+    float halfWidth = max(0.5, lineWidth * 0.5);
     vec2 screenOffset = perp * halfWidth;
     vec2 ndcOffset = screenOffset / viewportSize * 2.0;
 

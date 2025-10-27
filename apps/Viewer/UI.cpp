@@ -40,16 +40,20 @@
 #include <portable-file-dialogs.h>
 #include <unordered_map>
 #include <algorithm>
+#include <deque>
+#include <mutex>
 
 using namespace VIEWER;
 
 constexpr float PAD = 10.f;
+constexpr size_t MAX_UI_LOG_LINES = 9000;
 
 UI::UI()
 	: showSceneInfo(false)
 	, showCameraControls(false)
 	, showSelectionControls(false)
 	, showRenderSettings(false)
+	, showConsoleOverlay(true)
 	, showPerformanceOverlay(true)
 	, showViewportOverlay(true)
 	, showSelectionOverlay(true)
@@ -62,6 +66,7 @@ UI::UI()
 	, showReconstructWorkflow(false)
 	, showRefineWorkflow(false)
 	, showTextureWorkflow(false)
+	, showBatchWorkflow(false)
 	, showMainMenu(false)
 	, menuWasVisible(false)
 	, menuTriggerHeight(50.f)
@@ -119,10 +124,16 @@ bool UI::Initialize(Window& window, const String& glslVersion) {
 	ImGui_ImplOpenGL3_Init(glslVersion);
 	ImGui::LoadIniSettingsFromDisk(io.IniFilename);
 
+	// Register log listener to capture log messages for the in-app console
+	GET_LOG().RegisterListener(DELEGATEBINDCLASS(Log::ClbkRecordMsg, &UI::RecordLog, this));
+
 	return true;
 }
 
 void UI::Release() {
+	// Unregister log listener
+	GET_LOG().UnregisterListener(DELEGATEBINDCLASS(Log::ClbkRecordMsg, &UI::RecordLog, this));
+
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
 	ImGui::DestroyContext();
@@ -140,7 +151,12 @@ void UI::NewFrame(Window& window) {
 	UpdateMenuVisibility();
 }
 
-void UI::Render() {
+void UI::Render(Window& window) {
+	ShowConsoleOverlay(window);
+	ShowPerformanceOverlay(window);
+	ShowViewportOverlay(window);
+	ShowSelectionOverlay(window);
+
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -238,6 +254,8 @@ void UI::ShowMainMenuBar(Window& window) {
 			ImGui::MenuItem("Camera Controls", nullptr, &showCameraControls);
 			ImGui::MenuItem("Selection Dialog", nullptr, &showSelectionDialog);
 			ImGui::MenuItem("Render Settings", nullptr, &showRenderSettings);
+			ImGui::Separator();
+			ImGui::MenuItem("Console", nullptr, &showConsoleOverlay);
 			ImGui::MenuItem("Performance Overlay", nullptr, &showPerformanceOverlay);
 			ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
 			ImGui::MenuItem("Selection Overlay", nullptr, &showSelectionOverlay);
@@ -264,17 +282,17 @@ void UI::ShowMainMenuBar(Window& window) {
 			const bool hasPoints = hasImages && mvsScene.pointcloud.IsValid();
 			const bool hasMesh = hasImages && !mvsScene.mesh.IsEmpty();
 			const auto addWorkflowEntry = [&](const char* label, bool enabled, bool& toggleFlag, const char* tooltip) {
-				if (ImGui::MenuItem(label, nullptr, false, enabled)) {
+				if (ImGui::MenuItem(label, nullptr, false, enabled))
 					toggleFlag = true;
-				} else
-				if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+				else if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 					ImGui::SetTooltip("%s", tooltip);
-				}
 			};
 			addWorkflowEntry("Densify Point Cloud", hasImages, showDensifyWorkflow, "Requires calibrated images.");
 			addWorkflowEntry("Reconstruct Mesh", hasPoints, showReconstructWorkflow, "Requires a dense point-cloud.");
 			addWorkflowEntry("Refine Mesh", hasMesh, showRefineWorkflow, "Requires an existing mesh.");
 			addWorkflowEntry("Texture Mesh", hasMesh, showTextureWorkflow, "Requires a mesh and images.");
+			ImGui::Separator();
+			addWorkflowEntry("Batch Process", hasImages, showBatchWorkflow, "Requires calibrated images.");
 			ImGui::EndMenu();
 		}
 
@@ -680,8 +698,93 @@ void UI::ShowRenderSettings(Window& window) {
 	ImGui::End();
 }
 
+void UI::ShowConsoleOverlay(Window& window)
+{
+	if (!showConsoleOverlay)
+		return;
+
+	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+								   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	ImVec2 work_pos = vp->WorkPos;
+	ImVec2 work_size = vp->WorkSize;
+	ImVec2 window_pos, window_pos_pivot;
+
+	// bottom-right corner
+	window_pos.x = work_pos.x + work_size.x - PAD;
+	window_pos.y = work_pos.y + work_size.y - PAD;
+	window_pos_pivot.x = 1.f;
+	window_pos_pivot.y = 1.f;
+
+	ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, window_pos_pivot);
+	ImGui::SetNextWindowBgAlpha(0.35f);
+
+	if (ImGui::Begin("Console", &showConsoleOverlay, window_flags)) {
+		// use the last item's rect (the child) in screen coordinates — this anchors the buttons
+		// to the child's outer rectangle so they don't move with the child's scroll.
+		ImVec2 child_min = ImGui::GetItemRectMin();
+		ImVec2 child_max = ImGui::GetItemRectMax();
+		if (ImGui::BeginChild("LogRegion", ImVec2(660, 160), false, ImGuiWindowFlags_HorizontalScrollbar)) {
+			// copy out-of-lock to avoid holding lock during ImGui calls
+			std::vector<String> copyLines; {
+				std::lock_guard<std::mutex> lock(logMutex);
+				copyLines.assign(logBuffer.begin(), logBuffer.end());
+			}
+			// copy lines to ImGui
+			for (const auto &line : copyLines)
+				ImGui::TextUnformatted(line.c_str());
+			// auto-scroll to bottom if already at bottom
+			if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+				ImGui::SetScrollHereY(1.0f);
+			ImGui::SetNextItemAllowOverlap();
+
+			// render overlay buttons on top-right of the LogRegion (draw after child so they're on top)
+			const auto CalcButtonWidth = []() {
+				ImGuiStyle& style = ImGui::GetStyle();
+				const char* btnLabels[2] = { "Clear", "Copy" };
+				float totalButtonsWidth = 0.f;
+				for (int i = 0; i < 2; ++i) {
+					ImVec2 txtSize = ImGui::CalcTextSize(btnLabels[i]);
+					float btnW = txtSize.x + style.FramePadding.x * 2.f;
+					totalButtonsWidth += btnW;
+				}
+				totalButtonsWidth += style.ItemSpacing.x * 5.f; // spacing between 2 buttons
+				ImVec2 btn_width;
+				btn_width.x = -totalButtonsWidth;
+				btn_width.y = style.ItemSpacing.y * 2.f;
+				return btn_width;
+			};
+			static const ImVec2 btn_width = CalcButtonWidth();
+
+			// move cursor to absolute screen position and render buttons (they will be drawn on top)
+			ImVec2 btn_pos;
+			btn_pos.x = child_max.x + btn_width.x;
+			btn_pos.y = child_min.y + btn_width.y;
+			ImGui::SetCursorScreenPos(btn_pos);
+			if (ImGui::SmallButton("Clear")) {
+				std::lock_guard<std::mutex> lock(logMutex);
+				logBuffer.clear();
+			}
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Copy")) {
+				std::string all; {
+					std::lock_guard<std::mutex> lock(logMutex);
+					for (const auto &s : logBuffer)
+						all += s.c_str();
+				}
+				ImGui::SetClipboardText(all.c_str());
+			}
+		}
+		ImGui::EndChild();
+	}
+	ImGui::End();
+}
+
 void UI::ShowPerformanceOverlay(Window& window) {
-	if (!showPerformanceOverlay) return;
+	if (!showPerformanceOverlay)
+		return;
 
 	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | 
 								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | 
@@ -757,6 +860,7 @@ void UI::ShowAboutDialog() {
 	if (ImGui::BeginPopupModal("About", &showAboutDialog, ImGuiWindowFlags_AlwaysAutoResize)) {
 		ImGui::Text("OpenMVS Viewer " OpenMVS_VERSION);
 		ImGui::Text("Author: SEACAVE");
+		ImGui::Text("Website: https://cdcseacave.github.io");
 		ImGui::Separator();
 		ImGui::Text("Built with ImGui %s and", ImGui::GetVersion());
 		ImGui::Text("OpenGL %s", glGetString(GL_VERSION));
@@ -1656,6 +1760,16 @@ bool UI::IsMenuInUse() const {
 	return false;
 }
 
+// Append log messages from the Log system (may be called from any thread)
+void UI::RecordLog(const String& msg)
+{
+	// Thread-safe append to buffer. We don't touch ImGui state here.
+	std::lock_guard<std::mutex> lock(logMutex);
+	logBuffer.push_back(msg);
+	while (logBuffer.size() > MAX_UI_LOG_LINES)
+		logBuffer.pop_front();
+}
+
 bool UI::WantCaptureMouse() const {
 	return ImGui::GetIO().WantCaptureMouse;
 }
@@ -1725,6 +1839,10 @@ void UI::HandleGlobalKeys(Window& window) {
 			showTextureWorkflow = false;
 			return;
 		}
+		if (showBatchWorkflow) {
+			showBatchWorkflow = false;
+			return;
+		}
 
 		// If any popup is open, close it
 		if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup)) {
@@ -1747,6 +1865,7 @@ void UI::ShowWorkflowWindows(Window& window) {
 	ShowReconstructWorkflowWindow(window);
 	ShowRefineWorkflowWindow(window);
 	ShowTextureWorkflowWindow(window);
+	ShowBatchWorkflowWindow(window);
 }
 
 void UI::ShowDensifyWorkflowWindow(Window& window) {
@@ -2178,6 +2297,108 @@ void UI::ShowTextureWorkflowWindow(Window& window) {
 		showTextureWorkflow = false;
 	if (!canRun)
 		ImGui::TextDisabled("Requires a mesh and images.");
+
+	ImGui::End();
+}
+
+void UI::ShowBatchWorkflowWindow(Window& window) {
+	if (!showBatchWorkflow)
+		return;
+
+	Scene& scene = window.GetScene();
+	Scene::DensifyWorkflowOptions& densifyOpts = scene.GetDensifyWorkflowOptions();
+	Scene::ReconstructMeshWorkflowOptions& reconstructOpts = scene.GetReconstructMeshWorkflowOptions();
+	Scene::RefineMeshWorkflowOptions& refineOpts = scene.GetRefineMeshWorkflowOptions();
+	Scene::TextureMeshWorkflowOptions& textureOpts = scene.GetTextureMeshWorkflowOptions();
+	const MVS::Scene& mvsScene = scene.GetScene();
+	const bool hasImages = mvsScene.IsValid();
+	const bool hasPoints = hasImages && mvsScene.pointcloud.IsValid();
+	const bool hasMesh = hasImages && !mvsScene.mesh.IsEmpty();
+	ImGui::SetNextWindowSize(ImVec2(400.f, 184.f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Batch Process##workflow", &showBatchWorkflow)) {
+		ImGui::End();
+		return;
+	}
+
+	ImGui::TextUnformatted("Select workflow modules to run sequentially.");
+	ImGui::Separator();
+
+	// Persistent selection and ordering
+	static bool selectedModules[4] = { true, true, true, true }; // Densify, Reconstruct, Refine, Texture
+	const char* labels[4] = { "Densify Point Cloud", "Reconstruct Mesh", "Refine Mesh", "Texture Mesh" };
+	const char* hints[4] = { "requires images", "requires points with visibility", "requires mesh", "requires mesh" };
+	for (int idx = 0; idx < 4; ++idx) {
+		ImGui::PushID(idx);
+		// determine if prerequisites are (or will be) met for this module
+		bool prereqMet;
+		switch (idx) {
+		case 0: // Densify
+			if (!(prereqMet = hasImages))
+				selectedModules[idx] = false;
+			break;
+		case 1: // Reconstruct
+			// Reconstruct requires points OR densify selected to produce points
+			if (!(prereqMet = hasPoints || selectedModules[0]))
+				selectedModules[idx] = false;
+			break;
+		case 2: // Refine
+		case 3: // Texture
+			// Refine/Texture require a mesh OR reconstruct selected to produce a mesh
+			if (!(prereqMet = hasMesh || selectedModules[1]))
+				selectedModules[idx] = false;
+			break;
+		}
+		ImGui::BeginDisabled(!prereqMet);
+		ImGui::Checkbox(labels[idx], &selectedModules[idx]);
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		ImGui::TextDisabled("(%s)", hints[idx]);
+		ImGui::PopID();
+	}
+
+	ImGui::Separator();
+	// Build runnable list
+	std::vector<int> runnable;
+	for (int idx = 0; idx < 4; ++idx)
+		if (selectedModules[idx])
+			runnable.push_back(idx);
+	const bool canRun = !runnable.empty();
+	if (!canRun)
+		ImGui::TextDisabled("No runnable modules selected or prerequisites missing.");
+
+	if (ImGui::Button("Run") && canRun) {
+		// Close window before running long tasks
+		showBatchWorkflow = false;
+		ImGui::End();
+		// Execute selected modules in order
+		FOREACH(i, runnable) {
+			const int mod = runnable[i];
+			const bool updateGeometry = (i == runnable.size() - 1); // update geometry only for last module
+			switch (mod) {
+			case 0:
+				DEBUG("Batch: Running Densify Point Cloud...");
+				scene.RunDensifyWorkflow(densifyOpts, updateGeometry);
+				break;
+			case 1:
+				DEBUG("Batch: Running Reconstruct Mesh...");
+				scene.RunReconstructMeshWorkflow(reconstructOpts, updateGeometry);
+				break;
+			case 2:
+				DEBUG("Batch: Running Refine Mesh...");
+				scene.RunRefineMeshWorkflow(refineOpts, updateGeometry);
+				break;
+			case 3:
+				DEBUG("Batch: Running Texture Mesh...");
+				scene.RunTextureMeshWorkflow(textureOpts, updateGeometry);
+				break;
+			}
+		}
+		window.RequestRedraw();
+		return; // already ended ImGui for this invocation
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		showBatchWorkflow = false;
 
 	ImGui::End();
 }
