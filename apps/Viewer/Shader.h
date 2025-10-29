@@ -55,6 +55,7 @@ public:
 	void SetVector3(const std::string& name, const Eigen::Vector3f& vector);
 	void SetVector2(const std::string& name, const Eigen::Vector2f& vector);
 	void SetFloat(const std::string& name, float value);
+	void SetUInt(const std::string& name, unsigned value);
 	void SetInt(const std::string& name, int value);
 	void SetBool(const std::string& name, bool value);
 

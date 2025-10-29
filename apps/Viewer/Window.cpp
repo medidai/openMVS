@@ -56,6 +56,7 @@ Window::Window()
 	, selectedNeighborCamera(NO_ID)
 	, clearColor(0.3f, 0.4f, 0.5f, 1.f)
 	, minViews(2)
+	, userFontScale(1.f)
 	, cameraSize(0.1f)
 	, pointSize(3.f)
 	, pointNormalLength(0.02f)
@@ -258,16 +259,17 @@ void Window::Run() {
 			break;
 		}
 
-		// Poll events normally for continuous rendering
+		// Process events
 		if (renderOnlyOnChange)
-			glfwWaitEvents(); // Wait for events
-		PollEvents();
+			glfwWaitEvents(); // wait for events
+		else
+			glfwPollEvents(); // poll events normally for continuous rendering
 
 		// Render frame
 		Render();
 
 		// Swap buffers
-		SwapBuffers();
+		glfwSwapBuffers(window);
 
 		// Update UI frame stats
 		ui->UpdateFrameStats(deltaTime);
@@ -276,16 +278,6 @@ void Window::Run() {
 
 bool Window::ShouldClose() const {
 	return window ? glfwWindowShouldClose(window) : true;
-}
-
-void Window::SwapBuffers() {
-	if (window) {
-		glfwSwapBuffers(window);
-	}
-}
-
-void Window::PollEvents() {
-	glfwPollEvents();
 }
 
 void Window::UploadRenderData() {
@@ -323,8 +315,6 @@ void Window::UploadRenderData() {
 }
 
 void Window::Render() {
-	if (!window) return;
-
 	GL_DEBUG_SCOPE("Window::Render");
 
 	// Enable depth testing
@@ -420,21 +410,29 @@ void Window::SetVisible(bool visible) {
 }
 
 void Window::RequestAttention() {
-	if (window) {
+	if (window)
 		glfwRequestWindowAttention(window);
-	}
 }
 
 void Window::Focus() {
-	if (window) {
+	if (window)
 		glfwFocusWindow(window);
-	}
 }
 
 void Window::SetSceneBounds(const Point3f& center, const Point3f& size) {
 	camera.SetSceneBounds(center, size);
 	arcballControls->setSensitivity(norm(size) * 0.1);
 	firstPersonControls->setMovementSpeed(norm(size) * 0.1);
+}
+
+GLFWwindow* Window::GetCurrentGLFWWindow()
+{
+	return glfwGetCurrentContext();
+}
+
+Window& Window::GetCurrentWindow()
+{
+	return GetCurrentScene().GetWindow();
 }
 
 void Window::SetControlMode(ControlMode mode) {
@@ -450,6 +448,8 @@ void Window::SetControlMode(ControlMode mode) {
 		arcballControls->reset();
 		break;
 	case CONTROL_SELECTION:
+		// Auto-open selection controls when switching to selection mode
+		ui->SetSelectionControls(true);
 		// Don't reset selection when switching to selection mode
 		// This preserves the active selection for inspection while navigating
 		break;
@@ -532,7 +532,11 @@ void Window::HandleMouseButton(int button, int action, int mods) {
 
 	// Handle raycast on click
 	Ray3d ray = camera.GetPickingRay(normalizedPos);
-	GetScene().OnCastRay(ray, button, action, mods);
+	// Convert logical window cursor coords to framebuffer pixel coords using devicePixelRatio
+	Point2f screenPos(
+		static_cast<float>(xpos * devicePixelRatio.x()),
+		static_cast<float>(ypos * devicePixelRatio.y()));
+	GetScene().OnCastRay(screenPos, ray, button, action, mods);
 }
 
 void Window::HandleScroll(double yoffset) {
@@ -563,7 +567,7 @@ void Window::HandleKeyboard(int key, int action, int mods) {
 	if (action == GLFW_RELEASE) {
 		switch (key) {
 			case GLFW_KEY_ESCAPE:
-				if (!camera.IsCameraViewMode()) {
+				if (!camera.IsCameraViewMode() && currentControlMode != CONTROL_SELECTION) {
 					// Close the window
 					glfwSetWindowShouldClose(window, GLFW_TRUE);
 				}
@@ -770,7 +774,7 @@ Eigen::Vector2d Window::NormalizeMousePos(double x, double y) const {
 
 // Hide/show mouse cursor (does not seem to work during remote desktop sessions)
 void Window::SetCursorVisible(bool visible) {
-	GLFWwindow* window = glfwGetCurrentContext();
+	GLFWwindow* window = GetCurrentGLFWWindow();
 	if (visible)
 		glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 	else
@@ -780,6 +784,11 @@ void Window::SetCursorVisible(bool visible) {
 // Static method to get the associated Scene from the window
 Scene& Window::GetScene(GLFWwindow* window) {
 	return *static_cast<Scene*>(glfwGetWindowUserPointer(window));
+}
+
+Scene& Window::GetCurrentScene()
+{
+	return GetScene(GetCurrentGLFWWindow());
 }
 
 // Static method to request a redraw by posting a GLFW event

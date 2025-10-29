@@ -4414,7 +4414,9 @@ Mesh Mesh::SubMesh(const FaceIdxArr& chunk) const
 } // SubMesh
 /*----------------------------------------------------------------*/
 
-// extract one sub-mesh for each texture, i.e. for each value of faceTexindices;
+// extract one sub-mesh for each texture, i.e. for each value of faceTexindices:
+//  - mapFaceSubsetIndices: if not null, for each face of the original mesh,
+//    contains the index of the face in the corresponding sub-mesh
 std::vector<Mesh> Mesh::SplitMeshPerTextureBlob(FaceIdxArr* mapFaceSubsetIndices) const {
 	ASSERT(HasTexture());
 	if (texturesDiffuse.size() == 1)

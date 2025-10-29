@@ -38,10 +38,6 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <portable-file-dialogs.h>
-#include <unordered_map>
-#include <algorithm>
-#include <deque>
-#include <mutex>
 
 using namespace VIEWER;
 
@@ -397,12 +393,8 @@ void UI::ShowCameraControls(Window& window) {
 		// Navigation mode
 		const char* navModes[] = { "Arcball", "First Person", "Selection" };
 		int currentMode = (int)window.GetControlMode();
-		if (ImGui::Combo("Navigation Mode", &currentMode, navModes, IM_ARRAYSIZE(navModes))) {
+		if (ImGui::Combo("Navigation Mode", &currentMode, navModes, IM_ARRAYSIZE(navModes)))
 			window.SetControlMode((Window::ControlMode)currentMode);
-			// Auto-open selection controls when switching to selection mode
-			if (currentMode == Window::CONTROL_SELECTION)
-				showSelectionControls = true;
-		}
 
 		// Projection mode
 		bool ortho = camera.IsOrthographic();
@@ -538,8 +530,10 @@ void UI::ShowCameraControls(Window& window) {
 
 void UI::ShowSelectionControls(Window& window) {
 	// Auto-open selection controls when in selection mode
-	showSelectionControls = (window.GetControlMode() == Window::CONTROL_SELECTION);
-	if (!showSelectionControls) return;
+	if (window.GetControlMode() != Window::CONTROL_SELECTION)
+		showSelectionControls = false;
+	if (!showSelectionControls)
+		return;
 
 	ImGui::SetNextWindowPos(ImVec2(990, 210), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowSize(ImVec2(280, 320), ImGuiCond_FirstUseEver);
@@ -548,7 +542,7 @@ void UI::ShowSelectionControls(Window& window) {
 		if (window.GetControlMode() != Window::CONTROL_SELECTION) {
 			ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.f), "Selection mode not active");
 			ImGui::Text("Switch to Selection mode in Camera Controls");
-			ImGui::Text("or press Tab to cycle navigation modes");
+			ImGui::Text("or press G to enable selection.");
 			ImGui::End();
 			return;
 		}
@@ -970,6 +964,7 @@ void UI::ShowHelpDialog() {
 
 		// Selection Tools
 		ImGui::TextColored(ImVec4(1.f, 0.9f, 0.6f, 1.f), "Selection Tools:");
+		ImGui::Text("  G                   Toggle selection mode");
 		ImGui::Text("  B                   Box selection mode");
 		ImGui::Text("  L                   Lasso selection mode");
 		ImGui::Text("  C                   Circle selection mode");
@@ -1461,9 +1456,24 @@ void UI::SetupStyle() {
 	style.FrameRounding = 3.f;
 }
 
+void UI::SetUserFontScale(float scale) {
+	float& currentScale = Window::GetCurrentWindow().userFontScale;
+	const float ratio = scale / currentScale;
+	if (ratio != 1.f)
+		ImGui::GetStyle().ScaleAllSizes(ratio);
+	ImGui::GetIO().FontGlobalScale = currentScale = scale;
+	SetupStyle();
+	Window::RequestRedraw();
+}
+
 void UI::ShowRenderingControls(Window& window) {
 	ImGui::Text("Rendering");
 	ImGui::Separator();
+
+	// Font scale: user-controlled base scale
+	float userFontScale = window.userFontScale;
+	if (ImGui::InputFloat("Font Scale", &userFontScale, 0.1f, 0.5f, "%.2f"))
+		SetUserFontScale(userFontScale);
 
 	// Background color
 	if (ImGui::ColorEdit3("Background", window.clearColor.data()))
@@ -1764,10 +1774,13 @@ bool UI::IsMenuInUse() const {
 void UI::RecordLog(const String& msg)
 {
 	// Thread-safe append to buffer. We don't touch ImGui state here.
-	std::lock_guard<std::mutex> lock(logMutex);
-	logBuffer.push_back(msg);
-	while (logBuffer.size() > MAX_UI_LOG_LINES)
-		logBuffer.pop_front();
+	{
+		std::lock_guard<std::mutex> lock(logMutex);
+		logBuffer.push_back(msg);
+		while (logBuffer.size() > MAX_UI_LOG_LINES)
+			logBuffer.pop_front();
+	}
+	Window::RequestRedraw();
 }
 
 bool UI::WantCaptureMouse() const {
@@ -1809,10 +1822,6 @@ void UI::HandleGlobalKeys(Window& window) {
 		}
 		if (showCameraControls) {
 			showCameraControls = false;
-			return;
-		}
-		if (showSelectionControls) {
-			showSelectionControls = false;
 			return;
 		}
 		if (showSelectionDialog) {
@@ -1992,6 +2001,11 @@ void UI::ShowDensifyWorkflowWindow(Window& window) {
 	ImGui::DragFloat("ROI Border (%)", &opts.borderROI, 0.1f, -100.f, 100.f, "%.2f");
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Percentage to expand (positive) or shrink (negative) the ROI border.\nUseful to include context or tighten the bounds.");
+	#ifdef _USE_CUDA
+	ImGui::SliderInt("CUDA Device ID", &SEACAVE::CUDA::desiredDeviceID, -2, 8);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("CUDA device number to be used for depth-map estimation\n(-2 - CPU processing, -1 - best GPU, >=0 - device index)");
+	#endif
 
 	ImGui::Separator();
 	const bool canRun = scene.IsOpen() && hasImages;
@@ -2073,8 +2087,6 @@ void UI::ShowReconstructWorkflowWindow(Window& window) {
 	ImGui::DragFloat("Edge Length", &opts.edgeLength, 0.01f, 0.f, 10.f, "%.3f");
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Target edge length for mesh faces (in scene units).\nControls mesh resolution and uniformity (0 - disabled)");
-
-	ImGui::Separator();
 	ImGui::Checkbox("Crop to ROI", &opts.cropToROI);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Crop the final mesh to the Region of Interest bounds.\nVertices and faces outside the ROI will be removed.");
@@ -2163,9 +2175,15 @@ void UI::ShowRefineWorkflowWindow(Window& window) {
 	ImGui::DragFloat("Rigidity/Elasticity", &opts.rigidityElasticityRatio, 0.05f, 0.f, 1.f, "%.2f");
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Balance between mesh rigidity and elasticity:\n- 0 = fully elastic (flexible deformation)\n- 1 = fully rigid (minimal deformation)\nAffects how much the mesh can deform.");
-	ImGui::DragFloat("Gradient Step", &opts.gradientStep, 1.f, 0.f, 200.f, "%.2f");
+	float iters = FLOOR2INT(opts.gradientStep);
+	float gstep = (opts.gradientStep-(float)iters)*10;
+	ImGui::DragFloat("Gradient Iterations", &iters, 1.f, 0.f, 200.f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Number of iterations of gradient descent optimization.");
+	ImGui::DragFloat("Gradient Step", &gstep, 0.01f, 0.01f, 10.f, "%.2f");
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Step size for gradient descent optimization.\nLarger values converge faster, but may be unstable.\nSmaller values are more stable, but slower.");
+	opts.gradientStep = iters + gstep*0.1f;
 	ImGui::DragFloat("Planar Vertex Ratio", &opts.planarVertexRatio, 0.01f, 0.f, 1.f, "%.2f");
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Ratio of vertices to treat as planar (constrained to move along their normal).\nHigher values preserve flat surfaces better, but reduce flexibility.");
@@ -2445,6 +2463,9 @@ void SettingsReadLine(ImGuiContext*, ImGuiSettingsHandler* handler, void* entry,
 	else if (sscanf(line, "ImageOverlayOpacity=%f", &x) == 1) {
 		window.imageOverlayOpacity = x;
 	}
+	else if (sscanf(line, "FontScale=%f", &x) == 1) {
+		window.GetUI().SetUserFontScale(x);
+	}
 	else if (sscanf(line, "ArcballRenderGizmos=%d", &intVal) == 1) {
 		window.GetArcballControls().setEnableGizmos(intVal != 0);
 	}
@@ -2479,6 +2500,7 @@ void SettingsWriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuf
 	buf->appendf("ShowMeshWireframe=%d\n", window.showMeshWireframe ? 1 : 0);
 	buf->appendf("ShowMeshTextured=%d\n", window.showMeshTextured ? 1 : 0);
 	buf->appendf("ImageOverlayOpacity=%f\n", window.imageOverlayOpacity);
+	buf->appendf("FontScale=%f\n", window.userFontScale);
 	buf->appendf("ArcballRenderGizmos=%d\n", 
 		window.GetArcballControls().getEnableGizmos() ? 1 : 0);
 	buf->appendf("ArcballRenderGizmosCenter=%d\n", 

@@ -103,6 +103,8 @@ public:
 	void ShowSelectionOverlay(const Window& window);
 	void ShowWorkflowWindows(Window& window);
 	void ToggleHelpDialog() { showHelpDialog = !showHelpDialog; }
+	void SetSelectionControls(bool v) { showSelectionControls = v; }
+	void SetUserFontScale(float scale);
 
 	// Dialogs
 	void ShowAboutDialog();
@@ -127,7 +129,6 @@ private:
 	void ShowRenderingControls(Window& window);
 	void ShowPointCloudControls(Window& window);
 	void ShowMeshControls(Window& window);
-	void ShowSelectionInfo(const Window& window);
 	void ShowDensifyWorkflowWindow(Window& window);
 	void ShowReconstructWorkflowWindow(Window& window);
 	void ShowRefineWorkflowWindow(Window& window);

@@ -116,6 +116,7 @@ inline bool CheckOpenGLError(const char* function, const char* file, int line) {
     if (error == GL_NO_ERROR)
         return true; // No error, everything is fine
     DEBUG("OpenGL Error: %s (0x%X)\n  Function: %s\n  File: %s:%d", errorString.c_str(), error, function, file, line);
+    ASSERT("OpenGL error detected!" == NULL);
     return false;
 }
 

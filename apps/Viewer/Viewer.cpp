@@ -76,6 +76,9 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 {
 	// initialize log and console
 	OPEN_LOG();
+	#ifndef _RELEASE
+	OPEN_LOGCONSOLE();
+	#endif
 
 	// group of options allowed only on command line
 	boost::program_options::options_description generic("Generic options");

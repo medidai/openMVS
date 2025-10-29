@@ -80,8 +80,9 @@ private:
 	std::unique_ptr<Shader> meshTexturedShader;
 	std::unique_ptr<VAO> meshVAO;
 	std::unique_ptr<VBO> meshVBO, meshEBO, meshNormalVBO, meshTexCoordVBO;
-	MVS::Mesh::FaceIdxArr mapFaceSubsetIndices;
-	std::vector<size_t> meshFaceCounts;
+	MVS::Mesh::FaceIdxArr mapFaceSubsetIndices; // maps face indices from original mesh to sub-mesh when rendering subsets
+	MVS::Mesh::FaceIdxArr mapSubsetFaceIndices; // maps face indices from sub-mesh to original mesh when rendering subsets
+	std::vector<unsigned> meshFaceCounts; // number of faces till each sub-mesh (subtract the previous to get count per sub-mesh)
 	std::vector<Image> meshTextures;
 
 	// Geometry selection highlighting (for SelectionController)
@@ -131,6 +132,14 @@ private:
 	size_t gizmoCenterAxesBaseVertex; // Starting vertex for center axes
 	size_t gizmoCenterAxesVertexCount; // Number of center axes vertices
 
+	// Picker FBO (ID-only rendering)
+	std::unique_ptr<Shader> pickerMeshShader;
+	std::unique_ptr<Shader> pickerPointsShader;
+	GLuint pickFBO;
+	GLuint pickIDTex; // GL_R32UI texture storing primitive ids
+	GLuint pickDepthRBO; // depth renderbuffer
+	cv::Size pickFBOSize;
+
 public:
 	Renderer();
 	~Renderer();
@@ -162,6 +171,14 @@ public:
 	void RenderCoordinateAxes(const Camera& camera);
 	void RenderArcballGizmos(const Camera& camera, const class ArcballControls& controls);
 
+	struct PickResult {
+		uint32_t index{NO_ID};
+		Point3f points[3];
+		bool isPoint;
+		bool IsValid() const { return index != NO_ID; }
+	};
+	PickResult PickPrimitiveAt(const Point2f& screenPos, int radius, const Window& window);
+
 	void EndFrame();
 
 	// Getters
@@ -184,6 +201,11 @@ private:
 	void SetupBoundsBuffers();
 	void SetupAxesBuffers();
 	void SetupGizmoBuffers();
+
+    // Ensure pick FBO matches requested size (creates or recreates textures/renderbuffers)
+    void EnsurePickFBOSize(int width, int height);
+    // Release picker buffers (textures, renderbuffers, FBO)
+    void ReleasePickerBuffers();
 };
 /*----------------------------------------------------------------*/
 

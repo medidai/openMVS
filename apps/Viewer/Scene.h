@@ -144,9 +144,6 @@ public:
 	RefineMeshWorkflowOptions refineOptions;
 	TextureMeshWorkflowOptions textureOptions;
 
-	OctreePoints octPoints;
-	OctreeMesh octMesh;
-
 	// multi-threading
 	static SEACAVE::EventQueue events; // internal events queue (processed by the working threads)
 	static SEACAVE::Thread thread; // worker thread
@@ -164,7 +161,6 @@ public:
 
 	inline bool IsValid() const { return window.IsValid(); }
 	inline bool IsOpen() const { return IsValid() && !scene.IsEmpty(); }
-	inline bool IsOctreeValid() const { return !octPoints.IsEmpty() || !octMesh.IsEmpty(); }
 
 	// Scene management
 	bool Open(const String& fileName, String geometryFileName = {});
@@ -200,7 +196,7 @@ public:
 
 	// Event handlers
 	void OnCenterScene(const Point3f& center);
-	void OnCastRay(const Ray3d&, int button, int action, int mods);
+	void OnCastRay(const Point2f& screenPos, const Ray3d& ray, int button, int action, int mods);
 	void OnSetCameraViewMode(MVS::IIndex camID);
 	void OnSelectPointsByCamera(bool highlightCameraVisiblePoints);
 
