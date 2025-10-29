@@ -63,10 +63,9 @@ VERBOSE("Info: %s", str);   // General logging
 
 ### Common Typedefs
 ```cpp
-typedef uint32_t IDX;              // Array indices
 typedef SEACAVE::Point3f Point3f;  // 3D points
 typedef SEACAVE::String String;    // String type
-#define NO_ID ((IDX)-1)           // Invalid index
+#define NO_ID ((uint32_t)-1)       // Invalid index
 ```
 Most of OpenMVS code uses custom point and matrix types derived from OpenCV types, e.g., `SEACAVE::Point3f`, `SEACAVE::Matrix4f`. Hoewever, some components use Eigen3 types, e.g. `SEACAVE::AABB3d` and `SEACAVE::Ray3d` classes. There custom types support convertion operation to and from Eigen3 types.
 

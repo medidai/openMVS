@@ -41,10 +41,10 @@ else()
 	FILE(GLOB LIBRARY_FILES_C "*.cpp")
 endif()
 FILE(GLOB LIBRARY_FILES_H "*.h" "*.inl")
-FILE(GLOB SHADERS_LIBRARY_FILES "Shaders/*.*")
+FILE(GLOB SHADERS_LIBRARY_FILES "shaders/*.*")
 SOURCE_GROUP("Shaders" FILES ${SHADERS_LIBRARY_FILES})
 
-cxx_executable_with_flags(${VIEWER_NAME} "Apps" "${cxx_default}" "MVS;glad::glad;${GLFW_STATIC_LIBRARIES};${glfw3_LIBRARY};${GLFW3_LIBRARY};glfw;imgui::imgui" ${LIBRARY_FILES_C} ${LIBRARY_FILES_H})
+cxx_executable_with_flags(${VIEWER_NAME} "Apps" "${cxx_default}" "MVS;glad::glad;${GLFW_STATIC_LIBRARIES};${glfw3_LIBRARY};${GLFW3_LIBRARY};glfw;imgui::imgui" ${LIBRARY_FILES_C} ${LIBRARY_FILES_H} ${SHADERS_LIBRARY_FILES})
 
 # Build the Viewer as a GUI application on platforms that support it so
 # launching from the desktop does not open or attach a console/terminal.

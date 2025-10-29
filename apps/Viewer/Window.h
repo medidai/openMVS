@@ -93,12 +93,13 @@ public:
 	SELECTION selectionType;
 	Point3f selectionPoints[4];
 	double selectionTimeClick, selectionTime;
-	IDX selectionIdx; // Index of selected point/triangle/camera (NO_ID if none) (if camera, the index is in the Viewer scene images)
-	MVS::IIndex selectedNeighborCamera; // Index of neighbor camera to highlight (NO_ID if none) (index is in the Viewer scene images)
+	IDX selectionIdx; // index of selected point/triangle/camera (NO_ID if none) (if camera, the index is in the Viewer scene images)
+	MVS::IIndex selectedNeighborCamera; // index of neighbor camera to highlight (NO_ID if none) (index is in the Viewer scene images)
 
 	// Settings
 	Eigen::Vector4f clearColor;
 	MVS::IIndex minViews;
+	float userFontScale; // UI font scale
 	float cameraSize;
 	float pointSize;
 	float pointNormalLength;
@@ -110,7 +111,7 @@ public:
 	bool showMesh;
 	bool showMeshWireframe;
 	bool showMeshTextured;
-	std::vector<bool> meshSubMeshVisible; // Control visibility of individual sub-meshes (using unsigned char instead of bool for ImGui compatibility)
+	std::vector<bool> meshSubMeshVisible; // control visibility of individual sub-meshes (using unsigned char instead of bool for ImGui compatibility)
 
 public:
 	Window();
@@ -125,8 +126,6 @@ public:
 	// Main loop
 	void Run();
 	bool ShouldClose() const;
-	void SwapBuffers();
-	void PollEvents();
 
 	// Rendering
 	void UploadRenderData();
@@ -137,8 +136,8 @@ public:
 	const Camera& GetCamera() const { return camera; }
 
 	// Control access
-	ControlMode GetControlMode() const { return currentControlMode; }
 	void SetControlMode(ControlMode mode);
+	ControlMode GetControlMode() const { return currentControlMode; }
 	ArcballControls& GetArcballControls() const { return *arcballControls; }
 	FirstPersonControls& GetFirstPersonControls() { return *firstPersonControls; }
 	SelectionController& GetSelectionController() const { return *selectionController; }
@@ -154,14 +153,18 @@ public:
 	// Utility
 	void SetTitle(const String& title);
 	void SetVisible(bool visible);
-	void RequestAttention(); // Request window attention (flash in taskbar)
-	void Focus(); // Bring window to front and give it focus
+	void RequestAttention(); // request window attention (flash in taskbar)
+	void Focus(); // bring window to front and give it focus
+	const Eigen::Vector2d& GetDevicePixelRatio() const { return devicePixelRatio; }
 	const cv::Size& GetSize() const { return camera.GetSize(); }
 	void SetSceneBounds(const Point3f& center, const Point3f& size);
 	GLFWwindow* GetGLFWWindow() const { return window; }
+	static GLFWwindow* GetCurrentGLFWWindow();
+	static Window& GetCurrentWindow();
 	Scene& GetScene() const { return GetScene(window); }
 	static Scene& GetScene(GLFWwindow* window);
-	static void RequestRedraw(); // Post an event to trigger redraw
+	static Scene& GetCurrentScene();
+	static void RequestRedraw(); // post an event to trigger redraw
 
 	// Cursor visibility helpers
 	static void SetCursorVisible(bool visible);

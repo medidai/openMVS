@@ -241,7 +241,8 @@ void ArcballControls::panCamera(const Eigen::Vector2d& delta) {
 }
 
 void ArcballControls::zoomCamera(double delta) {
-	const double speed = MAXF(0.001, 0.15 * (camera.GetTarget() - camera.GetPosition()).norm() * zoomSensitivity);
+	const double distance = MINF(camera.GetSceneDistance()*0.3, (camera.GetPosition() - camera.GetTarget()).norm());
+	const double speed = MAXF(0.001, 0.15 * distance * zoomSensitivity);
 	zoom(delta * speed);
 }
 

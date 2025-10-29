@@ -210,7 +210,7 @@ public:
 	std::vector<Mesh> SplitMeshPerTextureBlob(FaceIdxArr* mapFaceSubsetIndices = NULL) const;
 	void ConvertTexturePerVertex(Mesh&) const;
 
-	TexIndex GetFaceTextureIndex(FIndex idxF) const { return faceTexindices.empty() ? 0 : faceTexindices[idxF]; }
+	TexIndex GetFaceTextureIndex(FIndex idxF) const { ASSERT(faceTexindices.empty() || faceTexindices.size() == faces.size()); return faceTexindices.empty() ? 0 : faceTexindices[idxF]; }
 	void FaceTexcoordsNormalize(TexCoordArr& newFaceTexcoords, bool flipY=true) const;
 	void FaceTexcoordsUnnormalize(TexCoordArr& newFaceTexcoords, bool flipY=true) const;
 

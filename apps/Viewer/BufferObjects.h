@@ -82,6 +82,19 @@ public:
 
 	void SetSubData(const void* data, size_t size, size_t offset);
 
+	// Read back buffer data
+	template<typename T>
+	void GetData(T* out, size_t count);
+
+	template<typename T>
+	void GetData(std::vector<T>& out);
+
+	template<typename T>
+	void GetSubData(T* out, size_t count, size_t offset);
+
+	template<typename T>
+	void GetSubData(std::vector<T>& out, size_t offset);
+
 	GLuint GetID() const { return id; }
 };
 

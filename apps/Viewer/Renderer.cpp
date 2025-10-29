@@ -43,6 +43,9 @@ Renderer::Renderer()
 	, selectionPrimitiveCount(0)
 	, selectionOverlayVertexCount(0)
 	, boundsPrimitiveCount(0)
+	, pickFBO(0)
+	, pickIDTex(0)
+	, pickDepthRBO(0)
 {
 }
 
@@ -71,10 +74,11 @@ bool Renderer::Initialize() {
 		GL_CHECK(glEnable(GL_DEPTH_TEST));
 		GL_CHECK(glDepthFunc(GL_LESS));
 
-		// Enable blending for transparency
-		GL_CHECK(glEnable(GL_BLEND));
+		// Disable blending for transparency
+		GL_CHECK(glDisable(GL_BLEND));
 		GL_CHECK(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
+		// Disable face culling
 		GL_CHECK(glDisable(GL_CULL_FACE));
 		GL_CHECK(glFrontFace(GL_CCW));
 		return true;
@@ -86,6 +90,7 @@ bool Renderer::Initialize() {
 }
 
 void Renderer::Release() {
+	Reset();
 }
 
 void Renderer::Reset() {
@@ -102,11 +107,14 @@ void Renderer::Reset() {
 	boundsPrimitiveCount = 0;
 
 	// Clear mesh-related data
-	meshFaceCounts.clear();
 	mapFaceSubsetIndices.clear();
+	mapSubsetFaceIndices.clear();
+	meshFaceCounts.clear();
 	meshTextures.clear();
 
 	// Clear scene-dependent geometry buffers by allocating empty data
+	ReleasePickerBuffers();
+
 	if (pointCloudVBO)
 		pointCloudVBO->AllocateBuffer(0);
 	if (pointCloudColorVBO)
@@ -208,6 +216,18 @@ void Renderer::CreateShaders() {
 		#include "shaders/selectionoverlay.frag"
 	);
 
+	// Picker shaders (ID-only rendering) - separate for mesh and points
+	pickerMeshShader = std::make_unique<Shader>(
+		#include "shaders/picker_mesh.vert"
+		,
+		#include "shaders/picker_mesh.frag"
+	);
+	pickerPointsShader = std::make_unique<Shader>(
+		#include "shaders/picker_points.vert"
+		,
+		#include "shaders/picker_points.frag"
+	);
+
 	// Bounds shader
 	boundsShader = std::make_unique<Shader>(
 		#include "shaders/bounds.vert"
@@ -240,6 +260,8 @@ void Renderer::CreateShaders() {
 	viewProjectionUBO->BindToShader(*selectionShader, "ViewProjection");
 	viewProjectionUBO->BindToShader(*boundsShader, "ViewProjection");
 	viewProjectionUBO->BindToShader(*gizmoShader, "ViewProjection");
+	viewProjectionUBO->BindToShader(*pickerMeshShader, "ViewProjection");
+	viewProjectionUBO->BindToShader(*pickerPointsShader, "ViewProjection");
 
 	lightingUBO->BindToShader(*meshShader, "Lighting");
 }
@@ -542,6 +564,7 @@ void Renderer::UploadPointCloud(const MVS::PointCloud& pointcloud, float normalL
 
 void Renderer::UploadMesh(MVS::Mesh& mesh) {
 	mapFaceSubsetIndices.clear();
+	mapSubsetFaceIndices.clear();
 	meshFaceCounts.clear();
 	meshTextures.clear();
 	if (mesh.IsEmpty())
@@ -581,87 +604,80 @@ void Renderer::UploadMesh(MVS::Mesh& mesh) {
 		meshEBO->AllocateBuffer(totalIndices * sizeof(uint32_t));
 
 		// Upload each sub-mesh using glBufferSubData
-		size_t vertexOffset = 0;
-		size_t indexOffset = 0;
-		size_t texCoordOffset = 0;
-		uint32_t baseVertex = 0;
+		uint32_t vertexOffset = 0;
 		meshTextures.reserve(meshes.size());
+		meshFaceCounts.reserve(meshes.size());
 		for (MVS::Mesh& submesh : meshes) {
-			// Convert texture coordinates
+			// convert texture coordinates
 			MVS::Mesh::TexCoordArr normFaceTexcoords;
 			if (!submesh.faceTexcoords.empty()) {
-				// Normalize texture coordinates
+				// normalize texture coordinates
 				submesh.FaceTexcoordsNormalize(normFaceTexcoords, false);
 			} else {
-				// Default texture coordinates
+				// default texture coordinates
 				normFaceTexcoords.resize(submesh.vertices.size());
 			}
-
-			// Convert normals to float array
+			// convert normals to float array
 			if (submesh.vertexNormals.empty())
 				submesh.ComputeNormalVertices();
-
-			// Adjust face indices to account for previous sub-meshes
+			// adjust face indices to account for previous sub-meshes
 			std::vector<uint32_t> adjustedIndices;
 			adjustedIndices.reserve(submesh.faces.size() * 3);
 			for (const MVS::Mesh::Face& face : submesh.faces) {
-				adjustedIndices.push_back(baseVertex + face.x);
-				adjustedIndices.push_back(baseVertex + face.y);
-				adjustedIndices.push_back(baseVertex + face.z);
+				adjustedIndices.push_back(vertexOffset + face.x);
+				adjustedIndices.push_back(vertexOffset + face.y);
+				adjustedIndices.push_back(vertexOffset + face.z);
 			}
-
-			// Upload vertices using VBO wrapper functions
+			// upload vertices using VBO wrapper functions
 			meshVBO->SetSubData(&submesh.vertices[0].x, submesh.vertices.size() * 3, vertexOffset * 3);
-
-			// Upload normals using VBO wrapper functions
+			// upload normals using VBO wrapper functions
 			meshNormalVBO->SetSubData(&submesh.vertexNormals[0].x, submesh.vertexNormals.size() * 3, vertexOffset * 3);
-
-			// Upload texture coordinates using VBO wrapper functions
-			meshTexCoordVBO->SetSubData(&normFaceTexcoords[0].x, normFaceTexcoords.size() * 2, texCoordOffset * 2);
-
-			// Upload indices using VBO wrapper functions
+			// upload texture coordinates using VBO wrapper functions
+			meshTexCoordVBO->SetSubData(&normFaceTexcoords[0].x, normFaceTexcoords.size() * 2, vertexOffset * 2);
+			// upload indices using VBO wrapper functions
+			const MVS::Mesh::FIndex faceCountPrev = meshFaceCounts.empty() ? 0 : meshFaceCounts.back();
+			const size_t indexOffset = faceCountPrev * 3;
 			meshEBO->SetSubData(adjustedIndices, indexOffset);
-
-			// Load texture for this sub-mesh
+			// load texture for this sub-mesh
 			if (submesh.HasTexture()) {
 				ASSERT(submesh.texturesDiffuse.size() == 1, "Sub-mesh should have exactly one texture");
 				const MVS::IIndex i = (MVS::IIndex)meshTextures.size();
 				Image& image = meshTextures.emplace_back(i);
 				image.SetImageLoading();
 				image.AssignImage(submesh.texturesDiffuse.front());
-				// Check if image is valid and has a texture
-				if (!image.TransferImage()) {
-					DEBUG("Warning: Image %zu is not valid, removing from meshTextures", i);
-				} else {
+				// check if image is valid and has a texture
+				if (image.TransferImage())
 					image.GenerateMipmap();
-				}
 			}
-
-			// Track this sub-mesh
-			meshFaceCounts.emplace_back(submesh.faces.size());
-
-			// Update offsets for next sub-mesh
+			// track this sub-mesh
+			meshFaceCounts.emplace_back(faceCountPrev + submesh.faces.size());
+			// update offsets for next sub-mesh
 			vertexOffset += submesh.vertices.size();
-			texCoordOffset += submesh.vertices.size();
-			indexOffset += submesh.faces.size() * 3;
-			baseVertex += submesh.vertices.size();
+		}
+		// map subset face indices for selection highlighting
+		if (!mapFaceSubsetIndices.empty()) {
+			mapSubsetFaceIndices.resize(mapFaceSubsetIndices.size());
+			FOREACH(faceIdx, mapFaceSubsetIndices) {
+				const MVS::Mesh::TexIndex submeshIdx = mesh.GetFaceTextureIndex(faceIdx);
+				ASSERT(submeshIdx < meshFaceCounts.size());
+				const MVS::Mesh::FIndex faceCountOffset = submeshIdx ? meshFaceCounts[submeshIdx - 1] : 0u;
+				mapSubsetFaceIndices[faceCountOffset + mapFaceSubsetIndices[faceIdx]] = faceIdx;
+			}
 		}
 	} else {
-		// Single mesh without texture - simpler case
-		// Convert normals to float array
+		// single mesh without texture - simpler case
+		// convert normals to float array
 		bool hasNormals = true;
 		if (mesh.vertexNormals.empty()) {
 			mesh.ComputeNormalVertices();
 			hasNormals = false;
 		}
-
-		// Upload to GPU using traditional method
+		// upload to GPU using traditional method
 		meshVBO->SetData(mesh.vertices[0].ptr(), mesh.vertices.size() * 3);
 		meshEBO->SetData(mesh.faces[0].ptr(), mesh.faces.size() * 3);
 		meshNormalVBO->SetData(mesh.vertexNormals[0].ptr(), mesh.vertexNormals.size() * 3);
 		if (!hasNormals)
 			mesh.vertexNormals.Release();
-
 		meshFaceCounts.emplace_back(mesh.faces.size());
 	}
 }
@@ -848,37 +864,32 @@ void Renderer::UploadSelection(const Window& window) {
 	// Handle point selection with valid pointViews
 	std::vector<float> selectionVertices;
 	const MVS::Scene& scene = window.GetScene().GetScene();
-	if (window.selectionType == Window::SEL_POINT) {
-		ASSERT(scene.pointcloud.IsValid());
-		if (scene.IsValid()) {
-			// Create line geometry from each camera seeing this point to the point
-			const MVS::PointCloud::Point& selectedPoint = scene.pointcloud.points[window.selectionIdx];
-			const MVS::PointCloud::ViewArr& pointViews = scene.pointcloud.pointViews[window.selectionIdx];
-			selectionVertices.reserve(pointViews.size() * 6); // 2 points per line, 3 coordinates per point
-			for (const MVS::PointCloud::View& viewIdx : pointViews) {
-				ASSERT(viewIdx < scene.images.size());
-				const MVS::Image& imageData = scene.images[viewIdx];
-				ASSERT(imageData.IsValid());
-				// Add line from camera center to the selected point
-				const Point3f& cameraCenter = imageData.camera.C;
-				// First vertex: camera center
-				selectionVertices.insert(selectionVertices.end(), {
-					cameraCenter.x, cameraCenter.y, cameraCenter.z
-				});
-				// Second vertex: selected point
-				selectionVertices.insert(selectionVertices.end(), {
-					selectedPoint.x, selectedPoint.y, selectedPoint.z
-				});
-			}
+	if (window.selectionType == Window::SEL_POINT && scene.IsValid() && scene.pointcloud.IsValid()) {
+		// Create line geometry from each camera seeing this point to the point
+		const MVS::PointCloud::Point& selectedPoint = scene.pointcloud.points[window.selectionIdx];
+		const MVS::PointCloud::ViewArr& pointViews = scene.pointcloud.pointViews[window.selectionIdx];
+		selectionVertices.reserve(pointViews.size() * 6); // 2 points per line, 3 coordinates per point
+		for (const MVS::PointCloud::View& viewIdx : pointViews) {
+			ASSERT(viewIdx < scene.images.size());
+			const MVS::Image& imageData = scene.images[viewIdx];
+			ASSERT(imageData.IsValid());
+			// add line from camera center to the selected point
+			const Point3f& cameraCenter = imageData.camera.C;
+			// first vertex: camera center
+			selectionVertices.insert(selectionVertices.end(), {
+				cameraCenter.x, cameraCenter.y, cameraCenter.z
+			});
+			// second vertex: selected point
+			selectionVertices.insert(selectionVertices.end(), {
+				selectedPoint.x, selectedPoint.y, selectedPoint.z
+			});
 		}
 	}
 	// Handle triangle selection
 	else if (window.selectionType == Window::SEL_TRIANGLE) {
-		ASSERT(!scene.mesh.IsEmpty() && window.selectionIdx < scene.mesh.faces.size());
-		const MVS::Mesh::Face& face = scene.mesh.faces[window.selectionIdx];
-		const Point3f& v0 = scene.mesh.vertices[face.x];
-		const Point3f& v1 = scene.mesh.vertices[face.y];
-		const Point3f& v2 = scene.mesh.vertices[face.z];
+		const Point3f& v0 = window.selectionPoints[0];
+		const Point3f& v1 = window.selectionPoints[1];
+		const Point3f& v2 = window.selectionPoints[2];
 		selectionVertices.reserve(18); // 3 lines * 2 vertices * 3 floats
 		// Line v0-v1
 		selectionVertices.insert(selectionVertices.end(), { v0.x, v0.y, v0.z });
@@ -1062,7 +1073,8 @@ void Renderer::UpdateLighting() {
 }
 
 void Renderer::RenderMesh(const Window& window) {
-	if (meshFaceCounts.empty()) return;
+	if (meshFaceCounts.empty())
+		return;
 
 	const bool isWireframe = window.showMeshWireframe;
 	const bool texturesEnabled = window.showMeshTextured;
@@ -1075,38 +1087,31 @@ void Renderer::RenderMesh(const Window& window) {
 	meshEBO->Bind();
 
 	// Render each sub-mesh
-	size_t indexOffset = 0;
 	FOREACH(i, meshFaceCounts) {
-		const size_t faceCount = meshFaceCounts[i];
-
-		// Check if this sub-mesh should be rendered
-		if (window.meshSubMeshVisible.empty() || window.meshSubMeshVisible[i]) {
-			const bool textureValid = (i < meshTextures.size()) && meshTextures[i].IsValid();
-
-			// Check if this sub-mesh has a valid texture
-			const bool hasTexture = texturesEnabled && textureValid;
-
-			// Select the appropriate shader based on texture availability for this sub-mesh
-			Shader* currentMeshShader = hasTexture ? meshTexturedShader.get() : meshShader.get();
-			currentMeshShader->Use();
-
-			// Set uniforms
-			currentMeshShader->SetBool("wireframe", isWireframe);
-			if (hasTexture) {
-				GL_CHECK(glActiveTexture(GL_TEXTURE0));
-				GL_CHECK(glBindTexture(GL_TEXTURE_2D, meshTextures[i].texture));
-				currentMeshShader->SetInt("diffuseTexture", 0);
-			} else {
-				currentMeshShader->SetVector3("meshColor", Eigen::Vector3f(0.8f, 0.8f, 0.8f));
-			}
-
-			// Draw this sub-mesh
-			const void* indexPtr = reinterpret_cast<const void*>(indexOffset * sizeof(uint32_t));
-			GL_CHECK(glDrawElements(GL_TRIANGLES, faceCount * 3, GL_UNSIGNED_INT, indexPtr));
+		// check if this sub-mesh should be rendered
+		if (!window.meshSubMeshVisible.empty() && !window.meshSubMeshVisible[i])
+			continue;
+		const bool textureValid = (i < meshTextures.size()) && meshTextures[i].IsValid();
+		// check if this sub-mesh has a valid texture
+		const bool hasTexture = texturesEnabled && textureValid;
+		// select the appropriate shader based on texture availability for this sub-mesh
+		Shader* currentMeshShader = hasTexture ? meshTexturedShader.get() : meshShader.get();
+		currentMeshShader->Use();
+		// set uniforms
+		currentMeshShader->SetBool("wireframe", isWireframe);
+		if (hasTexture) {
+			GL_CHECK(glActiveTexture(GL_TEXTURE0));
+			GL_CHECK(glBindTexture(GL_TEXTURE_2D, meshTextures[i].texture));
+			currentMeshShader->SetInt("diffuseTexture", 0);
+		} else {
+			currentMeshShader->SetVector3("meshColor", Eigen::Vector3f(0.8f, 0.8f, 0.8f));
 		}
-
-		// Update offset for next sub-mesh (regardless of visibility)
-		indexOffset += faceCount * 3;
+		// draw this sub-mesh
+		const MVS::Mesh::FIndex faceCountOffset = i > 0 ? meshFaceCounts[i - 1] : 0u;
+		const MVS::Mesh::FIndex faceCountTotal = meshFaceCounts[i];
+		const MVS::Mesh::FIndex faceCount = faceCountTotal - faceCountOffset;
+		const void* indexPtr = reinterpret_cast<const void*>(faceCountOffset * 3 * sizeof(uint32_t));
+		GL_CHECK(glDrawElements(GL_TRIANGLES, faceCount * 3, GL_UNSIGNED_INT, indexPtr));
 	}
 
 	meshVAO->Unbind();
@@ -1169,6 +1174,7 @@ void Renderer::RenderImageOverlays(const Window& window) {
 	imageOverlayVAO->Unbind();
 
 	// Restore previous depth test state
+	GL_CHECK(glDisable(GL_BLEND));
 	GL_CHECK(glEnable(GL_DEPTH_TEST));
 }
 
@@ -1488,61 +1494,46 @@ void Renderer::RenderSelectedGeometry(const Window& window) {
 	// Render selected points with highlighting
 	const auto& selectedPointIndices = selectionController.getSelectedPointIndices();
 	if (window.showPointCloud && !selectedPointIndices.empty() && pointCount > 0) {
-		// Set highlight size and color for points (red)
+		// set highlight size and color for points (red)
 		geometrySelectionShader->SetVector3("highlightColor", Eigen::Vector3f(1.f, 0.f, 0.f));
 		geometrySelectionShader->SetFloat("pointSize", window.pointSize * 2.5f);
-
-		// We need access to the actual point cloud data to extract selected points
-		// For now, we'll use a different approach - render individual points
+		// render each selected point individually using glDrawArrays with offset
 		pointCloudVAO->Bind();
-
-		// Render each selected point individually using glDrawArrays with offset
 		for (const auto& pointIdx : selectedPointIndices)
 			GL_CHECK(glDrawArrays(GL_POINTS, pointIdx, 1));
-
 		pointCloudVAO->Unbind();
 	}
 
 	// Render selected faces with highlighting (wireframe overlay)
 	const auto& selectedFaceIndices = selectionController.getSelectedFaceIndices();
 	if (window.showMesh && !selectedFaceIndices.empty() && !meshFaceCounts.empty()) {
-		// Set highlight color for faces (red)
+		// set highlight color for faces (red)
 		geometrySelectionShader->SetVector3("highlightColor", Eigen::Vector3f(1.f, 0.f, 0.f));
-
-		// Render as wireframe overlay to show selection
+		// render as wireframe overlay to show selection
 		GL_CHECK(glPolygonMode(GL_FRONT_AND_BACK, GL_LINE));
-
-		// Enable polygon offset to render selection on top of existing mesh
+		// enable polygon offset to render selection on top of existing mesh
 		GL_CHECK(glEnable(GL_POLYGON_OFFSET_LINE));
-		GL_CHECK(glPolygonOffset(-1.f, -1.f)); // More aggressive offset
-
+		GL_CHECK(glPolygonOffset(-1.f, -1.f)); // more aggressive offset
 		meshVAO->Bind();
 		meshEBO->Bind();
-
-		// Render only selected faces individually
-		// Each face consists of 3 vertices (triangle)
+		// render only selected faces individually, each face consists of 3 vertices (triangle)
+		const MVS::Scene& scene = window.GetScene().GetScene();
 		for (const auto& faceIdx : selectedFaceIndices) {
-			// Get which submesh this face belongs to and its index within that submesh
-			const MVS::Scene& scene = window.GetScene().GetScene();
-			ASSERT(scene.mesh.faceTexindices.empty() || scene.mesh.faceTexindices.size() == scene.mesh.faces.size());
+			// get which submesh this face belongs to and its index within that submesh
 			const MVS::Mesh::TexIndex submeshIdx = scene.mesh.GetFaceTextureIndex(faceIdx);
 			ASSERT(submeshIdx < meshFaceCounts.size());
-			// Check if this submesh is visible
+			// check if this submesh is visible
 			if (!window.meshSubMeshVisible.empty() && !window.meshSubMeshVisible[submeshIdx])
 				continue;
-			// Calculate the actual byte offset for this face in the EBO
+			// calculate the actual byte offset for this face in the EBO
+			MVS::Mesh::FIndex submeshOffset = meshFaceCounts[submeshIdx];
 			MVS::Mesh::FIndex faceIdxInSubmesh(mapFaceSubsetIndices.empty() ? faceIdx :  mapFaceSubsetIndices[faceIdx]);
-			size_t submeshOffset = 0;
-			for (MVS::Mesh::TexIndex i = 0; i < submeshIdx; ++i)
-				submeshOffset += meshFaceCounts[i];
 			const void* indexPtr = reinterpret_cast<const void*>((submeshOffset + faceIdxInSubmesh) * 3 * sizeof(uint32_t));
-			// Render this single face (3 indices)
+			// render this single face (3 indices)
 			GL_CHECK(glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_INT, indexPtr));
 		}
-
 		meshVAO->Unbind();
-
-		// Restore rendering state
+		// restore rendering state
 		GL_CHECK(glDisable(GL_POLYGON_OFFSET_LINE));
 		GL_CHECK(glPolygonMode(GL_FRONT_AND_BACK, GL_FILL));
 	}
@@ -1557,5 +1548,157 @@ void Renderer::RenderSelectedGeometry(const Window& window) {
 void Renderer::EndFrame() {
 	// Swap buffers is handled by GLFW in the Window class
 	// This method can be used for cleanup or final operations if needed
+}
+
+void Renderer::ReleasePickerBuffers() {
+	if (pickIDTex) { GL_CHECK(glDeleteTextures(1, &pickIDTex)); pickIDTex = 0; }
+	if (pickDepthRBO) { GL_CHECK(glDeleteRenderbuffers(1, &pickDepthRBO)); pickDepthRBO = 0; }
+	if (pickFBO) { GL_CHECK(glDeleteFramebuffers(1, &pickFBO)); pickFBO = 0; }
+	pickFBOSize = cv::Size(0, 0);
+}
+
+void Renderer::EnsurePickFBOSize(int width, int height) {
+	if (pickFBO != 0 && pickFBOSize.width == width && pickFBOSize.height == height)
+		return;
+
+	// Delete previous resources if any
+	ReleasePickerBuffers();
+	pickFBOSize = cv::Size(width, height);
+
+	// Create integer ID texture
+	GL_CHECK(glGenTextures(1, &pickIDTex));
+	GL_CHECK(glBindTexture(GL_TEXTURE_2D, pickIDTex));
+	GL_CHECK(glTexImage2D(GL_TEXTURE_2D, 0, GL_R32UI, width, height, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr));
+	GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+	GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+	GL_CHECK(glBindTexture(GL_TEXTURE_2D, 0));
+
+	// Depth renderbuffer
+	GL_CHECK(glGenRenderbuffers(1, &pickDepthRBO));
+	GL_CHECK(glBindRenderbuffer(GL_RENDERBUFFER, pickDepthRBO));
+	GL_CHECK(glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height));
+	GL_CHECK(glBindRenderbuffer(GL_RENDERBUFFER, 0));
+
+	// Framebuffer
+	GL_CHECK(glGenFramebuffers(1, &pickFBO));
+	GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, pickFBO));
+	GL_CHECK(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, pickIDTex, 0));
+	GL_CHECK(glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, pickDepthRBO));
+	GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+}
+
+// Perform a GPU pick around screen pixel position with given radius (pixels);
+// if a primitive is found returns valid PickResult, where
+// pick.idx is the primitive index (point index or face index) depending on isPoint
+Renderer::PickResult Renderer::PickPrimitiveAt(const Point2f& screenPos, int radius, const Window& window) {
+	// Ensure FBO matches viewport size
+	const cv::Size& vpSize = window.GetCamera().GetSize();
+	EnsurePickFBOSize(vpSize.width, vpSize.height);
+
+	// Bind pick FBO
+	GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, pickFBO));
+
+	// Clear ID attachment (-1 = no hit) and depth
+	const GLuint clearID = NO_ID;
+	GL_CHECK(glClearBufferuiv(GL_COLOR, 0, &clearID));
+	GL_CHECK(glClear(GL_DEPTH_BUFFER_BIT));
+
+	// Limit rasterization to small rectangle around cursor to reduce work
+	const int half = MAXF(1, radius);
+	// screenPos is in framebuffer pixel coordinates with origin at top-left (from GLFW),
+	// while GL scissor/readpixels use a lower-left origin. Convert Y accordingly.
+	const int centerX = ROUND2INT(screenPos.x);
+	const int centerY = vpSize.height - 1 - ROUND2INT(screenPos.y);
+	const int minX = CLAMP(centerX - half, 0, vpSize.width - 1);
+	const int minY = CLAMP(centerY - half, 0, vpSize.height - 1);
+	const int w = CLAMP(2 * half + 1, 1, vpSize.width - minX);
+	const int h = CLAMP(2 * half + 1, 1, vpSize.height - minY);
+
+	GL_CHECK(glEnable(GL_SCISSOR_TEST));
+	GL_CHECK(glScissor(minX, minY, w, h));
+
+	// Render mesh (triangles) into pick FBO only if mesh rendering is enabled and we have mesh data
+	unsigned baseFace = 0;
+	if (window.showMesh && !meshFaceCounts.empty()) {
+		pickerMeshShader->Use();
+		meshVAO->Bind();
+		meshEBO->Bind();
+		FOREACH(i, meshFaceCounts) {
+			// skip invisible submeshes if window indicates it
+			if (!window.meshSubMeshVisible.empty() && !window.meshSubMeshVisible[i])
+				continue;
+			const MVS::Mesh::FIndex faceCountOffset = i > 0 ? meshFaceCounts[i - 1] : 0u;
+			const MVS::Mesh::FIndex faceCountTotal = meshFaceCounts[i];
+			const MVS::Mesh::FIndex faceCount = faceCountTotal - faceCountOffset;
+			pickerMeshShader->SetUInt("uBaseID", faceCountOffset);
+			const void* indexPtr = reinterpret_cast<const void*>(faceCountOffset * 3 * sizeof(uint32_t));
+			GL_CHECK(glDrawElements(GL_TRIANGLES, faceCount * 3, GL_UNSIGNED_INT, indexPtr));
+		}
+		meshVAO->Unbind();
+		baseFace = meshFaceCounts.back();
+	}
+
+	// Render points into pick FBO only if point cloud rendering is enabled and we have points
+	if (window.showPointCloud && pointCount > 0) {
+		pickerPointsShader->Use();
+		pickerPointsShader->SetUInt("uBaseID", baseFace);
+		pointCloudVAO->Bind();
+		GL_CHECK(glDrawArrays(GL_POINTS, 0, pointCount));
+		pointCloudVAO->Unbind();
+	}
+
+	// Read back ID and depth for the small rectangle
+	const size_t numPixels = (size_t)w * (size_t)h;
+	std::vector<GLuint> idBuf(numPixels);
+	std::vector<float> depthBuf(numPixels);
+	// Read integer ID buffer
+	GL_CHECK(glReadPixels(minX, minY, w, h, GL_RED_INTEGER, GL_UNSIGNED_INT, idBuf.data()));
+	// Read depth buffer
+	GL_CHECK(glReadPixels(minX, minY, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, depthBuf.data()));
+
+	// Unbind and restore state
+	GL_CHECK(glDisable(GL_SCISSOR_TEST));
+	GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+
+	// Find nearest non-zero id (smallest depth)
+	float bestDepth = FLT_MAX;
+	GLuint bestID;
+	for (size_t i = 0; i < numPixels; ++i) {
+		const GLuint idVal = idBuf[i];
+		if (idVal == NO_ID)
+			continue;
+		// depth 1.0 is far plane, prefer smaller values
+		const float d = depthBuf[i];
+		if (d < bestDepth) {
+			bestDepth = d;
+			bestID = idVal;
+		}
+	}
+	if (bestDepth >= FLT_MAX)
+		return {};
+
+	// Determine if we hit face or point
+	PickResult result;
+	if (bestID < baseFace) {
+		// hit a mesh face
+		result.isPoint = false;
+		result.index = bestID;
+		ASSERT(meshEBO && meshVBO);
+		MVS::Mesh::Face face;
+		meshEBO->GetSubData<uint32_t>(face.ptr(), 3, static_cast<size_t>(result.index) * 3);
+		meshVBO->GetSubData<float>(result.points[0].ptr(), 3, static_cast<size_t>(face[0]) * 3);
+		meshVBO->GetSubData<float>(result.points[1].ptr(), 3, static_cast<size_t>(face[1]) * 3);
+		meshVBO->GetSubData<float>(result.points[2].ptr(), 3, static_cast<size_t>(face[2]) * 3);
+		// convert face index from subset to original if necessary
+		if (!mapSubsetFaceIndices.empty())
+			result.index = mapSubsetFaceIndices[result.index];
+	} else {
+		// hit a point
+		result.isPoint = true;
+		result.index = bestID - baseFace;
+		ASSERT(pointCloudVBO);
+		pointCloudVBO->GetSubData<float>(result.points[0].ptr(), 3, static_cast<size_t>(result.index) * 3);
+	}
+	return result;
 }
 /*----------------------------------------------------------------*/

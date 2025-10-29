@@ -74,30 +74,6 @@ public:
 	EVTLoadImage(Scene* _pScene, MVS::IIndex _idx, unsigned _nMaxResolution=0)
 		: Event(EVT_JOB), pScene(_pScene), idx(_idx), nMaxResolution(_nMaxResolution) {}
 };
-class EVTComputeOctree : public Event
-{
-public:
-	Scene* pScene;
-	bool Run(void*) {
-		MVS::Scene& scene = pScene->scene;
-		if (!scene.mesh.IsEmpty()) {
-			Scene::OctreeMesh octMesh(scene.mesh.vertices, [](Scene::OctreeMesh::IDX_TYPE size, Scene::OctreeMesh::Type /*radius*/) {
-				return size > 256;
-			});
-			scene.mesh.ListIncidentFaces();
-			pScene->octMesh.Swap(octMesh);
-		}
-		if (!scene.pointcloud.IsEmpty()) {
-			Scene::OctreePoints octPoints(scene.pointcloud.points, [](Scene::OctreePoints::IDX_TYPE size, Scene::OctreePoints::Type /*radius*/) {
-				return size > 512;
-			});
-			pScene->octPoints.Swap(octPoints);
-		}
-		return true;
-	}
-	EVTComputeOctree(Scene* _pScene)
-		: Event(EVT_JOB), pScene(_pScene) {}
-};
 
 void* Scene::ThreadWorker(void*) {
 	while (true) {
@@ -136,8 +112,6 @@ Scene::~Scene() {
 
 void Scene::Reset()
 {
-	octPoints.Release();
-	octMesh.Release();
 	window.Reset();
 	images.Release();
 	scene.Release();
@@ -221,10 +195,6 @@ bool Scene::Open(const String& fileName, String geometryFileName) {
 			if (estimateSfMPatches && scene.mesh.IsEmpty())
 				scene.EstimateSparseSurface();
 	}
-
-	// create octree structure used to accelerate selection functionality
-	if (!scene.IsEmpty())
-		events.AddEvent(new EVTComputeOctree(this));
 
 	// init scene
 	AABB3f bounds(true);
@@ -571,12 +541,13 @@ void Scene::OnCenterScene(const Point3f& center) {
 	window.GetArcballControls().animateTo(newPosition, newTarget, /*duration (s)*/ 0.5);
 }
 
-void Scene::OnCastRay(const Ray3d& ray, int button, int action, int mods) {
-	if (!IsOpen() || !IsOctreeValid())
+void Scene::OnCastRay(const Point2f& screenPos, const Ray3d& ray, int button, int action, int mods) {
+	if (!IsOpen())
 		return;
 	const double timeClick(0.2);
-	const double timeDblClick(0.3);
+	const double timeDblClick(0.4);
 	const double now(glfwGetTime());
+	const int pickRadius = 3 * window.GetDevicePixelRatio().x(); // pick radius in pixels, adjusted for DPI scaling
 
 	switch (action) {
 	case GLFW_PRESS: {
@@ -604,30 +575,28 @@ void Scene::OnCastRay(const Ray3d& ray, int button, int action, int mods) {
 		REAL minDist = REAL(FLT_MAX);
 		IDX newSelectionIdx = NO_IDX;
 		Point3f newSelectionPoints[4];
-		if (window.showMesh && !octMesh.IsEmpty()) {
-			// find ray intersection with the mesh
-			const MVS::IntersectRayMesh intRay(octMesh, ray, scene.mesh);
-			if (intRay.pick.IsValid()) {
-				window.selectionType = Window::SEL_TRIANGLE;
-				minDist = intRay.pick.dist;
-				newSelectionIdx = intRay.pick.idx;
-				const MVS::Mesh::Face& face = scene.mesh.faces[(MVS::Mesh::FIndex)newSelectionIdx];
-				newSelectionPoints[0] = scene.mesh.vertices[face[0]];
-				newSelectionPoints[1] = scene.mesh.vertices[face[1]];
-				newSelectionPoints[2] = scene.mesh.vertices[face[2]];
-				newSelectionPoints[3] = ray.GetPoint(minDist).cast<float>();
-			}
-		}
-		if (window.showPointCloud && !octPoints.IsEmpty()) {
-			// find ray intersection with the points
-			const MVS::IIndex minViews(scene.images.empty() ? 0u : CLAMP(window.minViews, 1u, scene.images.size()));
-			const MVS::IntersectRayPoints intRay(octPoints, ray, scene.pointcloud, minViews);
-			if (intRay.pick.IsValid() && intRay.pick.dist < minDist) {
+		const Renderer::PickResult pickResult = window.GetRenderer().PickPrimitiveAt(screenPos, pickRadius, window);
+		if (pickResult.IsValid()) {
+			if (pickResult.isPoint) {
 				window.selectionType = Window::SEL_POINT;
-				minDist = intRay.pick.dist;
-				newSelectionIdx = intRay.pick.idx;
-				newSelectionPoints[0] = newSelectionPoints[3] = scene.pointcloud.points[newSelectionIdx];
+				newSelectionIdx = pickResult.index;
+				newSelectionPoints[0] = pickResult.points[0];
+				minDist = norm(Point3f(ray.m_pOrig.cast<float>()) - pickResult.points[0]);
+			} else {
+				window.selectionType = Window::SEL_TRIANGLE;
+				newSelectionIdx = pickResult.index;
+				newSelectionPoints[0] = pickResult.points[0];
+				newSelectionPoints[1] = pickResult.points[1];
+				newSelectionPoints[2] = pickResult.points[2];
+				const Ray3d::TRIANGLE tri(
+					Cast<double>(newSelectionPoints[0]),
+					Cast<double>(newSelectionPoints[1]),
+					Cast<double>(newSelectionPoints[2]));
+				if (!ray.Intersects<false>(tri, &minDist))
+					minDist = norm(Point3f(ray.m_pOrig.cast<float>()) -
+						(pickResult.points[0] + pickResult.points[1] + pickResult.points[2]) / 3.f);
 			}
+			newSelectionPoints[3] = ray.GetPoint(minDist).cast<float>();
 		}
 		// check for camera intersection
 		const TCone<REAL, 3> cone(ray, D2R(REAL(0.5)));
@@ -828,24 +797,16 @@ void Scene::RemoveSelectedGeometry() {
 	// If any geometry was modified, update the scene
 	if (bDirtyScene)
 		UpdateGeometryAfterModification();
-
-	// Request a redraw
-	window.RequestRedraw();
 }
 
 // Update geometry after modification (rebuild octrees, update rendering, etc.)
 void Scene::UpdateGeometryAfterModification() {
-	// Release and rebuild octrees
-	octPoints.Release();
-	octMesh.Release();
-	if (!scene.IsEmpty())
-		events.AddEvent(new EVTComputeOctree(this));
-
-	// Update rendering data
-	window.UploadRenderData();
-
 	// Clear the selection since geometry has changed
 	window.GetSelectionController().clearSelection();
+	// Update rendering data
+	window.UploadRenderData();
+	// Request window attention
+	window.RequestAttention();
 }
 
 // Set the ROI (region of interest) based on the current selection
