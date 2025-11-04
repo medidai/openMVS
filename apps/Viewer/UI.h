@@ -32,9 +32,7 @@
 #pragma once
 
 #include "Camera.h"
-#include "Image.h"
-#include <deque>
-#include <mutex>
+#include "Texture.h"
 
 namespace VIEWER {
 
@@ -72,6 +70,9 @@ private:
 	double lastMenuInteraction;
 	float menuFadeOutDelay;
 
+	// Embedded resources
+	Texture emptySceneIcon;
+
 	// Log console
 	std::deque<String> logBuffer;
 	std::mutex logMutex;
@@ -101,6 +102,7 @@ public:
 	void ShowPerformanceOverlay(Window& window);
 	void ShowViewportOverlay(const Window& window);
 	void ShowSelectionOverlay(const Window& window);
+	void ShowEmptySceneOverlay(const Window& window);
 	void ShowWorkflowWindows(Window& window);
 	void ToggleHelpDialog() { showHelpDialog = !showHelpDialog; }
 	void SetSelectionControls(bool v) { showSelectionControls = v; }

@@ -31,7 +31,6 @@
 
 #pragma once
 
-#include <cstdint>
 #include "Window.h"
 
 namespace VIEWER {

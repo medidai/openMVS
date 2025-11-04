@@ -881,9 +881,9 @@ bool Scene::EstimatePointCloudNormals(bool bRefine)
 		const RobustNormFunc& robust;
 
 		NormalOptimizationData(const PointCloud::Point& _point, const PointCloud::ViewArr& _views,
-		                      const ImageArr& _images, IIndex _targetViewIdx, const Point2f& _targetProjection,
-		                      const std::array<float,nTexels>& _targetPatch,
-		                      double _targetVariance, const Sampler& _sampler, const RobustNormFunc& _robust)
+		                       const ImageArr& _images, IIndex _targetViewIdx, const Point2f& _targetProjection,
+		                       const std::array<float,nTexels>& _targetPatch,
+		                       double _targetVariance, const Sampler& _sampler, const RobustNormFunc& _robust)
 			: point(_point), views(_views), images(_images), targetViewIdx(_targetViewIdx),
 			  targetProjection(_targetProjection), targetPatch(_targetPatch),
 			  targetVariance(_targetVariance), sampler(_sampler), robust(_robust) {}

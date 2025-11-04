@@ -32,9 +32,9 @@
 #pragma once
 
 #include "Camera.h"
+#include "Image.h"
 #include "Shader.h"
 #include "BufferObjects.h"
-#include "Image.h"
 
 namespace VIEWER {
 
@@ -83,7 +83,7 @@ private:
 	MVS::Mesh::FaceIdxArr mapFaceSubsetIndices; // maps face indices from original mesh to sub-mesh when rendering subsets
 	MVS::Mesh::FaceIdxArr mapSubsetFaceIndices; // maps face indices from sub-mesh to original mesh when rendering subsets
 	std::vector<unsigned> meshFaceCounts; // number of faces till each sub-mesh (subtract the previous to get count per sub-mesh)
-	std::vector<Image> meshTextures;
+	ImageArr meshTextures;
 
 	// Geometry selection highlighting (for SelectionController)
 	std::unique_ptr<Shader> geometrySelectionShader;
