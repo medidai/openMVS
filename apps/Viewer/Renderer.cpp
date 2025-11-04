@@ -645,9 +645,7 @@ void Renderer::UploadMesh(MVS::Mesh& mesh) {
 				Image& image = meshTextures.emplace_back(i);
 				image.SetImageLoading();
 				image.AssignImage(submesh.texturesDiffuse.front());
-				// check if image is valid and has a texture
-				if (image.TransferImage())
-					image.GenerateMipmap();
+				image.TransferImage();
 			}
 			// track this sub-mesh
 			meshFaceCounts.emplace_back(faceCountPrev + submesh.faces.size());
@@ -1101,7 +1099,7 @@ void Renderer::RenderMesh(const Window& window) {
 		currentMeshShader->SetBool("wireframe", isWireframe);
 		if (hasTexture) {
 			GL_CHECK(glActiveTexture(GL_TEXTURE0));
-			GL_CHECK(glBindTexture(GL_TEXTURE_2D, meshTextures[i].texture));
+			GL_CHECK(glBindTexture(GL_TEXTURE_2D, meshTextures[i].GetID()));
 			currentMeshShader->SetInt("diffuseTexture", 0);
 		} else {
 			currentMeshShader->SetVector3("meshColor", Eigen::Vector3f(0.8f, 0.8f, 0.8f));

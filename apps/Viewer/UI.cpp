@@ -38,6 +38,7 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <portable-file-dialogs.h>
+#include "EmptySceneIcon.h"
 
 using namespace VIEWER;
 
@@ -133,6 +134,9 @@ void UI::Release() {
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
 	ImGui::DestroyContext();
+
+	// Release embedded icon texture if loaded
+	emptySceneIcon.Release();
 }
 
 void UI::NewFrame(Window& window) {
@@ -151,6 +155,7 @@ void UI::Render(Window& window) {
 	ShowConsoleOverlay(window);
 	ShowPerformanceOverlay(window);
 	ShowViewportOverlay(window);
+	ShowEmptySceneOverlay(window);
 	ShowSelectionOverlay(window);
 
 	ImGui::Render();
@@ -226,6 +231,17 @@ void UI::ShowMainMenuBar(Window& window) {
 				if (ShowSaveFileDialog(filename))
 					scene.Save(filename);
 				window.SetVisible(true);
+			}
+			#ifdef __APPLE__
+			if (ImGui::MenuItem("Close", "Cmd+W", false, scene.IsOpen())) {
+			#else
+			if (ImGui::MenuItem("Close", "Ctrl+W", false, scene.IsOpen())) {
+			#endif
+				// Release/reset the currently open scene (keeps the application/window running)
+				scene.Reset();
+				// Make sure renderer/UI reflect the cleared scene
+				window.UploadRenderData();
+				Window::RequestRedraw();
 			}
 			ImGui::Separator();
 			if (ImGui::MenuItem("Export...", nullptr, false, scene.IsOpen())) {
@@ -699,7 +715,7 @@ void UI::ShowConsoleOverlay(Window& window)
 
 	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
 								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-								   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+								   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_HorizontalScrollbar;
 
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
 	ImVec2 work_pos = vp->WorkPos;
@@ -714,64 +730,65 @@ void UI::ShowConsoleOverlay(Window& window)
 
 	ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, window_pos_pivot);
 	ImGui::SetNextWindowBgAlpha(0.35f);
+	ImGui::SetNextWindowSizeConstraints(ImVec2(400, 100), ImVec2(
+		MINF(window.GetCamera().GetSize().width*0.8f, 800*window.userFontScale),
+		MINF(window.GetCamera().GetSize().height*0.4f, 200*window.userFontScale)));
 
 	if (ImGui::Begin("Console", &showConsoleOverlay, window_flags)) {
 		// use the last item's rect (the child) in screen coordinates — this anchors the buttons
 		// to the child's outer rectangle so they don't move with the child's scroll.
 		ImVec2 child_min = ImGui::GetItemRectMin();
 		ImVec2 child_max = ImGui::GetItemRectMax();
-		if (ImGui::BeginChild("LogRegion", ImVec2(660, 160), false, ImGuiWindowFlags_HorizontalScrollbar)) {
-			// copy out-of-lock to avoid holding lock during ImGui calls
-			std::vector<String> copyLines; {
-				std::lock_guard<std::mutex> lock(logMutex);
-				copyLines.assign(logBuffer.begin(), logBuffer.end());
-			}
-			// copy lines to ImGui
-			for (const auto &line : copyLines)
-				ImGui::TextUnformatted(line.c_str());
-			// auto-scroll to bottom if already at bottom
-			if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
-				ImGui::SetScrollHereY(1.0f);
-			ImGui::SetNextItemAllowOverlap();
 
-			// render overlay buttons on top-right of the LogRegion (draw after child so they're on top)
-			const auto CalcButtonWidth = []() {
-				ImGuiStyle& style = ImGui::GetStyle();
-				const char* btnLabels[2] = { "Clear", "Copy" };
-				float totalButtonsWidth = 0.f;
-				for (int i = 0; i < 2; ++i) {
-					ImVec2 txtSize = ImGui::CalcTextSize(btnLabels[i]);
-					float btnW = txtSize.x + style.FramePadding.x * 2.f;
-					totalButtonsWidth += btnW;
-				}
-				totalButtonsWidth += style.ItemSpacing.x * 5.f; // spacing between 2 buttons
-				ImVec2 btn_width;
-				btn_width.x = -totalButtonsWidth;
-				btn_width.y = style.ItemSpacing.y * 2.f;
-				return btn_width;
-			};
-			static const ImVec2 btn_width = CalcButtonWidth();
-
-			// move cursor to absolute screen position and render buttons (they will be drawn on top)
-			ImVec2 btn_pos;
-			btn_pos.x = child_max.x + btn_width.x;
-			btn_pos.y = child_min.y + btn_width.y;
-			ImGui::SetCursorScreenPos(btn_pos);
-			if (ImGui::SmallButton("Clear")) {
-				std::lock_guard<std::mutex> lock(logMutex);
-				logBuffer.clear();
-			}
-			ImGui::SameLine();
-			if (ImGui::SmallButton("Copy")) {
-				std::string all; {
-					std::lock_guard<std::mutex> lock(logMutex);
-					for (const auto &s : logBuffer)
-						all += s.c_str();
-				}
-				ImGui::SetClipboardText(all.c_str());
-			}
+		// copy out-of-lock to avoid holding lock during ImGui calls
+		std::vector<String> copyLines; {
+			std::lock_guard<std::mutex> lock(logMutex);
+			copyLines.assign(logBuffer.begin(), logBuffer.end());
 		}
-		ImGui::EndChild();
+		// copy lines to ImGui
+		for (const auto &line : copyLines)
+			ImGui::TextUnformatted(line.c_str());
+		// auto-scroll to bottom if already at bottom
+		if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+			ImGui::SetScrollHereY(1.0f);
+		ImGui::SetNextItemAllowOverlap();
+
+		// render overlay buttons on top-right of the LogRegion (draw after child so they're on top)
+		const auto CalcButtonWidth = []() {
+			ImGuiStyle& style = ImGui::GetStyle();
+			const char* btnLabels[2] = { "Clear", "Copy" };
+			float totalButtonsWidth = 0.f;
+			for (int i = 0; i < 2; ++i) {
+				ImVec2 txtSize = ImGui::CalcTextSize(btnLabels[i]);
+				float btnW = txtSize.x + style.FramePadding.x * 2.f;
+				totalButtonsWidth += btnW;
+			}
+			totalButtonsWidth += style.ItemSpacing.x * 3.f; // spacing between 2 buttons
+			ImVec2 btn_width;
+			btn_width.x = -totalButtonsWidth;
+			btn_width.y = style.ItemSpacing.y * 2.f;
+			return btn_width;
+		};
+		static const ImVec2 btn_width = CalcButtonWidth();
+
+		// move cursor to absolute screen position and render buttons (they will be drawn on top)
+		ImVec2 btn_pos;
+		btn_pos.x = child_max.x + btn_width.x;
+		btn_pos.y = child_min.y + btn_width.y;
+		ImGui::SetCursorScreenPos(btn_pos);
+		if (ImGui::SmallButton("Clear")) {
+			std::lock_guard<std::mutex> lock(logMutex);
+			logBuffer.clear();
+		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Copy")) {
+			std::string all; {
+				std::lock_guard<std::mutex> lock(logMutex);
+				for (const auto &s : logBuffer)
+					all += s.c_str();
+			}
+			ImGui::SetClipboardText(all.c_str());
+		}
 	}
 	ImGui::End();
 }
@@ -842,6 +859,82 @@ void UI::ShowViewportOverlay(const Window& window) {
 		// Navigation mode display
 		const char* modeText(window.GetControlMode() == Window::CONTROL_ARCBALL ? "Arcball" : window.GetControlMode() == Window::CONTROL_FIRST_PERSON ? "First Person" : "Selection");
 		ImGui::Text("Navigation: %s", modeText);
+	}
+	ImGui::End();
+}
+
+// Show a centered, headerless hint when there is no valid scene loaded
+void UI::ShowEmptySceneOverlay(const Window& window) {
+	if (window.GetScene().IsOpen())
+		return;
+
+	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration |
+								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+								   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+
+	// Layout parameters
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	ImVec2 center(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f);
+	const float btn_w = 120.f, btn_h = 30.f;
+	const float pad_x = 24.f, pad_y = 12.f;
+	const float spacing_after_icon = 8.f;
+	const float font_mult = 2.2f;
+	const float font_size = ImGui::GetFontSize() * font_mult;
+	const char* msg1 = "drag & drop";
+	const char* msg2 = "a 3D scene";
+
+	// Compute icon size based on viewport, preserving aspect ratio, clamp to 512
+	const float vp_min = MINF(vp->WorkSize.x, vp->WorkSize.y);
+	const float max_dim = MINF(512.f, vp_min * 0.25f); // at most 25% of smaller viewport dim
+	const float icon_w = max_dim, icon_h = max_dim;
+
+	// Compute text size using an explicit font size (so other UI isn't affected)
+	ImVec2 text_size1 = ImGui::GetFont()->CalcTextSizeA(font_size, FLT_MAX, 0.f, msg1);
+	ImVec2 text_size2 = ImGui::CalcTextSize(msg2);
+
+	float content_w = MAXF3(icon_w, text_size1.x, btn_w);
+	float win_w = content_w + pad_x * 2;
+	float win_h = pad_y + icon_h + spacing_after_icon * 2 + text_size1.y + text_size2.y + 24.f + btn_h + pad_y;
+
+	ImGui::SetNextWindowSize(ImVec2(win_w, win_h), ImGuiCond_Always);
+	ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+	ImGui::SetNextWindowBgAlpha(0.1f);
+
+	if (ImGui::Begin("EmptySceneHint", nullptr, window_flags)) {
+		ImVec2 win_pos = ImGui::GetWindowPos();
+		ImVec2 win_size = ImGui::GetWindowSize();
+
+		// Lazy-load embedded PNG into GL texture via OpenCV
+		if (!emptySceneIcon.IsValid()) {
+			cv::Mat raw(1, (int)empty_scene_icon_png_len, CV_8UC1, (void*)empty_scene_icon_png);
+			cv::Mat iconPreview = cv::imdecode(raw, cv::IMREAD_UNCHANGED);
+			emptySceneIcon.Create(iconPreview, /*genMipmaps=*/true, /*srgb=*/false);
+		}
+
+		// Draw icon (texture)
+		ASSERT(emptySceneIcon.IsValid());
+		ImVec2 icon_pos(win_pos.x + (win_size.x - icon_w) * 0.5f, win_pos.y + pad_y);
+		ImGui::SetCursorScreenPos(icon_pos);
+		ImGui::Image((ImTextureID)(uintptr_t)emptySceneIcon.GetID(), ImVec2(icon_w, icon_h));
+
+		// Message text below icon1
+		ImVec2 text_pos1(win_pos.x + (win_size.x - text_size1.x) * 0.5f, icon_pos.y + icon_h + spacing_after_icon);
+		ImGui::SetCursorScreenPos(text_pos1);
+		ImGui::SetWindowFontScale(font_mult);
+		ImGui::TextUnformatted(msg1);
+		ImVec2 text_pos2(win_pos.x + (win_size.x - text_size2.x) * 0.5f, icon_pos.y + icon_h + spacing_after_icon*2 + text_size1.y);
+		ImGui::SetCursorScreenPos(text_pos2);
+		ImGui::SetWindowFontScale(1.f);
+		ImGui::TextUnformatted(msg2);
+
+		// Open button
+		ImGui::Dummy(ImVec2(0,8));
+		ImGui::SetCursorPosX((win_size.x - btn_w) * 0.5f);
+		if (ImGui::Button("Open", ImVec2(btn_w, btn_h))) {
+			String filename, geometryFilename;
+			if (ShowOpenFileDialog(filename, geometryFilename))
+				window.GetScene().Open(filename, geometryFilename);
+		}
 	}
 	ImGui::End();
 }

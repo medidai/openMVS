@@ -31,6 +31,7 @@
 
 #include "Common.h"
 #include "Image.h"
+#include "Window.h"
 
 using namespace VIEWER;
 
@@ -42,8 +43,7 @@ using namespace VIEWER;
 
 Image::Image(MVS::IIndex _idx)
 	:
-	idx(_idx),
-	texture(0)
+	idx(_idx)
 {
 }
 Image::~Image()
@@ -51,12 +51,29 @@ Image::~Image()
 	Release();
 }
 
+Image::Image(Image &&other) noexcept
+	:
+	Texture(std::move(other)),
+	idx(other.idx),
+	opacity(other.opacity),
+	pImage(other.pImage)
+{
+}
+
+Image &Image::operator=(Image &&other) noexcept
+{
+	if (this != &other) {
+		Texture::operator=(std::move(other));
+		idx = other.idx;
+		opacity = other.opacity;
+		pImage = other.pImage;
+	}
+	return *this;
+}
+
 void Image::Release()
 {
-	if (IsValid()) {
-		GL_CHECK(glDeleteTextures(1, &texture));
-		texture = 0;
-	}
+	Texture::Release();
 	ReleaseImage();
 }
 void Image::ReleaseImage()
@@ -87,50 +104,9 @@ bool Image::TransferImage()
 {
 	if (!IsImageValid())
 		return false;
-	SetImage(*pImage);
-	glfwPostEmptyEvent();
+	Create(*pImage, true);
 	ReleaseImage();
+	Window::RequestRedraw();
 	return true;
-}
-
-void Image::SetImage(cv::InputArray img)
-{
-	cv::Mat image(img.getMat());
-	// create texture
-	GL_CHECK(glGenTextures(1, &texture));
-	// select our current texture
-	GL_CHECK(glBindTexture(GL_TEXTURE_2D, texture));
-	// load texture
-	width = image.cols;
-	height = image.rows;
-	ASSERT(image.channels() == 1 || image.channels() == 3);
-	ASSERT(image.isContinuous());
-
-	// Set proper internal format and pixel format
-	GLenum internalFormat, pixelFormat;
-	if (image.channels() == 1) {
-		internalFormat = GL_R8;
-		pixelFormat = GL_RED;
-	} else {
-		internalFormat = GL_RGB8;
-		pixelFormat = GL_BGR;  // OpenCV uses BGR by default
-	}
-
-	GL_CHECK(glTexImage2D(GL_TEXTURE_2D,
-				 0, internalFormat,
-				 width, height,
-				 0, pixelFormat,
-				 GL_UNSIGNED_BYTE, image.ptr<uint8_t>()));
-	GL_CHECK(glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR));
-	GL_CHECK(glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR));
-	GL_CHECK(glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE));
-	GL_CHECK(glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE));
-}
-void Image::GenerateMipmap() const {
-	GL_CHECK(glBindTexture(GL_TEXTURE_2D, texture));
-	GL_CHECK(glGenerateMipmap(GL_TEXTURE_2D));
-}
-void Image::Bind() const {
-	GL_CHECK(glBindTexture(GL_TEXTURE_2D, texture));
 }
 /*----------------------------------------------------------------*/

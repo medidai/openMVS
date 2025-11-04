@@ -34,6 +34,7 @@
 
 // I N C L U D E S /////////////////////////////////////////////////
 
+#include "Texture.h"
 
 // D E F I N E S ///////////////////////////////////////////////////
 
@@ -42,10 +43,8 @@
 
 namespace VIEWER {
 
-class Image
-{
+class Image : public Texture {
 public:
-	typedef CLISTDEFIDX(Image,uint32_t) ImageArr;
 	enum {
 		IMG_NULL = 0,
 		IMG_LOADING,
@@ -62,8 +61,6 @@ public:
 
 public:
 	MVS::IIndex idx; // image index in the current scene
-	int width, height;
-	GLuint texture;
 	double opacity;
 	ImagePtrInt pImage;
 
@@ -71,9 +68,16 @@ public:
 	Image(MVS::IIndex = NO_ID);
 	~Image();
 
+	// Non-copyable
+	Image(const Image&) = delete;
+	Image& operator=(const Image&) = delete;
+
+	// Movable
+	Image(Image&& other) noexcept;
+	Image& operator=(Image&& other) noexcept;
+
 	void Release();
 	void ReleaseImage();
-	inline bool IsValid() const { return texture > 0; }
 	inline bool IsImageEmpty() const { return pImage.ptr == IMG_NULL; }
 	inline bool IsImageLoading() const { return pImage.ptr == IMG_LOADING; }
 	inline bool IsImageValid() const { return pImage.ptr >= IMG_VALID; }
@@ -81,14 +85,8 @@ public:
 	void SetImageLoading();
 	void AssignImage(cv::InputArray);
 	bool TransferImage();
-
-	void SetImage(cv::InputArray);
-	void GenerateMipmap() const;
-	void Bind() const;
-
-protected:
 };
-typedef Image::ImageArr ImageArr;
+typedef CLISTDEFIDX(Image,uint32_t) ImageArr;
 /*----------------------------------------------------------------*/
 
 } // namespace VIEWER
