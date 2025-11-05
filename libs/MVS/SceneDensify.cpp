@@ -204,8 +204,7 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 		// initialize all neighbor views too (global reconstruction is used)
 		const float fMinScore(MAXF(depthData.neighbors.First().score*OPTDENSE::fViewMinScoreRatio, OPTDENSE::fViewMinScore));
 		for (const ViewScore& neighbor: depthData.neighbors) {
-			if ((numNeighbors && depthData.images.GetSize() > numNeighbors) ||
-				(neighbor.score < fMinScore))
+			if (numNeighbors && depthData.images.GetSize() > numNeighbors)
 				break;
 			DepthData::ViewData& viewTrg = depthData.images.AddEmpty();
 			viewTrg.pImageData = &scene.images[neighbor.ID];
