@@ -59,6 +59,7 @@ UI::UI()
 	, showExportDialog(false)
 	, showCameraInfoDialog(false)
 	, showSelectionDialog(false)
+	, showEstimateROIWorkflow(false)
 	, showDensifyWorkflow(false)
 	, showReconstructWorkflow(false)
 	, showRefineWorkflow(false)
@@ -299,6 +300,7 @@ void UI::ShowMainMenuBar(Window& window) {
 				else if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 					ImGui::SetTooltip("%s", tooltip);
 			};
+			addWorkflowEntry("Estimate ROI", hasPoints, showEstimateROIWorkflow, "Requires calibrated images and point-cloud.");
 			addWorkflowEntry("Densify Point Cloud", hasImages, showDensifyWorkflow, "Requires calibrated images.");
 			addWorkflowEntry("Reconstruct Mesh", hasPoints, showReconstructWorkflow, "Requires a dense point-cloud.");
 			addWorkflowEntry("Refine Mesh", hasMesh, showRefineWorkflow, "Requires an existing mesh.");
@@ -1968,6 +1970,52 @@ void UI::ShowWorkflowWindows(Window& window) {
 	ShowRefineWorkflowWindow(window);
 	ShowTextureWorkflowWindow(window);
 	ShowBatchWorkflowWindow(window);
+	ShowEstimateROIWorkflowWindow(window);
+}
+
+void UI::ShowEstimateROIWorkflowWindow(Window& window) {
+	if (!showEstimateROIWorkflow)
+		return;
+
+	Scene& scene = window.GetScene();
+	const MVS::Scene& mvsScene = scene.GetScene();
+	const bool hasPoints = mvsScene.IsValid() && mvsScene.pointcloud.IsValid();
+
+	ImGui::SetNextWindowSize(ImVec2(360.f, 140.f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Estimate ROI##workflow", &showEstimateROIWorkflow)) {
+		ImGui::End();
+		return;
+	}
+
+	ImGui::TextUnformatted("Estimate Region-Of-Interest (ROI) from the scene point-cloud.");
+	ImGui::Separator();
+
+	Scene::EstimateROIWorkflowOptions& opts = scene.GetEstimateROIWorkflowOptions();
+	ImGui::InputFloat("Scale (ROI multiplier)", &opts.scaleROI, 0.01f, 0.1f, "%.2f");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Multiply computed ROI extents by this factor (default 1.1).");
+
+	const char* axisLabels[] = { "Auto (-1)", "X (0)", "Y (1)", "Z (2)" };
+	int axisIndex = (opts.upAxis < 0) ? 0 : (opts.upAxis + 1);
+	if (ImGui::Combo("Up Axis", &axisIndex, axisLabels, IM_ARRAYSIZE(axisLabels))) {
+		opts.upAxis = (axisIndex == 0) ? -1 : (axisIndex - 1);
+	}
+
+	ImGui::Separator();
+	const bool canRun = scene.IsOpen() && hasPoints;
+	ImGui::BeginDisabled(!canRun);
+	if (ImGui::Button("Run")) {
+		showEstimateROIWorkflow = false;
+	scene.RunEstimateROIWorkflow(opts, true);
+	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (ImGui::Button("Close"))
+		showEstimateROIWorkflow = false;
+	if (!canRun)
+		ImGui::TextDisabled("Requires a loaded scene with a valid point-cloud.");
+
+	ImGui::End();
 }
 
 void UI::ShowDensifyWorkflowWindow(Window& window) {
@@ -2417,6 +2465,7 @@ void UI::ShowBatchWorkflowWindow(Window& window) {
 		return;
 
 	Scene& scene = window.GetScene();
+	Scene::EstimateROIWorkflowOptions& estimateOpts = scene.GetEstimateROIWorkflowOptions();
 	Scene::DensifyWorkflowOptions& densifyOpts = scene.GetDensifyWorkflowOptions();
 	Scene::ReconstructMeshWorkflowOptions& reconstructOpts = scene.GetReconstructMeshWorkflowOptions();
 	Scene::RefineMeshWorkflowOptions& refineOpts = scene.GetRefineMeshWorkflowOptions();
@@ -2435,27 +2484,31 @@ void UI::ShowBatchWorkflowWindow(Window& window) {
 	ImGui::Separator();
 
 	// Persistent selection and ordering
-	static bool selectedModules[4] = { true, true, true, true }; // Densify, Reconstruct, Refine, Texture
-	const char* labels[4] = { "Densify Point Cloud", "Reconstruct Mesh", "Refine Mesh", "Texture Mesh" };
-	const char* hints[4] = { "requires images", "requires points with visibility", "requires mesh", "requires mesh" };
-	for (int idx = 0; idx < 4; ++idx) {
+	static bool selectedModules[5] = { true, true, true, true, true }; // Estimate ROI, Densify, Reconstruct, Refine, Texture
+	const char* labels[5] = { "Estimate ROI", "Densify Point Cloud", "Reconstruct Mesh", "Refine Mesh", "Texture Mesh" };
+	const char* hints[5] = { "requires points", "requires images", "requires points with visibility", "requires mesh", "requires mesh" };
+	for (int idx = 0; idx < 5; ++idx) {
 		ImGui::PushID(idx);
 		// determine if prerequisites are (or will be) met for this module
 		bool prereqMet;
 		switch (idx) {
-		case 0: // Densify
+		case 0: // Estimate ROI
+			if (!(prereqMet = hasPoints))
+				selectedModules[idx] = false;
+			break;
+		case 1: // Densify
 			if (!(prereqMet = hasImages))
 				selectedModules[idx] = false;
 			break;
-		case 1: // Reconstruct
+		case 2: // Reconstruct
 			// Reconstruct requires points OR densify selected to produce points
-			if (!(prereqMet = hasPoints || selectedModules[0]))
+			if (!(prereqMet = hasPoints || selectedModules[1]))
 				selectedModules[idx] = false;
 			break;
-		case 2: // Refine
-		case 3: // Texture
+		case 3: // Refine
+		case 4: // Texture
 			// Refine/Texture require a mesh OR reconstruct selected to produce a mesh
-			if (!(prereqMet = hasMesh || selectedModules[1]))
+			if (!(prereqMet = hasMesh || selectedModules[2]))
 				selectedModules[idx] = false;
 			break;
 		}
@@ -2470,7 +2523,7 @@ void UI::ShowBatchWorkflowWindow(Window& window) {
 	ImGui::Separator();
 	// Build runnable list
 	std::vector<int> runnable;
-	for (int idx = 0; idx < 4; ++idx)
+	for (int idx = 0; idx < 5; ++idx)
 		if (selectedModules[idx])
 			runnable.push_back(idx);
 	const bool canRun = !runnable.empty();
@@ -2487,18 +2540,22 @@ void UI::ShowBatchWorkflowWindow(Window& window) {
 			const bool updateGeometry = (i == runnable.size() - 1); // update geometry only for last module
 			switch (mod) {
 			case 0:
+				DEBUG("Batch: Running Estimate ROI...");
+				scene.RunEstimateROIWorkflow(estimateOpts, updateGeometry);
+				break;
+			case 1:
 				DEBUG("Batch: Running Densify Point Cloud...");
 				scene.RunDensifyWorkflow(densifyOpts, updateGeometry);
 				break;
-			case 1:
+			case 2:
 				DEBUG("Batch: Running Reconstruct Mesh...");
 				scene.RunReconstructMeshWorkflow(reconstructOpts, updateGeometry);
 				break;
-			case 2:
+			case 3:
 				DEBUG("Batch: Running Refine Mesh...");
 				scene.RunRefineMeshWorkflow(refineOpts, updateGeometry);
 				break;
-			case 3:
+			case 4:
 				DEBUG("Batch: Running Texture Mesh...");
 				scene.RunTextureMeshWorkflow(textureOpts, updateGeometry);
 				break;

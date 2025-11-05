@@ -331,6 +331,35 @@ bool Scene::Export(const String& _fileName, const String& exportType, bool bView
 	return bPoints || bMesh;
 }
 
+// Estimate ROI workflow wrapper
+bool Scene::RunEstimateROIWorkflow(const EstimateROIWorkflowOptions& options, bool bUpdateGeometry) {
+	if (!IsOpen()) {
+		DEBUG("error: no scene loaded");
+		return false;
+	}
+	if (!scene.pointcloud.IsValid()) {
+		DEBUG("error: point-cloud is empty; run densify before estimating ROI");
+		return false;
+	}
+
+	// Forward to MVS::Scene implementation
+	if (!scene.EstimateROI(options.scaleROI, options.upAxis)) {
+		DEBUG("error: EstimateROI failed");
+		return false;
+	}
+
+	// Upload updated bounds and refresh rendering
+	if (bUpdateGeometry) {
+		window.GetRenderer().UploadBounds(scene);
+		// Also upload other geometry/render data if necessary
+		window.UploadRenderData();
+		window.RequestRedraw();
+	}
+
+	return true;
+}
+
+// Densify point-cloud workflow wrapper
 bool Scene::RunDensifyWorkflow(const DensifyWorkflowOptions& options, bool bUpdateGeometry) {
 	if (!IsOpen()) {
 		DEBUG("error: no scene loaded");
@@ -370,6 +399,7 @@ bool Scene::RunDensifyWorkflow(const DensifyWorkflowOptions& options, bool bUpda
 	return true;
 }
 
+// Reconstruct mesh workflow wrapper
 bool Scene::RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options, bool bUpdateGeometry) {
 	if (!IsOpen()) {
 		DEBUG("error: no scene loaded");
@@ -416,6 +446,7 @@ bool Scene::RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& opt
 	return true;
 }
 
+// Refine mesh workflow wrapper
 bool Scene::RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options, bool bUpdateGeometry) {
 	if (!IsOpen()) {
 		DEBUG("error: no scene loaded");
@@ -440,6 +471,7 @@ bool Scene::RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options, bool
 	return true;
 }
 
+// Texture mesh workflow wrapper
 bool Scene::RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options, bool bUpdateGeometry) {
 	if (!IsOpen()) {
 		DEBUG("error: no scene loaded");

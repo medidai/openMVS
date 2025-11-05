@@ -53,6 +53,7 @@ String strViewNeighborsFileName;
 String strOutputViewNeighborsFileName;
 String strMeshFileName;
 String strExportROIFileName;
+String strExportSceneWithROIFileName;
 String strImportROIFileName;
 String strCropROIFileName;
 String strExportDMAPSPathName;
@@ -63,8 +64,9 @@ float fMaxSubsceneArea;
 float fSampleMesh;
 float fSampleMeshNeighbors;
 float fBorderROI;
+float fScaleROI;
+int upAxis;
 bool bCrop2ROI;
-int nEstimateROI;
 int	nTowerMode;
 int nFusionMode;
 unsigned nNormalizeCoordinates;
@@ -172,8 +174,9 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("filter-point-cloud", boost::program_options::value(&OPT::thFilterPointCloud)->default_value(0), "filter dense point-cloud based on visibility (0 - disabled)")
 		("export-number-views", boost::program_options::value(&OPT::nExportNumViews)->default_value(0), "export points with >= number of views (0 - disabled, <0 - save MVS project too)")
 		("roi-border", boost::program_options::value(&OPT::fBorderROI)->default_value(0), "add a border to the region-of-interest when cropping the scene (0 - disabled, >0 - percentage, <0 - absolute)")
-		("estimate-roi", boost::program_options::value(&OPT::nEstimateROI)->default_value(2), "estimate and set region-of-interest (0 - disabled, 1 - enabled, 2 - adaptive)")
+		("estimate-roi", boost::program_options::value(&OPT::fScaleROI)->default_value(1.1f), "estimate and set region-of-interest (0 - disabled)")
 		("crop-to-roi", boost::program_options::value(&OPT::bCrop2ROI)->default_value(true), "crop scene using the region-of-interest")
+		("up-axis", boost::program_options::value(&OPT::upAxis)->default_value(-1), "set the up-axis for ROI estimation and tower-mode (0 - X, 1 - Y, 2 - Z, <0 - undefined)")
 		("remove-dmaps", boost::program_options::value(&bRemoveDmaps)->default_value(false), "remove depth-maps after fusion")
 		("tower-mode", boost::program_options::value(&OPT::nTowerMode)->default_value(4), "add a cylinder of points in the center of ROI; scene assume to be Z-up oriented (0 - disabled, 1 - replace, 2 - append, 3 - select neighbors, 4 - select neighbors & append, <0 - force tower mode)")
 		("normalize-coordinates", boost::program_options::value(&OPT::nNormalizeCoordinates)->default_value(0), "normalize scene coordinates and output the inverse transform to file (0 - disabled, 1 - center, 2 - center & scale)")
@@ -186,6 +189,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("force-neighbors-from-images", boost::program_options::value(&OPT::bForceNeighborsFromImages)->default_value(false), "force estimating neighbor views from image pairs baseline")
 		("sample-mesh-for-neighbors", boost::program_options::value(&OPT::fSampleMeshNeighbors)->default_value(0.f), "mesh sampling used for neighbor views estimation (0 - disabled/use mesh vertices, <0 - number of points, >0 - sample density per square unit)")
 		("mesh-file", boost::program_options::value<std::string>(&OPT::strMeshFileName), "mesh file name used for image pair overlap estimation")
+		("export-scene-with-roi-file", boost::program_options::value<std::string>(&OPT::strExportSceneWithROIFileName), "output filename for storing the scene with ROI (empty - disabled)")
 		("export-roi-file", boost::program_options::value<std::string>(&OPT::strExportROIFileName), "ROI file name to be exported form the scene")
 		("import-roi-file", boost::program_options::value<std::string>(&OPT::strImportROIFileName), "ROI file name to be imported into the scene")
 		("crop-roi-file", boost::program_options::value<std::string>(&OPT::strCropROIFileName), "ROI file name to crop the scene keeping only the points inside ROI and the cameras seeing them")
@@ -243,6 +247,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	Util::ensureValidPath(OPT::strViewNeighborsFileName);
 	Util::ensureValidPath(OPT::strOutputViewNeighborsFileName);
 	Util::ensureValidPath(OPT::strMeshFileName);
+	Util::ensureValidPath(OPT::strExportSceneWithROIFileName);
 	Util::ensureValidPath(OPT::strExportROIFileName);
 	Util::ensureValidPath(OPT::strImportROIFileName);
 	Util::ensureValidPath(OPT::strCropROIFileName);
@@ -391,13 +396,20 @@ int main(int argc, LPCTSTR* argv)
 			return EXIT_SUCCESS;
 		}
 	}
-	if (!scene.IsBounded())
-		scene.EstimateROI(OPT::nEstimateROI, 1.1f);
+	if (!scene.IsBounded() && OPT::fScaleROI > 0)
+		scene.EstimateROI(OPT::fScaleROI, OPT::upAxis);
 	if (!OPT::strExportROIFileName.empty() && scene.IsBounded()) {
+		DEBUG_EXTRA("ROI saved to %s ", MAKE_PATH_SAFE(OPT::strExportROIFileName).c_str());
 		std::ofstream fs(MAKE_PATH_SAFE(OPT::strExportROIFileName));
 		if (!fs)
 			return EXIT_FAILURE;
 		fs << scene.obb;
+		return EXIT_SUCCESS;
+	}
+	if (!OPT::strExportSceneWithROIFileName.empty()) {
+		if (!scene.IsBounded())
+			VERBOSE("error: ROI invalid when exporting scene with ROI");
+		scene.Save(MAKE_PATH_SAFE(OPT::strExportSceneWithROIFileName), (ARCHIVE_TYPE)OPT::nArchiveType);
 		return EXIT_SUCCESS;
 	}
 	if (OPT::nTowerMode!=0)

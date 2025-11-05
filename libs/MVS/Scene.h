@@ -115,9 +115,9 @@ public:
 	bool ExportChunks(const ImagesChunkArr& chunks, const String& path, ARCHIVE_TYPE type=ARCHIVE_DEFAULT) const;
 
 	// Transform scene
-	bool Center(const Point3* pCenter = NULL);
-	bool Scale(const REAL* pScale = NULL);
-	bool ScaleImages(unsigned nMaxResolution = 0, REAL scale = 0, const String& folderName = String());
+	bool Center(const Point3* pCenter=NULL);
+	bool Scale(const REAL* pScale=NULL);
+	bool ScaleImages(unsigned nMaxResolution=0, REAL scale=0, const String& folderName={});
 	Matrix4x4 ComputeNormalizationTransform(bool bScale = false) const;
 	void Transform(const Matrix3x3& rotation, const Point3& translation, REAL scale);
 	void Transform(const Matrix3x4& transform);
@@ -125,13 +125,13 @@ public:
 	REAL ComputeLeveledVolume(float planeThreshold=0, float sampleMesh=-100000, unsigned upAxis=2, bool verbose=true);
 	void AddNoiseCameraPoses(float epsPosition, float epsRotation);
 	Scene SubScene(const IIndexArr& idxImages) const;
-	Scene& CropToROI(const OBB3f&, unsigned minNumPoints = 3);
-	float ComputeDistanceCameras2Scene(float depthPercentile = 0.1f, bool bForceRecompute = false, bool bUseROI = true);
+	Scene& CropToROI(const OBB3f&, unsigned minNumPoints=3);
+	bool EstimateROI(float scaleROI=1.1f, int upAxis=-1);
+	FloatArr ROIPointWeights() const;
+	float ComputeDistanceCameras2Scene(float depthPercentile=0.1f, bool bForceRecompute=false, bool bUseROI=true);
 
-	// Estimate and set region-of-interest
-	bool EstimateROI(int nEstimateROI=0, float scale=1.f);
-	
 	// Tower scene
+	bool ComputeCenterLine(Line3f &camCenterLine) const;
 	bool ComputeTowerCylinder(Point2f& centerPoint, float& fRadius, float& fROIRadius, float& zMin, float& zMax, float& minCamZ, const int towerMode);
 	void InitTowerScene(const int towerMode);
 	size_t DrawCircle(PointCloud& pc,PointCloud::PointArr& outCircle, const Point3f& circleCenter, const float circleRadius, const unsigned nTargetPoints, const float fStartAngle, const float fAngleBetweenPoints);

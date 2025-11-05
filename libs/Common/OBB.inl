@@ -88,7 +88,7 @@ inline void TOBB<TYPE,DIMS>::Set(const MATRIX& rot, const POINT& ptMin, const PO
 // when the dominant direction of the inside points is not aligned with
 // the convex hull which ultimately is used to define the OBB dimensions.
 template <typename TYPE, int DIMS>
-inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, int k)
+inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, int k, int fixedAxis)
 {
 	ASSERT(n >= DIMS);
 
@@ -132,7 +132,7 @@ inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, int k)
 	C(2,0) = cxz; C(2,1) = cyz; C(2,2) = czz;
 
 	// set the OBB parameters from the covariance matrix
-	Set(C, pts, n);
+	Set(C, pts, n, fixedAxis);
 }
 // builds an OBB from triangles specified as an array of
 // points with integer indices into the point array. Forms
@@ -190,11 +190,16 @@ inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, const TRIANGLE* tri
 }
 // method to set the OBB parameters which produce a box oriented according to
 // the covariance matrix C, and that contains the given points
+// if fixedAxis is specified (only for 3D OBBs), the OBB rotation be applied in the plane perpendicular
+// to the given axis (0=x,1=y,2=z)
 template <typename TYPE, int DIMS>
-inline void TOBB<TYPE,DIMS>::Set(const MATRIX& C, const POINT* pts, size_t n)
+inline void TOBB<TYPE,DIMS>::Set(const MATRIX& C, const POINT* pts, size_t n, int fixedAxis)
 {
 	// extract rotation from the covariance matrix
-	SetRotation(C);
+	if (fixedAxis >= 0)
+		SetRotation(C, fixedAxis);
+	else
+		SetRotation(C);
 	// extract size and center from the given points
 	SetBounds(pts, n);
 }
@@ -213,6 +218,42 @@ inline void TOBB<TYPE,DIMS>::SetRotation(const MATRIX& C)
 	if (m_rot.determinant() < 0)
 		m_rot = -m_rot;
 }
+template <typename TYPE, int DIMS>
+inline void TOBB<TYPE,DIMS>::SetRotation(const MATRIX& C, int fixedAxis)
+{
+	ASSERT(DIMS == 3); // SetRotation with fixed axis is only implemented for 3D OBBs
+	ASSERT(fixedAxis == 0 || fixedAxis == 1 || fixedAxis == 2);
+	// the two free axes (wrap-around)
+	const int a = (fixedAxis + 1) % 3;
+	const int b = (fixedAxis + 2) % 3;
+	// 2×2 covariance submatrix for (a,b)
+	Eigen::Matrix<TYPE,2,2> C2;
+	C2(0,0) = C(a,a);
+	C2(0,1) = C(a,b);
+	C2(1,0) = C(b,a);
+	C2(1,1) = C(b,b);
+	Eigen::SelfAdjointEigenSolver<Eigen::Matrix<TYPE,2,2>> es2(C2);
+	ASSERT(es2.info() == Eigen::Success);
+	// Columns: eigenvectors for ascending eigenvalues (minor -> major)
+	const Eigen::Matrix<TYPE,2,1> v0 = es2.eigenvectors().col(0);
+	const Eigen::Matrix<TYPE,2,1> v1 = es2.eigenvectors().col(1);
+	// Build rotation rows (rows = axes)
+	m_rot.setZero();
+	// Fixed axis aligns with world basis
+	m_rot.row(fixedAxis).setZero();
+	m_rot(fixedAxis, fixedAxis) = TYPE(1);
+	// In-plane minor direction goes to row 'a'
+	m_rot.row(a).setZero();
+	m_rot(a, a) = v0(0);
+	m_rot(a, b) = v0(1);
+	// In-plane major direction goes to row 'b'
+	m_rot.row(b).setZero();
+	m_rot(b, a) = v1(0);
+	m_rot(b, b) = v1(1);
+	// Make right-handed: flip the minor row if needed
+	if (m_rot.determinant() < TYPE(0))
+		m_rot.row(a) = -m_rot.row(a);
+}
 // method to set the OBB center and size that contains the given points
 // the rotations should be already set
 template <typename TYPE, int DIMS>
@@ -222,24 +263,15 @@ inline void TOBB<TYPE,DIMS>::SetBounds(const POINT* pts, size_t n)
 	ASSERT(ISEQUAL((m_rot*m_rot.transpose()).trace(), TYPE(3)) && ISEQUAL(m_rot.determinant(), TYPE(1)));
 
 	// build the bounding box extents in the rotated frame
-	const TYPE tmax = std::numeric_limits<TYPE>::max();
-	POINT minim(tmax, tmax, tmax), maxim(-tmax, -tmax, -tmax);
-	for (size_t i=0; i<n; ++i) {
-		const POINT p_prime(m_rot * pts[i]);
-		if (minim(0) > p_prime(0)) minim(0) = p_prime(0);
-		if (minim(1) > p_prime(1)) minim(1) = p_prime(1);
-		if (minim(2) > p_prime(2)) minim(2) = p_prime(2);
-		if (maxim(0) < p_prime(0)) maxim(0) = p_prime(0);
-		if (maxim(1) < p_prime(1)) maxim(1) = p_prime(1);
-		if (maxim(2) < p_prime(2)) maxim(2) = p_prime(2);
-	}
+	AABB aabb(m_rot * pts[0]);
+	for (size_t i=1; i<n; ++i)
+		aabb.Insert(m_rot * pts[i]);
 
 	// set the center of the OBB to be the average of the 
 	// minimum and maximum, and the extents be half of the
 	// difference between the minimum and maximum
-	const POINT center((maxim+minim)*TYPE(0.5));
-	m_pos = m_rot.transpose() * center;
-	m_ext = (maxim-minim)*TYPE(0.5);
+	m_pos = m_rot.transpose() * aabb.GetCenter();
+	m_ext = aabb.GetSize() * TYPE(0.5);
 } // Set
 /*----------------------------------------------------------------*/
 
