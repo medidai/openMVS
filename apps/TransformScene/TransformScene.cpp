@@ -56,6 +56,7 @@ String strTransformFileName;
 String strTransferTextureFileName;
 String strIndicesFileName;
 bool bComputeVolume;
+bool bInvertTransform;
 float fEpsNoisePosition;
 float fEpsNoiseRotation;
 float fPlaneThreshold;
@@ -117,6 +118,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("output-file,o", boost::program_options::value<std::string>(&OPT::strOutputFileName), "output filename for storing the scene")
 		("align-file,a", boost::program_options::value<std::string>(&OPT::strAlignFileName), "input scene filename to which the scene will be cameras aligned")
 		("transform-file,t", boost::program_options::value<std::string>(&OPT::strTransformFileName), "input transform filename by which the scene will transformed")
+		("invert-transform", boost::program_options::value(&OPT::bInvertTransform)->default_value(0), "Invert the scene transform read from file")
 		("transfer-texture-file", boost::program_options::value<std::string>(&OPT::strTransferTextureFileName), "input mesh filename to which the texture of the scene's mesh will be transfered to (the two meshes should be aligned and the new mesh to have UV-map)")
 		("indices-file", boost::program_options::value<std::string>(&OPT::strIndicesFileName), "input indices filename to be used with ex. texture transfer to select a subset of the scene's mesh")
 		("compute-volume", boost::program_options::value(&OPT::bComputeVolume)->default_value(false), "compute the volume of the given watertight mesh, or else try to estimate the ground plane and assume the mesh is bounded by it")
@@ -300,9 +302,20 @@ int main(int argc, LPCTSTR* argv)
 			VERBOSE("error: invalid transform");
 			return EXIT_FAILURE;
 		}
+		VERBOSE("Transform matrix loaded from '%s'", Util::getFileNameExt(OPT::strTransformFileName).c_str());
 		Matrix3x4 transform;
-		for (unsigned i=0; i<12; ++i)
-			transform[i] = transformValues[i];
+		if (!OPT::bInvertTransform) {
+			for (unsigned i=0; i<12; ++i)
+				transform[i] = transformValues[i];
+		} else {
+			Matrix4x4 mat4x4 = Matrix4x4::IDENTITY;
+			for (unsigned e=0; e<12; ++e)
+				mat4x4[e] = transformValues[e];
+			mat4x4 = mat4x4.inv();
+			for (unsigned e=0; e<12; ++e)
+				transform[e] = mat4x4[e];
+			VERBOSE("Transform matrix inverted");
+		}
 		scene.Transform(transform);
 		VERBOSE("Scene transformed by the given transformation matrix (%s)", TD_TIMER_GET_FMT().c_str());
 	}

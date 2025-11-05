@@ -642,6 +642,17 @@ void Window::HandleKeyboard(int key, int action, int mods) {
 				}
 				break;
 
+			case GLFW_KEY_B:
+				#ifdef __APPLE__
+				if (mods & GLFW_MOD_SUPER) {
+				#else
+				if (mods & GLFW_MOD_CONTROL) {
+				#endif
+					// Ctrl+B - Estimate ROI with default parameters
+					GetScene().RunEstimateROIWorkflow(GetScene().GetEstimateROIWorkflowOptions());
+				}
+				break;
+
 			case GLFW_KEY_LEFT:
 				camera.PreviousCamera();
 				break;

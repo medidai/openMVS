@@ -60,10 +60,11 @@ public:
 	inline void Reset();
 	inline void Set(const AABB&); // build from AABB
 	inline void Set(const MATRIX& rot, const POINT& ptMin, const POINT& ptMax); // build from rotation matrix from world to local, and local min/max corners
-	inline void Set(const POINT* pts, size_t n, int k = 0); // build from points; if k (number of nearest neighbors) set, filter and use only surface points
+	inline void Set(const POINT* pts, size_t n, int k = 0, int fixedAxis=-1); // build from points; if k (number of nearest neighbors) set, filter and use only surface points
 	inline void Set(const POINT* pts, size_t n, const TRIANGLE* tris, size_t s); // build from triangles
-	inline void Set(const MATRIX& C, const POINT* pts, size_t n); // build from covariance matrix
+	inline void Set(const MATRIX& C, const POINT* pts, size_t n, int fixedAxis=-1); // build from covariance matrix
 	inline void SetRotation(const MATRIX& C); // build rotation only from covariance matrix
+	inline void SetRotation(const MATRIX& C, int fixedAxis); // same as above, but one axis is fixed
 	inline void SetBounds(const POINT* pts, size_t n); // build size and center only from given points
 
 	inline void BuildBegin(); // start online build for computing the rotation

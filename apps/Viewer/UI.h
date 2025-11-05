@@ -57,6 +57,7 @@ private:
 	bool showExportDialog;
 	bool showCameraInfoDialog;
 	bool showSelectionDialog;
+	bool showEstimateROIWorkflow;
 	bool showDensifyWorkflow;
 	bool showReconstructWorkflow;
 	bool showRefineWorkflow;
@@ -131,6 +132,7 @@ private:
 	void ShowRenderingControls(Window& window);
 	void ShowPointCloudControls(Window& window);
 	void ShowMeshControls(Window& window);
+	void ShowEstimateROIWorkflowWindow(Window& window);
 	void ShowDensifyWorkflowWindow(Window& window);
 	void ShowReconstructWorkflowWindow(Window& window);
 	void ShowRefineWorkflowWindow(Window& window);

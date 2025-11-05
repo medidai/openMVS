@@ -41,6 +41,11 @@ public:
 	typedef MVS::Mesh::Octree OctreeMesh;
 
 public:
+	struct EstimateROIWorkflowOptions {
+		float scaleROI{1.1f};
+		int upAxis{-1}; // -1 = auto, 0=X,1=Y,2=Z
+	};
+
 	struct DensifyWorkflowOptions {
 		unsigned resolutionLevel{1};
 		unsigned maxResolution{2560};
@@ -138,6 +143,7 @@ public:
 	Window window;
 	ImageArr images; // scene photos (only valid)
 
+	EstimateROIWorkflowOptions estimateROIOptions;
 	DensifyWorkflowOptions densifyOptions;
 	ReconstructMeshWorkflowOptions reconstructOptions;
 	RefineMeshWorkflowOptions refineOptions;
@@ -167,6 +173,7 @@ public:
 	bool Export(const String& fileName, const String& exportType = String(), bool bViews = true) const;
 
 	// Workflows
+	bool RunEstimateROIWorkflow(const EstimateROIWorkflowOptions& options, bool bUpdateGeometry = true);
 	bool RunDensifyWorkflow(const DensifyWorkflowOptions& options, bool bUpdateGeometry=true);
 	bool RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options, bool bUpdateGeometry=true);
 	bool RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options, bool bUpdateGeometry=true);
@@ -178,6 +185,8 @@ public:
 	MVS::Scene CropToPoints(const MVS::PointCloud::IndexArr& selectedPointIndices, unsigned minPoints = 20) const;
 
 	// Getters
+	EstimateROIWorkflowOptions& GetEstimateROIWorkflowOptions() { return estimateROIOptions; }
+	const EstimateROIWorkflowOptions& GetEstimateROIWorkflowOptions() const { return estimateROIOptions; }
 	DensifyWorkflowOptions& GetDensifyWorkflowOptions() { return densifyOptions; }
 	const DensifyWorkflowOptions& GetDensifyWorkflowOptions() const { return densifyOptions; }
 	ReconstructMeshWorkflowOptions& GetReconstructMeshWorkflowOptions() { return reconstructOptions; }
