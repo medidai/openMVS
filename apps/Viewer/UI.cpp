@@ -52,6 +52,7 @@ UI::UI()
 	, showRenderSettings(false)
 	, showConsoleOverlay(true)
 	, showPerformanceOverlay(true)
+	, showWorkflowOverlay(true)
 	, showViewportOverlay(true)
 	, showSelectionOverlay(true)
 	, showAboutDialog(false)
@@ -59,6 +60,7 @@ UI::UI()
 	, showExportDialog(false)
 	, showCameraInfoDialog(false)
 	, showSelectionDialog(false)
+	, showSavePromptDialog(false)
 	, showEstimateROIWorkflow(false)
 	, showDensifyWorkflow(false)
 	, showReconstructWorkflow(false)
@@ -155,6 +157,7 @@ void UI::NewFrame(Window& window) {
 void UI::Render(Window& window) {
 	ShowConsoleOverlay(window);
 	ShowPerformanceOverlay(window);
+	ShowWorkflowOverlay(window);
 	ShowViewportOverlay(window);
 	ShowEmptySceneOverlay(window);
 	ShowSelectionOverlay(window);
@@ -188,6 +191,8 @@ void UI::ShowMainMenuBar(Window& window) {
 		ShowCameraInfoDialog(window);
 	if (showSelectionDialog)
 		ShowSelectionDialog(window);
+	if (showSavePromptDialog)
+		ShowSavePromptDialog(window);
 
 	// Only show menu bar if it should be visible
 	if (!showMainMenu) {
@@ -242,23 +247,27 @@ void UI::ShowMainMenuBar(Window& window) {
 				scene.Reset();
 				// Make sure renderer/UI reflect the cleared scene
 				window.UploadRenderData();
-				Window::RequestRedraw();
 			}
 			ImGui::Separator();
 			if (ImGui::MenuItem("Export...", nullptr, false, scene.IsOpen())) {
 				// Show export dialog with export format options
 				showExportDialog = true;
 			}
-			ImGui::Separator();
-			#ifdef __APPLE__
-			if (ImGui::MenuItem("Exit", "Cmd+Q")) {
-			#else
-			if (ImGui::MenuItem("Exit", "Alt+F4")) {
-			#endif
+		ImGui::Separator();
+		#ifdef __APPLE__
+		if (ImGui::MenuItem("Exit", "Cmd+Q")) {
+		#else
+		if (ImGui::MenuItem("Exit", "Alt+F4")) {
+		#endif
+			// Check if geometry was modified and show save prompt
+			if (scene.IsGeometryModified()) {
+				showSavePromptDialog = true;
+			} else {
 				glfwSetWindowShouldClose(window.GetGLFWWindow(), GLFW_TRUE);
 			}
-			ImGui::EndMenu();
 		}
+		ImGui::EndMenu();
+	}
 
 		if (ImGui::BeginMenu("View")) {
 			lastMenuInteraction = glfwGetTime(); // Update interaction time when menu is open
@@ -268,10 +277,11 @@ void UI::ShowMainMenuBar(Window& window) {
 			ImGui::MenuItem("Selection Dialog", nullptr, &showSelectionDialog);
 			ImGui::MenuItem("Render Settings", nullptr, &showRenderSettings);
 			ImGui::Separator();
-			ImGui::MenuItem("Console", nullptr, &showConsoleOverlay);
-			ImGui::MenuItem("Performance Overlay", nullptr, &showPerformanceOverlay);
-			ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
-			ImGui::MenuItem("Selection Overlay", nullptr, &showSelectionOverlay);
+		ImGui::MenuItem("Console", nullptr, &showConsoleOverlay);
+		ImGui::MenuItem("Performance Overlay", nullptr, &showPerformanceOverlay);
+		ImGui::MenuItem("Workflow Overlay", nullptr, &showWorkflowOverlay);
+		ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
+		ImGui::MenuItem("Selection Overlay", nullptr, &showSelectionOverlay);
 			ImGui::Separator();
 			ImGui::MenuItem("Show Point Cloud", "P", &window.showPointCloud);
 			ImGui::MenuItem("Show Mesh", "M", &window.showMesh);
@@ -286,29 +296,36 @@ void UI::ShowMainMenuBar(Window& window) {
 			ImGui::EndMenu();
 		}
 
-		if (ImGui::BeginMenu("Workflow")) {
-			lastMenuInteraction = glfwGetTime();
-			const Scene& scene = window.GetScene();
-			const bool hasScene = scene.IsOpen();
-			const MVS::Scene& mvsScene = scene.GetScene();
-			const bool hasImages = hasScene && mvsScene.IsValid();
-			const bool hasPoints = hasImages && mvsScene.pointcloud.IsValid();
-			const bool hasMesh = hasImages && !mvsScene.mesh.IsEmpty();
-			const auto addWorkflowEntry = [&](const char* label, bool enabled, bool& toggleFlag, const char* tooltip) {
-				if (ImGui::MenuItem(label, nullptr, false, enabled))
-					toggleFlag = true;
-				else if (!enabled && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+	if (ImGui::BeginMenu("Workflow")) {
+		lastMenuInteraction = glfwGetTime();
+		const Scene& scene = window.GetScene();
+		const bool hasScene = scene.IsOpen();
+		const MVS::Scene& mvsScene = scene.GetScene();
+		const bool hasImages = hasScene && mvsScene.IsValid();
+		const bool hasPoints = hasImages && mvsScene.pointcloud.IsValid();
+		const bool hasMesh = hasImages && !mvsScene.mesh.IsEmpty();
+		const bool workflowRunning = scene.IsWorkflowRunning();
+		const auto addWorkflowEntry = [&](const char* label, bool enabled, bool& toggleFlag, const char* tooltip) {
+			// Disable if workflow is running or prerequisites not met
+			const bool canRun = enabled && !workflowRunning;
+			if (ImGui::MenuItem(label, nullptr, false, canRun))
+				toggleFlag = true;
+			else if (!canRun && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+				if (workflowRunning)
+					ImGui::SetTooltip("A workflow is currently running");
+				else
 					ImGui::SetTooltip("%s", tooltip);
-			};
-			addWorkflowEntry("Estimate ROI", hasPoints, showEstimateROIWorkflow, "Requires calibrated images and point-cloud.");
-			addWorkflowEntry("Densify Point Cloud", hasImages, showDensifyWorkflow, "Requires calibrated images.");
-			addWorkflowEntry("Reconstruct Mesh", hasPoints, showReconstructWorkflow, "Requires a dense point-cloud.");
-			addWorkflowEntry("Refine Mesh", hasMesh, showRefineWorkflow, "Requires an existing mesh.");
-			addWorkflowEntry("Texture Mesh", hasMesh, showTextureWorkflow, "Requires a mesh and images.");
-			ImGui::Separator();
-			addWorkflowEntry("Batch Process", hasImages, showBatchWorkflow, "Requires calibrated images.");
-			ImGui::EndMenu();
-		}
+			}
+		};
+		addWorkflowEntry("Estimate ROI", hasPoints, showEstimateROIWorkflow, "Requires calibrated images and point-cloud.");
+		addWorkflowEntry("Densify Point Cloud", hasImages, showDensifyWorkflow, "Requires calibrated images.");
+		addWorkflowEntry("Reconstruct Mesh", hasPoints, showReconstructWorkflow, "Requires a dense point-cloud.");
+		addWorkflowEntry("Refine Mesh", hasMesh, showRefineWorkflow, "Requires an existing mesh.");
+		addWorkflowEntry("Texture Mesh", hasMesh, showTextureWorkflow, "Requires a mesh and images.");
+		ImGui::Separator();
+		addWorkflowEntry("Batch Process", hasImages, showBatchWorkflow, "Requires calibrated images.");
+		ImGui::EndMenu();
+	}
 
 		if (ImGui::BeginMenu("Help")) {
 			lastMenuInteraction = glfwGetTime(); // Update interaction time when menu is open
@@ -836,6 +853,82 @@ void UI::ShowPerformanceOverlay(Window& window) {
 	ImGui::End();
 }
 
+void UI::ShowWorkflowOverlay(Window& window) {
+	const Scene& scene = window.GetScene();
+	const bool workflowRunning = scene.IsWorkflowRunning();
+	const auto& history = scene.GetWorkflowHistory();
+	
+	// Only show if there's an active workflow or history
+	if (!showWorkflowOverlay || (!workflowRunning && history.empty()))
+		return;
+
+	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | 
+								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | 
+								   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+
+	const ImGuiViewport* viewport = ImGui::GetMainViewport();
+	ImVec2 work_pos = viewport->WorkPos;
+	ImVec2 work_size = viewport->WorkSize;
+	ImVec2 window_pos, window_pos_pivot;
+
+	// Position below performance overlay on the right
+	window_pos.x = work_pos.x + work_size.x - PAD;
+	window_pos.y = work_pos.y + PAD + 100.f; // Below performance overlay
+	window_pos_pivot.x = 1.f;
+	window_pos_pivot.y = 0.f;
+
+	ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, window_pos_pivot);
+	ImGui::SetNextWindowBgAlpha(0.35f);
+
+	if (ImGui::Begin("Workflow Status", &showWorkflowOverlay, window_flags)) {
+		// Current workflow
+		if (workflowRunning) {
+			const Scene::WorkflowType type = scene.GetCurrentWorkflowType();
+			const double elapsed = scene.GetWorkflowElapsedTime();
+			const char* workflowName = 
+				type == Scene::WF_ESTIMATE_ROI ? "Estimate ROI" :
+				type == Scene::WF_DENSIFY ? "Densify" :
+				type == Scene::WF_RECONSTRUCT ? "Reconstruct Mesh" :
+				type == Scene::WF_REFINE ? "Refine Mesh" :
+				type == Scene::WF_TEXTURE ? "Texture Mesh" : "Unknown";
+			
+			ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "Running: %s", workflowName);
+			ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-1, 0));
+			ImGui::Text("Elapsed: %.1f s", elapsed);
+			ImGui::Separator();
+		}
+		
+		// Workflow history stats
+		if (!history.empty()) {
+			ImGui::Text("Completed: %zu", history.size());
+			
+			// Show last few workflows
+			const size_t maxShow = 5;
+			const size_t start = history.size() > maxShow ? history.size() - maxShow : 0;
+			for (size_t i = start; i < history.size(); ++i) {
+				const auto& entry = history[i];
+				const char* name = 
+					entry.type == Scene::WF_ESTIMATE_ROI ? "ROI" :
+					entry.type == Scene::WF_DENSIFY ? "Densify" :
+					entry.type == Scene::WF_RECONSTRUCT ? "Reconstruct" :
+					entry.type == Scene::WF_REFINE ? "Refine" :
+					entry.type == Scene::WF_TEXTURE ? "Texture" : "?";
+				
+				if (entry.success) {
+					ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "%s: %.1f s", name, entry.duration);
+				} else {
+					ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "%s: FAILED", name);
+				}
+			}
+			
+			if (ImGui::SmallButton("Clear History")) {
+				const_cast<Scene&>(scene).ClearWorkflowHistory();
+			}
+		}
+	}
+	ImGui::End();
+}
+
 void UI::ShowViewportOverlay(const Window& window) {
 	if (!showViewportOverlay) return;
 
@@ -867,7 +960,8 @@ void UI::ShowViewportOverlay(const Window& window) {
 
 // Show a centered, headerless hint when there is no valid scene loaded
 void UI::ShowEmptySceneOverlay(const Window& window) {
-	if (window.GetScene().IsOpen())
+	Scene& scene = window.GetScene();
+	if (scene.IsWorkflowRunning() || scene.IsOpen())
 		return;
 
 	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration |
@@ -935,7 +1029,7 @@ void UI::ShowEmptySceneOverlay(const Window& window) {
 		if (ImGui::Button("Open", ImVec2(btn_w, btn_h))) {
 			String filename, geometryFilename;
 			if (ShowOpenFileDialog(filename, geometryFilename))
-				window.GetScene().Open(filename, geometryFilename);
+				scene.Open(filename, geometryFilename);
 		}
 	}
 	ImGui::End();
@@ -1521,6 +1615,51 @@ void UI::ShowSelectionDialog(Window& window) {
 	}
 }
 
+void UI::ShowSavePromptDialog(Window& window) {
+	if (!showSavePromptDialog) return;
+
+	Scene& scene = window.GetScene();
+	
+	ImGui::OpenPopup("Save Changes?");
+	ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+	ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	
+	if (ImGui::BeginPopupModal("Save Changes?", &showSavePromptDialog, ImGuiWindowFlags_AlwaysAutoResize)) {
+		ImGui::Text("The geometry has been modified.");
+		ImGui::Text("Do you want to save the changes before exiting?");
+		ImGui::Separator();
+		
+		if (ImGui::Button("Save", ImVec2(120, 0))) {
+			// Save the scene
+			if (scene.Save()) {
+				DEBUG("Scene saved successfully");
+				scene.SetGeometryModified(false);
+			}
+			// Close the dialog and exit
+			showSavePromptDialog = false;
+			ImGui::CloseCurrentPopup();
+			glfwSetWindowShouldClose(window.GetGLFWWindow(), GLFW_TRUE);
+		}
+		
+		ImGui::SameLine();
+		if (ImGui::Button("Don't Save", ImVec2(120, 0))) {
+			// Exit without saving
+			showSavePromptDialog = false;
+			ImGui::CloseCurrentPopup();
+			glfwSetWindowShouldClose(window.GetGLFWWindow(), GLFW_TRUE);
+		}
+		
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+			// Cancel exit
+			showSavePromptDialog = false;
+			ImGui::CloseCurrentPopup();
+		}
+		
+		ImGui::EndPopup();
+	}
+}
+
 void UI::UpdateFrameStats(double frameDeltaTime) {
 	constexpr float updateInterval = 0.5f; // Update every 500ms
 	++frameCount;
@@ -2003,10 +2142,10 @@ void UI::ShowEstimateROIWorkflowWindow(Window& window) {
 
 	ImGui::Separator();
 	const bool canRun = scene.IsOpen() && hasPoints;
-	ImGui::BeginDisabled(!canRun);
+	ImGui::BeginDisabled(!canRun || scene.IsWorkflowRunning());
 	if (ImGui::Button("Run")) {
 		showEstimateROIWorkflow = false;
-	scene.RunEstimateROIWorkflow(opts, true);
+		scene.RunEstimateROIWorkflow(opts);
 	}
 	ImGui::EndDisabled();
 	ImGui::SameLine();
@@ -2150,7 +2289,7 @@ void UI::ShowDensifyWorkflowWindow(Window& window) {
 
 	ImGui::Separator();
 	const bool canRun = scene.IsOpen() && hasImages;
-	ImGui::BeginDisabled(!canRun);
+	ImGui::BeginDisabled(!canRun || scene.IsWorkflowRunning());
 	if (ImGui::Button("Run")) {
 		showDensifyWorkflow = false;
 		scene.RunDensifyWorkflow(opts);
@@ -2234,7 +2373,7 @@ void UI::ShowReconstructWorkflowWindow(Window& window) {
 
 	ImGui::Separator();
 	const bool canRun = scene.IsOpen() && hasPoints;
-	ImGui::BeginDisabled(!canRun);
+	ImGui::BeginDisabled(!canRun || scene.IsWorkflowRunning());
 	if (ImGui::Button("Run")) {
 		showReconstructWorkflow = false;
 		scene.RunReconstructMeshWorkflow(opts);
@@ -2337,7 +2476,7 @@ void UI::ShowRefineWorkflowWindow(Window& window) {
 	ImGui::Separator();
 	const MVS::Scene& mvsScene = scene.GetScene();
 	const bool canRun = scene.IsOpen() && mvsScene.IsValid() && !mvsScene.mesh.IsEmpty();
-	ImGui::BeginDisabled(!canRun);
+	ImGui::BeginDisabled(!canRun || scene.IsWorkflowRunning());
 	if (ImGui::Button("Run")) {
 		showRefineWorkflow = false;
 		scene.RunRefineMeshWorkflow(opts);
@@ -2445,7 +2584,7 @@ void UI::ShowTextureWorkflowWindow(Window& window) {
 
 	ImGui::Separator();
 	const bool canRun = scene.IsOpen() && hasMesh;
-	ImGui::BeginDisabled(!canRun);
+	ImGui::BeginDisabled(!canRun || scene.IsWorkflowRunning());
 	if (ImGui::Button("Run")) {
 		showTextureWorkflow = false;
 		scene.RunTextureMeshWorkflow(opts);
@@ -2537,27 +2676,26 @@ void UI::ShowBatchWorkflowWindow(Window& window) {
 		// Execute selected modules in order
 		FOREACH(i, runnable) {
 			const int mod = runnable[i];
-			const bool updateGeometry = (i == runnable.size() - 1); // update geometry only for last module
 			switch (mod) {
 			case 0:
 				DEBUG("Batch: Running Estimate ROI...");
-				scene.RunEstimateROIWorkflow(estimateOpts, updateGeometry);
+				scene.RunEstimateROIWorkflow(estimateOpts);
 				break;
 			case 1:
 				DEBUG("Batch: Running Densify Point Cloud...");
-				scene.RunDensifyWorkflow(densifyOpts, updateGeometry);
+				scene.RunDensifyWorkflow(densifyOpts);
 				break;
 			case 2:
 				DEBUG("Batch: Running Reconstruct Mesh...");
-				scene.RunReconstructMeshWorkflow(reconstructOpts, updateGeometry);
+				scene.RunReconstructMeshWorkflow(reconstructOpts);
 				break;
 			case 3:
 				DEBUG("Batch: Running Refine Mesh...");
-				scene.RunRefineMeshWorkflow(refineOpts, updateGeometry);
+				scene.RunRefineMeshWorkflow(refineOpts);
 				break;
 			case 4:
 				DEBUG("Batch: Running Texture Mesh...");
-				scene.RunTextureMeshWorkflow(textureOpts, updateGeometry);
+				scene.RunTextureMeshWorkflow(textureOpts);
 				break;
 			}
 		}

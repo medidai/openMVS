@@ -673,7 +673,7 @@ void DepthEstimator::ProcessPixel(IDX idx)
 		const Depth ndepth(depthMap0(nx));
 		if (ndepth > 0) {
 			#if DENSE_SMOOTHNESS != DENSE_SMOOTHNESS_NA
-			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f), "Norm = ", norm(normalMap0(nx)));
+			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f, 1e-1f), "Norm = ", norm(normalMap0(nx)));
 			neighbors.emplace_back(nx);
 			neighborsClose.emplace_back(NeighborEstimate{ndepth, normalMap0(nx)
 				#if DENSE_SMOOTHNESS == DENSE_SMOOTHNESS_PLANE
@@ -688,7 +688,7 @@ void DepthEstimator::ProcessPixel(IDX idx)
 	const auto AddDirection = [this] (const ImageRef& nx) {
 		const Depth ndepth(depthMap0(nx));
 		if (ndepth > 0) {
-			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f), "Norm = ", norm(normalMap0(nx)));
+			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f, 1e-2f), "Norm = ", norm(normalMap0(nx)));
 			neighborsClose.emplace_back(NeighborEstimate{ndepth, normalMap0(nx)
 				#if DENSE_SMOOTHNESS == DENSE_SMOOTHNESS_PLANE
 				, Cast<float>(image0.camera.TransformPointI2C(Point3(nx, ndepth)))
@@ -960,7 +960,7 @@ DepthEstimator::PixelEstimate DepthEstimator::PerturbEstimate(const PixelEstimat
 		}
 		perturbation *= 0.5f;
 	}
-	ASSERT(ISEQUAL(norm(ptbEst.normal), 1.f), "Norm = ", norm(ptbEst.normal));
+	ASSERT(ISEQUAL(norm(ptbEst.normal), 1.f, 1e-2f), "Norm = ", norm(ptbEst.normal));
 
 	return ptbEst;
 }

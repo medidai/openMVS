@@ -192,11 +192,19 @@ bool Window::Initialize(const cv::Size& size, const String& windowTitle, Scene& 
 
 	// Set up delete callback to remove selected geometry
 	selectionController->setDeleteCallback([&scene, this]() {
+		if (scene.IsWorkflowRunning()) {
+			DEBUG("Cannot remove geometry while workflow is running");
+			return;
+		}
 		scene.RemoveSelectedGeometry();
 	});
 
 	// Set up ROI callback to set region of interest from selection
 	selectionController->setROICallback([&scene, this](bool aabb) {
+		if (scene.IsWorkflowRunning()) {
+			DEBUG("Cannot set ROI while workflow is running");
+			return;
+		}
 		scene.SetROIFromSelection(aabb);
 	});
 
@@ -246,6 +254,9 @@ void Window::Run() {
 		// Update timing
 		const double deltaTime = UpdateTiming();
 
+		// Check for workflow completion
+		GetScene().CheckWorkflowCompletion();
+
 		// Update active control system
 		switch (currentControlMode) {
 		case CONTROL_ARCBALL:
@@ -285,6 +296,11 @@ void Window::UploadRenderData() {
 	if (!scene.IsOpen())
 		return;
 	renderer->Reset();
+
+	// Clear the selection since geometry has changed
+	selectionController->clearSelection();
+	selectionType = SEL_NA;
+	selectionIdx = NO_IDX;
 
 	// Upload point cloud data if needed
 	if (!scene.GetScene().pointcloud.IsEmpty()) {
