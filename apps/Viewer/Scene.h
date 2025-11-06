@@ -37,10 +37,6 @@ namespace VIEWER {
 
 class Scene {
 public:
-	typedef MVS::PointCloud::Octree OctreePoints;
-	typedef MVS::Mesh::Octree OctreeMesh;
-
-public:
 	struct EstimateROIWorkflowOptions {
 		float scaleROI{1.1f};
 		int upAxis{-1}; // -1 = auto, 0=X,1=Y,2=Z
@@ -153,6 +149,35 @@ public:
 	static SEACAVE::EventQueue events; // internal events queue (processed by the working threads)
 	static SEACAVE::Thread thread; // worker thread
 
+	// workflow state tracking
+	enum WorkflowState {
+		WF_STATE_IDLE = 0,
+		WF_STATE_RUNNING,
+		WF_STATE_COMPLETED,
+		WF_STATE_FAILED
+	};
+	enum WorkflowType {
+		WF_NONE = 0,
+		WF_ESTIMATE_ROI,
+		WF_DENSIFY,
+		WF_RECONSTRUCT,
+		WF_REFINE,
+		WF_TEXTURE
+	};
+	std::atomic<WorkflowState> workflowState;
+	std::atomic<WorkflowType> currentWorkflowType;
+	std::atomic<bool> geometryModified;
+	double workflowStartTime;
+	SEACAVE::CriticalSection workflowMutex;
+	
+	// Workflow history for stats display
+	struct WorkflowHistoryEntry {
+		WorkflowType type;
+		double duration;
+		bool success;
+	};
+	std::vector<WorkflowHistoryEntry> workflowHistory;
+
 public:
 	explicit Scene(ARCHIVE_TYPE _nArchiveType = ARCHIVE_MVS);
 	~Scene();
@@ -172,12 +197,23 @@ public:
 	bool Save(const String& fileName = String(), bool bRescaleImages = false);
 	bool Export(const String& fileName, const String& exportType = String(), bool bViews = true) const;
 
-	// Workflows
-	bool RunEstimateROIWorkflow(const EstimateROIWorkflowOptions& options, bool bUpdateGeometry = true);
-	bool RunDensifyWorkflow(const DensifyWorkflowOptions& options, bool bUpdateGeometry=true);
-	bool RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options, bool bUpdateGeometry=true);
-	bool RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options, bool bUpdateGeometry=true);
-	bool RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options, bool bUpdateGeometry=true);
+	// Workflows (async execution)
+	bool RunEstimateROIWorkflow(const EstimateROIWorkflowOptions& options);
+	bool RunDensifyWorkflow(const DensifyWorkflowOptions& options);
+	bool RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options);
+	bool RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options);
+	bool RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options);
+
+	// Workflow state management
+	bool IsWorkflowRunning() const { return workflowState.load() == WF_STATE_RUNNING; }
+	WorkflowState GetWorkflowState() const { return workflowState.load(); }
+	WorkflowType GetCurrentWorkflowType() const { return currentWorkflowType.load(); }
+	double GetWorkflowElapsedTime() const;
+	void CheckWorkflowCompletion(); // Called from main loop to check if workflow completed
+	bool IsGeometryModified() const { return geometryModified.load(); }
+	void SetGeometryModified(bool modified = true) { geometryModified.store(modified); }
+	const std::vector<WorkflowHistoryEntry>& GetWorkflowHistory() const { return workflowHistory; }
+	void ClearWorkflowHistory() { workflowHistory.clear(); }
 
 	// Geometry operations
 	void RemoveSelectedGeometry();
@@ -212,8 +248,8 @@ private:
 	void CropToBounds();
 	void TogleSceneBox();
 
-	// Internal geometry operation
-	void UpdateGeometryAfterModification();
+	// Workflow finalization (called from main thread after workflow completes)
+	void FinalizeWorkflow(bool success);
 
 	static void* ThreadWorker(void*);
 };

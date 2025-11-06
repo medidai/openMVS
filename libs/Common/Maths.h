@@ -883,6 +883,9 @@ constexpr bool   ISZERO(double x)				{ return ABS(x) < ZERO_TOLERANCE; }
 constexpr bool   ISEQUAL(float  x, float  v)	{ return ABS(x-v) < FZERO_TOLERANCE; }
 constexpr bool   ISEQUAL(double x, double v)	{ return ABS(x-v) < ZERO_TOLERANCE; }
 
+constexpr bool   ISEQUAL(float  x, float  v, float e)	{ return ABS(x-v) < e; }
+constexpr bool   ISEQUAL(double x, double v, double e)	{ return ABS(x-v) < e; }
+
 constexpr float  INVZERO(float)					{ return FINV_ZERO; }
 constexpr double INVZERO(double)				{ return INV_ZERO; }
 template<typename _Tp>

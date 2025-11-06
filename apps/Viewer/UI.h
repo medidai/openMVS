@@ -50,6 +50,7 @@ private:
 	bool showRenderSettings;
 	bool showConsoleOverlay;
 	bool showPerformanceOverlay;
+	bool showWorkflowOverlay;
 	bool showViewportOverlay;
 	bool showSelectionOverlay;
 	bool showAboutDialog;
@@ -57,6 +58,7 @@ private:
 	bool showExportDialog;
 	bool showCameraInfoDialog;
 	bool showSelectionDialog;
+	bool showSavePromptDialog;
 	bool showEstimateROIWorkflow;
 	bool showDensifyWorkflow;
 	bool showReconstructWorkflow;
@@ -101,6 +103,7 @@ public:
 	void ShowRenderSettings(Window& window);
 	void ShowConsoleOverlay(Window& window);
 	void ShowPerformanceOverlay(Window& window);
+	void ShowWorkflowOverlay(Window& window);
 	void ShowViewportOverlay(const Window& window);
 	void ShowSelectionOverlay(const Window& window);
 	void ShowEmptySceneOverlay(const Window& window);
@@ -115,6 +118,7 @@ public:
 	void ShowExportDialog(Scene& scene);
 	void ShowCameraInfoDialog(Window& window);
 	void ShowSelectionDialog(Window& window);
+	void ShowSavePromptDialog(Window& window);
 	static bool ShowOpenFileDialog(String& filename, String& geometryFilename);
 	static bool ShowSaveFileDialog(String& filename);
 

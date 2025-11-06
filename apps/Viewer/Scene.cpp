@@ -52,6 +52,7 @@ class EVTClose : public Event
 public:
 	EVTClose() : Event(EVT_CLOSE) {}
 };
+
 class EVTLoadImage : public Event
 {
 public:
@@ -73,6 +74,153 @@ public:
 	}
 	EVTLoadImage(Scene* _pScene, MVS::IIndex _idx, unsigned _nMaxResolution=0)
 		: Event(EVT_JOB), pScene(_pScene), idx(_idx), nMaxResolution(_nMaxResolution) {}
+};
+
+// Base class for workflow events
+class EventWorkflow : public Event
+{
+public:
+	Scene* pScene;
+	
+	EventWorkflow(Scene* _pScene) 
+		: Event(EVT_JOB), pScene(_pScene) {}
+	
+	virtual ~EventWorkflow() {}
+	
+	// Execute the workflow (must be implemented by derived classes)
+	virtual bool Execute() = 0;
+	
+	// Run wrapper that handles state management
+	bool Run(void*) final {
+		const bool success = Execute();
+		// Update workflow state
+		pScene->workflowState.store(success ? Scene::WF_STATE_COMPLETED : Scene::WF_STATE_FAILED);
+		// Signal completion
+		glfwPostEmptyEvent();
+		return success;
+	}
+};
+
+// Workflow event classes
+class EVTWorkflowEstimateROI : public EventWorkflow
+{
+public:
+	bool Execute() override {
+		const auto& options = pScene->estimateROIOptions;
+		return pScene->scene.EstimateROI(options.scaleROI, options.upAxis);
+	}
+	EVTWorkflowEstimateROI(Scene* _pScene) : EventWorkflow(_pScene) {}
+};
+
+class EVTWorkflowDensify : public EventWorkflow
+{
+public:
+	bool Execute() override {
+		const auto& options = pScene->densifyOptions;
+		// Set MVS options
+		MVS::OPTDENSE::init();
+		MVS::OPTDENSE::update();
+		MVS::OPTDENSE::nResolutionLevel = options.resolutionLevel;
+		MVS::OPTDENSE::nMaxResolution = options.maxResolution;
+		MVS::OPTDENSE::nMinResolution = options.minResolution;
+		MVS::OPTDENSE::nSubResolutionLevels = options.subResolutionLevels;
+		MVS::OPTDENSE::nNumViews = options.numViews;
+		MVS::OPTDENSE::nMinViews = MAXF(1u, options.minViews);
+		MVS::OPTDENSE::nMinViewsTrustPoint = MAXF(1u, options.minViewsTrust);
+		MVS::OPTDENSE::nMinViewsFuse = MAXF(1u, options.minViewsFuse);
+		MVS::OPTDENSE::nEstimationIters = MAXF(1u, options.estimationIters);
+		MVS::OPTDENSE::nEstimationGeometricIters = options.geometricIters;
+		MVS::OPTDENSE::nFuseFilter = CLAMP(options.fuseFilter, 0u, (unsigned)MVS::OPTDENSE::FUSE_DENSEFILTER);
+		MVS::OPTDENSE::fDepthReprojectionErrorThreshold = options.fDepthReprojectionErrorThreshold;
+		MVS::OPTDENSE::nEstimateColors = options.estimateColors ? 2u : 0u;
+		MVS::OPTDENSE::nEstimateNormals = options.estimateNormals ? 2u : 0u;
+		MVS::OPTDENSE::bRemoveDmaps = options.removeDepthMaps;
+		MVS::OPTDENSE::nOptimize = options.postprocess ? (unsigned)MVS::OPTDENSE::OPTIMIZE : 0u;
+
+		return pScene->scene.DenseReconstruction(options.fusionMode, options.cropToROI, options.borderROI, options.sampleMeshNeighbors);
+	}
+	EVTWorkflowDensify(Scene* _pScene) : EventWorkflow(_pScene) {}
+};
+
+class EVTWorkflowReconstructMesh : public EventWorkflow
+{
+public:
+	bool Execute() override {
+		const auto& options = pScene->reconstructOptions;
+		MVS::Scene& mvsScene = pScene->scene;
+
+		// Remove point weights if constant weight requested
+		if (options.constantWeight)
+			mvsScene.pointcloud.pointWeights.Release();
+
+		// Reconstruct mesh
+		if (!mvsScene.ReconstructMesh(options.minPointDistance, options.useFreeSpaceSupport, options.useOnlyROI,
+			4, options.thicknessFactor, options.qualityFactor))
+			return false;
+
+		// Crop to ROI if requested
+		if (options.cropToROI && mvsScene.IsBounded()) {
+			const size_t numVertices = mvsScene.mesh.vertices.size();
+			const size_t numFaces = mvsScene.mesh.faces.size();
+			mvsScene.mesh.RemoveFacesOutside(mvsScene.obb);
+			VERBOSE("Mesh trimmed to ROI: %u vertices and %u faces removed",
+				(unsigned)(numVertices - mvsScene.mesh.vertices.size()),
+				(unsigned)(numFaces - mvsScene.mesh.faces.size()));
+		}
+
+		// Decimate mesh
+		float decimate = options.decimateMesh;
+		if (options.targetFaceNum && !mvsScene.mesh.faces.empty())
+			decimate = static_cast<float>(options.targetFaceNum) / mvsScene.mesh.faces.size();
+		decimate = CLAMP(decimate, 0.f, 1.f);
+		if (decimate <= 0.f)
+			decimate = 1.f;
+
+		// Clean mesh
+		mvsScene.mesh.Clean(1.f, options.removeSpurious, options.removeSpikes, options.closeHoles, options.smoothSteps, options.edgeLength, false);
+		mvsScene.mesh.Clean(decimate, 0.f, options.removeSpikes, options.closeHoles, 0u, 0.f, false);
+		mvsScene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true);
+
+		return true;
+	}
+	EVTWorkflowReconstructMesh(Scene* _pScene) : EventWorkflow(_pScene) {}
+};
+
+class EVTWorkflowRefineMesh : public EventWorkflow
+{
+public:
+	bool Execute() override {
+		const auto& options = pScene->refineOptions;
+		return pScene->scene.RefineMesh(options.resolutionLevel, options.minResolution, options.maxViews,
+			options.decimateMesh, options.closeHoles, options.ensureEdgeSize, options.maxFaceArea,
+			options.scales, options.scaleStep, options.alternatePair, options.regularityWeight,
+			options.rigidityElasticityRatio, options.gradientStep, options.planarVertexRatio,
+			options.reduceMemory);
+	}
+	EVTWorkflowRefineMesh(Scene* _pScene) : EventWorkflow(_pScene) {}
+};
+
+class EVTWorkflowTextureMesh : public EventWorkflow
+{
+public:
+	bool Execute() override {
+		const auto& options = pScene->textureOptions;
+		MVS::Scene& mvsScene = pScene->scene;
+
+		// Clean and decimate mesh
+		float decimate = CLAMP(options.decimateMesh, 0.f, 1.f);
+		if (decimate <= 0.f)
+			decimate = 1.f;
+		mvsScene.mesh.Clean(decimate, 0.f, false, options.closeHoles, 0u, 0.f, false);
+		mvsScene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true);
+
+		// Texture mesh
+		return mvsScene.TextureMesh(options.resolutionLevel, options.minResolution, options.minCommonCameras,
+			options.outlierThreshold, options.ratioDataSmoothness, options.globalSeamLeveling,
+			options.localSeamLeveling, options.textureSizeMultiple, options.rectPackingHeuristic,
+			Pixel8U(options.emptyColor), options.sharpnessWeight, options.ignoreMaskLabel, options.maxTextureSize);
+	}
+	EVTWorkflowTextureMesh(Scene* _pScene) : EventWorkflow(_pScene) {}
 };
 
 void* Scene::ThreadWorker(void*) {
@@ -103,6 +251,10 @@ Scene::Scene(ARCHIVE_TYPE _nArchiveType)
 	, geometryMesh(false)
 	, estimateSfMNormals(false)
 	, estimateSfMPatches(false)
+	, workflowState(WF_STATE_IDLE)
+	, currentWorkflowType(WF_NONE)
+	, geometryModified(false)
+	, workflowStartTime(0.0)
 {
 }
 
@@ -153,6 +305,69 @@ bool Scene::Initialize(const cv::Size& size, const String& windowName, const Str
 
 void Scene::Run() {
 	window.Run();
+}
+
+double Scene::GetWorkflowElapsedTime() const {
+	if (workflowState.load() != WF_STATE_RUNNING || workflowStartTime == 0.0)
+		return 0.0;
+	return glfwGetTime() - workflowStartTime;
+}
+
+void Scene::CheckWorkflowCompletion() {
+	const WorkflowState state = workflowState.load();
+	if (state == WF_STATE_COMPLETED || state == WF_STATE_FAILED) {
+		// Workflow completed, finalize it on the main thread
+		const bool success = (state == WF_STATE_COMPLETED);
+		FinalizeWorkflow(success);
+	}
+}
+
+void Scene::FinalizeWorkflow(bool success) {
+	SEACAVE::Lock lock(workflowMutex);
+	
+	// Check if we need to finalize (already done or not running)
+	const WorkflowState state = workflowState.load();
+	if (state != WF_STATE_COMPLETED && state != WF_STATE_FAILED)
+		return;
+
+	// Calculate duration directly (can't use GetWorkflowElapsedTime since state is no longer RUNNING)
+	const double currentTime = glfwGetTime();
+	const double duration = (workflowStartTime > 0.0) ? (currentTime - workflowStartTime) : 0.0;
+	const WorkflowType type = currentWorkflowType.load();
+	
+	// Add to workflow history
+	workflowHistory.push_back({type, duration, success});
+
+	if (success) {
+		DEBUG("Workflow completed successfully: %s (%.2f seconds)", 
+			type == WF_ESTIMATE_ROI ? "Estimate ROI" :
+			type == WF_DENSIFY ? "Densify" :
+			type == WF_RECONSTRUCT ? "Reconstruct Mesh" :
+			type == WF_REFINE ? "Refine Mesh" :
+			type == WF_TEXTURE ? "Texture Mesh" : "Unknown",
+			duration);
+
+		// Re-upload geometry to GPU buffers
+		window.UploadRenderData();
+		
+		// Mark geometry as modified
+		geometryModified.store(true);
+
+		// Request window redraw
+		window.RequestRedraw();
+	} else {
+		DEBUG("Workflow failed: %s", 
+			type == WF_ESTIMATE_ROI ? "Estimate ROI" :
+			type == WF_DENSIFY ? "Densify" :
+			type == WF_RECONSTRUCT ? "Reconstruct Mesh" :
+			type == WF_REFINE ? "Refine Mesh" :
+			type == WF_TEXTURE ? "Texture Mesh" : "Unknown");
+	}
+
+	// Reset workflow state
+	workflowState.store(WF_STATE_IDLE);
+	currentWorkflowType.store(WF_NONE);
+	workflowStartTime = 0.0;
 }
 
 bool Scene::Open(const String& fileName, String geometryFileName) {
@@ -331,173 +546,109 @@ bool Scene::Export(const String& _fileName, const String& exportType, bool bView
 	return bPoints || bMesh;
 }
 
-// Estimate ROI workflow wrapper
-bool Scene::RunEstimateROIWorkflow(const EstimateROIWorkflowOptions& options, bool bUpdateGeometry) {
-	if (!IsOpen()) {
-		DEBUG("error: no scene loaded");
-		return false;
-	}
-	if (!scene.pointcloud.IsValid()) {
-		DEBUG("error: point-cloud is empty; run densify before estimating ROI");
-		return false;
-	}
+// Estimate ROI workflow wrapper (async execution)
+bool Scene::RunEstimateROIWorkflow(const EstimateROIWorkflowOptions& options) {
+	ASSERT(IsOpen() && "No scene loaded");
+	ASSERT(scene.pointcloud.IsValid() && "Point-cloud is empty");
+	ASSERT(!IsWorkflowRunning() && "A workflow is already running");
 
-	// Forward to MVS::Scene implementation
-	if (!scene.EstimateROI(options.scaleROI, options.upAxis)) {
-		DEBUG("error: EstimateROI failed");
-		return false;
-	}
+	// Update options in scene
+	estimateROIOptions = options;
 
-	// Upload updated bounds and refresh rendering
-	if (bUpdateGeometry) {
-		window.GetRenderer().UploadBounds(scene);
-		// Also upload other geometry/render data if necessary
-		window.UploadRenderData();
-		window.RequestRedraw();
-	}
+	// Set workflow state
+	workflowState.store(WF_STATE_RUNNING);
+	currentWorkflowType.store(WF_ESTIMATE_ROI);
+	workflowStartTime = glfwGetTime();
+
+	// Submit workflow event to queue for async execution
+	events.AddEvent(new EVTWorkflowEstimateROI(this));
+
+	DEBUG("Estimate ROI workflow started (async)");
+	return true;
+}
+
+// Densify point-cloud workflow wrapper (async execution)
+bool Scene::RunDensifyWorkflow(const DensifyWorkflowOptions& options) {
+	ASSERT(IsOpen() && "No scene loaded");
+	ASSERT(!scene.images.empty() && "Scene has no images");
+	ASSERT(!IsWorkflowRunning() && "A workflow is already running");
+
+	// Update options in scene
+	densifyOptions = options;
+
+	// Set workflow state
+	workflowState.store(WF_STATE_RUNNING);
+	currentWorkflowType.store(WF_DENSIFY);
+	workflowStartTime = glfwGetTime();
+
+	DEBUG("Densify workflow started (async) at time %.3f", workflowStartTime);
+
+	// Submit workflow event to queue for async execution
+	events.AddEvent(new EVTWorkflowDensify(this));
 
 	return true;
 }
 
-// Densify point-cloud workflow wrapper
-bool Scene::RunDensifyWorkflow(const DensifyWorkflowOptions& options, bool bUpdateGeometry) {
-	if (!IsOpen()) {
-		DEBUG("error: no scene loaded");
-		return false;
-	}
-	if (scene.images.empty()) {
-		DEBUG("error: scene has no images to densify");
-		return false;
-	}
+// Reconstruct mesh workflow wrapper (async execution)
+bool Scene::RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options) {
+	ASSERT(IsOpen() && "No scene loaded");
+	ASSERT(scene.pointcloud.IsValid() && "Point-cloud is empty");
+	ASSERT(!IsWorkflowRunning() && "A workflow is already running");
 
-	MVS::OPTDENSE::init();
-	MVS::OPTDENSE::update();
-	MVS::OPTDENSE::nResolutionLevel = options.resolutionLevel;
-	MVS::OPTDENSE::nMaxResolution = options.maxResolution;
-	MVS::OPTDENSE::nMinResolution = options.minResolution;
-	MVS::OPTDENSE::nSubResolutionLevels = options.subResolutionLevels;
-	MVS::OPTDENSE::nNumViews = options.numViews;
-	MVS::OPTDENSE::nMinViews = MAXF(1u, options.minViews);
-	MVS::OPTDENSE::nMinViewsTrustPoint = MAXF(1u, options.minViewsTrust);
-	MVS::OPTDENSE::nMinViewsFuse = MAXF(1u, options.minViewsFuse);
-	MVS::OPTDENSE::nEstimationIters = MAXF(1u, options.estimationIters);
-	MVS::OPTDENSE::nEstimationGeometricIters = options.geometricIters;
-	MVS::OPTDENSE::nFuseFilter = CLAMP(options.fuseFilter, 0u, (unsigned)MVS::OPTDENSE::FUSE_DENSEFILTER);
-	MVS::OPTDENSE::fDepthReprojectionErrorThreshold = options.fDepthReprojectionErrorThreshold;
-	MVS::OPTDENSE::nEstimateColors = options.estimateColors ? 2u : 0u;
-	MVS::OPTDENSE::nEstimateNormals = options.estimateNormals ? 2u : 0u;
-	MVS::OPTDENSE::bRemoveDmaps = options.removeDepthMaps;
-	MVS::OPTDENSE::nOptimize = options.postprocess ? (unsigned)MVS::OPTDENSE::OPTIMIZE : 0u;
+	// Update options in scene
+	reconstructOptions = options;
 
-	if (!scene.DenseReconstruction(options.fusionMode, options.cropToROI, options.borderROI, options.sampleMeshNeighbors)) {
-		DEBUG("error: dense reconstruction failed");
-		return false;
-	}
+	// Set workflow state
+	workflowState.store(WF_STATE_RUNNING);
+	currentWorkflowType.store(WF_RECONSTRUCT);
+	workflowStartTime = glfwGetTime();
 
-	if (bUpdateGeometry)
-		UpdateGeometryAfterModification();
+	// Submit workflow event to queue for async execution
+	events.AddEvent(new EVTWorkflowReconstructMesh(this));
+
+	DEBUG("Reconstruct Mesh workflow started (async)");
 	return true;
 }
 
-// Reconstruct mesh workflow wrapper
-bool Scene::RunReconstructMeshWorkflow(const ReconstructMeshWorkflowOptions& options, bool bUpdateGeometry) {
-	if (!IsOpen()) {
-		DEBUG("error: no scene loaded");
-		return false;
-	}
-	if (!scene.pointcloud.IsValid()) {
-		DEBUG("error: point-cloud is empty; run densify before reconstructing the mesh");
-		return false;
-	}
+// Refine mesh workflow wrapper (async execution)
+bool Scene::RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options) {
+	ASSERT(IsOpen() && "No scene loaded");
+	ASSERT(!scene.mesh.IsEmpty() && "Mesh is empty");
+	ASSERT(!IsWorkflowRunning() && "A workflow is already running");
 
-	MVS::Scene& mvsScene = scene;
+	// Update options in scene
+	refineOptions = options;
 
-	if (options.constantWeight)
-		mvsScene.pointcloud.pointWeights.Release();
+	// Set workflow state
+	workflowState.store(WF_STATE_RUNNING);
+	currentWorkflowType.store(WF_REFINE);
+	workflowStartTime = glfwGetTime();
 
-	if (!mvsScene.ReconstructMesh(options.minPointDistance, options.useFreeSpaceSupport, options.useOnlyROI,
-		4, options.thicknessFactor, options.qualityFactor)) {
-		DEBUG("error: mesh reconstruction failed");
-		return false;
-	}
+	// Submit workflow event to queue for async execution
+	events.AddEvent(new EVTWorkflowRefineMesh(this));
 
-	if (options.cropToROI && mvsScene.IsBounded()) {
-		const size_t numVertices = mvsScene.mesh.vertices.size();
-		const size_t numFaces = mvsScene.mesh.faces.size();
-		mvsScene.mesh.RemoveFacesOutside(mvsScene.obb);
-		VERBOSE("Mesh trimmed to ROI: %u vertices and %u faces removed",
-			(unsigned)(numVertices - mvsScene.mesh.vertices.size()),
-			(unsigned)(numFaces - mvsScene.mesh.faces.size()));
-	}
-
-	float decimate = options.decimateMesh;
-	if (options.targetFaceNum && !mvsScene.mesh.faces.empty())
-		decimate = static_cast<float>(options.targetFaceNum) / mvsScene.mesh.faces.size();
-	decimate = CLAMP(decimate, 0.f, 1.f);
-	if (decimate <= 0.f)
-		decimate = 1.f;
-
-	mvsScene.mesh.Clean(1.f, options.removeSpurious, options.removeSpikes, options.closeHoles, options.smoothSteps, options.edgeLength, false);
-	mvsScene.mesh.Clean(decimate, 0.f, options.removeSpikes, options.closeHoles, 0u, 0.f, false);
-	mvsScene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true);
-
-	if (bUpdateGeometry)
-		UpdateGeometryAfterModification();
+	DEBUG("Refine Mesh workflow started (async)");
 	return true;
 }
 
-// Refine mesh workflow wrapper
-bool Scene::RunRefineMeshWorkflow(const RefineMeshWorkflowOptions& options, bool bUpdateGeometry) {
-	if (!IsOpen()) {
-		DEBUG("error: no scene loaded");
-		return false;
-	}
-	if (scene.mesh.IsEmpty()) {
-		DEBUG("error: mesh is empty; reconstruct a mesh before refining");
-		return false;
-	}
+// Texture mesh workflow wrapper (async execution)
+bool Scene::RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options) {
+	ASSERT(IsOpen() && "No scene loaded");
+	ASSERT(!scene.mesh.IsEmpty() && "Mesh is empty");
+	ASSERT(!IsWorkflowRunning() && "A workflow is already running");
 
-	if (!scene.RefineMesh(options.resolutionLevel, options.minResolution, options.maxViews,
-		options.decimateMesh, options.closeHoles, options.ensureEdgeSize, options.maxFaceArea,
-		options.scales, options.scaleStep, options.alternatePair, options.regularityWeight,
-		options.rigidityElasticityRatio, options.gradientStep, options.planarVertexRatio,
-		options.reduceMemory)) {
-		DEBUG("error: mesh refinement failed");
-		return false;
-	}
+	// Update options in scene
+	textureOptions = options;
 
-	if (bUpdateGeometry)
-		UpdateGeometryAfterModification();
-	return true;
-}
+	// Set workflow state
+	workflowState.store(WF_STATE_RUNNING);
+	currentWorkflowType.store(WF_TEXTURE);
+	workflowStartTime = glfwGetTime();
 
-// Texture mesh workflow wrapper
-bool Scene::RunTextureMeshWorkflow(const TextureMeshWorkflowOptions& options, bool bUpdateGeometry) {
-	if (!IsOpen()) {
-		DEBUG("error: no scene loaded");
-		return false;
-	}
-	if (scene.mesh.IsEmpty()) {
-		DEBUG("error: mesh is empty; reconstruct or load a mesh before texturing");
-		return false;
-	}
+	// Submit workflow event to queue for async execution
+	events.AddEvent(new EVTWorkflowTextureMesh(this));
 
-	float decimate = CLAMP(options.decimateMesh, 0.f, 1.f);
-	if (decimate <= 0.f)
-		decimate = 1.f;
-	scene.mesh.Clean(decimate, 0.f, false, options.closeHoles, 0u, 0.f, false);
-	scene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true);
-
-	if (!scene.TextureMesh(options.resolutionLevel, options.minResolution, options.minCommonCameras,
-		options.outlierThreshold, options.ratioDataSmoothness, options.globalSeamLeveling,
-		options.localSeamLeveling, options.textureSizeMultiple, options.rectPackingHeuristic,
-		Pixel8U(options.emptyColor), options.sharpnessWeight, options.ignoreMaskLabel, options.maxTextureSize)) {
-		DEBUG("error: mesh texturing failed");
-		return false;
-	}
-
-	if (bUpdateGeometry)
-		UpdateGeometryAfterModification();
+	DEBUG("Texture Mesh workflow started (async)");
 	return true;
 }
 
@@ -520,8 +671,13 @@ void Scene::CropToBounds()
 		return;
 	if (!scene.IsBounded())
 		return;
+	const size_t numPoints = scene.pointcloud.points.size();
+	const size_t numFaces = scene.mesh.faces.size();
 	scene.pointcloud.RemovePointsOutside(scene.obb);
 	scene.mesh.RemoveFacesOutside(scene.obb);
+	// Mark as modified if anything was removed
+	if (numPoints != scene.pointcloud.points.size() || numFaces != scene.mesh.faces.size())
+		geometryModified.store(true);
 	window.SetSceneBounds(scene.obb.GetCenter(), scene.obb.GetSize());
 }
 
@@ -666,11 +822,12 @@ void Scene::OnCastRay(const Point2f& screenPos, const Ray3d& ray, int button, in
 			}
 			switch (window.selectionType) {
 			case Window::SEL_TRIANGLE: {
+				MVS::Mesh::Face face(IsWorkflowRunning() ? MVS::Mesh::Face() :  scene.mesh.faces[newSelectionIdx]);
 				DEBUG("Face selected:\n\tindex: %u\n\tvertex 1: %u (%g, %g, %g)\n\tvertex 2: %u (%g, %g, %g)\n\tvertex 3: %u (%g, %g, %g)",
 					newSelectionIdx,
-					scene.mesh.faces[newSelectionIdx][0], newSelectionPoints[0].x, newSelectionPoints[0].y, newSelectionPoints[0].z,
-					scene.mesh.faces[newSelectionIdx][1], newSelectionPoints[1].x, newSelectionPoints[1].y, newSelectionPoints[1].z,
-					scene.mesh.faces[newSelectionIdx][2], newSelectionPoints[2].x, newSelectionPoints[2].y, newSelectionPoints[2].z
+					face[0], newSelectionPoints[0].x, newSelectionPoints[0].y, newSelectionPoints[0].z,
+					face[1], newSelectionPoints[1].x, newSelectionPoints[1].y, newSelectionPoints[1].z,
+					face[2], newSelectionPoints[2].x, newSelectionPoints[2].y, newSelectionPoints[2].z
 				);
 				break; }
 			case Window::SEL_POINT: {
@@ -827,18 +984,10 @@ void Scene::RemoveSelectedGeometry() {
 	}
 
 	// If any geometry was modified, update the scene
-	if (bDirtyScene)
-		UpdateGeometryAfterModification();
-}
-
-// Update geometry after modification (rebuild octrees, update rendering, etc.)
-void Scene::UpdateGeometryAfterModification() {
-	// Clear the selection since geometry has changed
-	window.GetSelectionController().clearSelection();
-	// Update rendering data
-	window.UploadRenderData();
-	// Request window attention
-	window.RequestAttention();
+	if (bDirtyScene) {
+		geometryModified.store(true);
+		window.UploadRenderData();
+	}
 }
 
 // Set the ROI (region of interest) based on the current selection

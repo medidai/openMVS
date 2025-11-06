@@ -245,8 +245,8 @@ void Scene::RemoveSelectedGeometry() {
         scene.mesh.RemoveFaces(selectedIndices);
     }
     
-    // Rebuild octrees and update rendering
-    updateGeometryAfterModification();
+    // Update rendering
+    window.UploadRenderData();
 }
 ```
 
