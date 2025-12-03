@@ -111,7 +111,11 @@ public:
 	Planef EstimateGroundPlane(const ImageArr& images, float planeThreshold=0, const String& fileExportPlane="") const;
 
 	bool Load(const String& fileName);
+	bool LoadPLY(const String& fileName);
+	bool LoadGLTF(const String& fileName, bool bBinary);
 	bool Save(const String& fileName, bool bViews=false, bool bLegacyTypes=false, bool bBinary=true) const;
+	bool SavePLY(const String& fileName, bool bViews=false, bool bLegacyTypes=false, bool bBinary=true) const;
+	bool SaveGLTF(const String& fileName, bool bBinary) const;
 	bool SaveNViews(const String& fileName, uint32_t minViews, bool bLegacyTypes=false, bool bBinary=true) const;
 	bool SaveWithScale(const String& fileName, const ImageArr& images, float scaleMult, bool bLegacyTypes=false, bool bBinary=true) const;
 
