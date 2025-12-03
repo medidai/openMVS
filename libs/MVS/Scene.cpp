@@ -529,36 +529,15 @@ bool Scene::Import(const String& fileName)
 		Release();
 		return LoadDMAP(fileName);
 	}
-	if (ext == _T(".obj") || ext == _T(".gltf") || ext == _T(".glb")) {
-		// import mesh from obj/gltf file
-		Release();
+	if (ext == _T(".obj")) {
+		// import mesh from obj file
 		return mesh.Load(fileName);
 	}
-	if (ext == _T(".ply")) {
-		// import point-cloud/mesh from ply file
-		Release();
-		int nVertices(0), nFaces(0);
-		{
-		PLY ply;
-		if (!ply.read(fileName)) {
-			DEBUG_EXTRA("error: invalid PLY file");
-			return false;
-		}
-		for (int i = 0; i < ply.get_elements_count(); ++i) {
-			int elem_count;
-			LPCSTR elem_name = ply.setup_element_read(i, &elem_count);
-			if (PLY::equal_strings("vertex", elem_name)) {
-				nVertices = elem_count;
-			} else
-			if (PLY::equal_strings("face", elem_name)) {
-				nFaces = elem_count;
-			}
-		}
-		}
-		if (nVertices && nFaces)
-			return mesh.Load(fileName);
-		if (nVertices)
-			return pointcloud.Load(fileName);
+	if (ext == _T(".ply") || ext == _T(".gltf") || ext == _T(".glb")) {
+		// import point-cloud/mesh from ply/gltf file
+		if (mesh.Load(fileName))
+			return true;
+		return pointcloud.Load(fileName);
 	}
 	return false;
 } // Import

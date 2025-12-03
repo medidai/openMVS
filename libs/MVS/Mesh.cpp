@@ -1285,7 +1285,7 @@ bool Mesh::LoadPLY(const String& fileName)
 	if (vertices.empty() && faces.empty())
 		return true;
 	if (vertices.empty() || faces.empty()) {
-		DEBUG_EXTRA("error: invalid mesh file");
+		Release();
 		return false;
 	}
 
@@ -1441,6 +1441,20 @@ bool Mesh::LoadGLTF(const String& fileName, bool bBinary)
 		if (!warn.empty())
 			DEBUG("warning: %s", warn.c_str());
 	}
+
+	// check if the model contains any mesh
+	bool bHasMesh = false;
+	for (const tinygltf::Mesh& gltfMesh : gltfModel.meshes) {
+		for (const tinygltf::Primitive& gltfPrimitive : gltfMesh.primitives) {
+			if (gltfPrimitive.mode == TINYGLTF_MODE_TRIANGLES) {
+				bHasMesh = true;
+				break;
+			}
+		}
+		if (bHasMesh) break;
+	}
+	if (!bHasMesh)
+		return false;
 
 	// parse model
 	for (const tinygltf::Mesh& gltfMesh : gltfModel.meshes) {

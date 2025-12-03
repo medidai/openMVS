@@ -41,6 +41,7 @@
 #if defined(_MSC_VER)
 #pragma warning (pop)
 #endif
+#include <opencv2/core/eigen.hpp>
 #endif
 
 
