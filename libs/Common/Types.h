@@ -1061,6 +1061,7 @@ struct TPixel {
 	// set/get from default type
 	inline TPixel& set(TYPE _r, TYPE _g, TYPE _b) { r = _r; g = _g; b = _b; return *this; }
 	inline TPixel& set(const TYPE* clr) { c[0] = clr[0]; c[1] = clr[1]; c[2] = clr[2]; return *this; }
+	inline TPixel& set(TYPE _g) { r = _g; g = _g; b = _g; return *this; }
 	inline void get(TYPE& _r, TYPE& _g, TYPE& _b) const { _r = r; _g = g; _b = b; }
 	inline void get(TYPE* clr) const { clr[0] = c[0]; clr[1] = c[1]; clr[2] = c[2]; }
 	// set/get from alternative type
@@ -1184,6 +1185,7 @@ struct TColor {
 	// set/get from default type
 	inline TColor& set(TYPE _r, TYPE _g, TYPE _b, TYPE _a=ColorType<TYPE>::ONE) { r = _r; g = _g; b = _b; a = _a; return *this; }
 	inline TColor& set(const TYPE* clr) { c[0] = clr[0]; c[1] = clr[1]; c[2] = clr[2]; c[3] = clr[3]; return *this; }
+	inline TColor& set(TYPE _g) { r = _g; g = _g; b = _g; return *this; }
 	inline void get(TYPE& _r, TYPE& _g, TYPE& _b, TYPE& _a) const { _r = r; _g = g; _b = b; _a = a; }
 	inline void get(TYPE* clr) const { clr[0] = c[0]; clr[1] = c[1]; clr[2] = c[2]; clr[3] = c[3]; }
 	// set/get from alternative type

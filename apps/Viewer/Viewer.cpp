@@ -30,9 +30,8 @@
  */
 
 #include "Common.h"
-#include <boost/program_options.hpp>
-
 #include "Scene.h"
+#include <boost/program_options.hpp>
 
 using namespace VIEWER;
 
@@ -153,29 +152,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		boost::program_options::options_description visible("Available options");
 		visible.add(generic).add(config);
 		GET_LOG() << _T("\n"
-			"Visualize any know point-cloud/mesh formats or MVS projects. Supply files through command line or Drag&Drop.\n"
-			"Keys:\n"
-			"\tE: export scene\n"
-			"\tR: reset scene\n"
-			"\tB: render bounds\n"
-			"\tB + Shift: togle bounds\n"
-			"\tC: render cameras\n"
-			"\tC + Shift: render camera trajectory\n"
-			"\tC + Ctrl: center scene\n"
-			"\tLeft/Right: select next camera to view the scene\n"
-			"\tS: save scene\n"
-			"\tS + Shift: rescale images and save scene\n"
-			"\tT: render mesh texture\n"
-			"\tW: render wire-frame mesh\n"
-			"\tV: render view rays to the selected point\n"
-			"\tV + Shift: render points seen by the current view\n"
-			"\tUp/Down: adjust point size\n"
-			"\tUp/Down + Shift: adjust minimum number of views accepted when displaying a point or line\n"
-			"\t+/-: adjust camera thumbnail transparency\n"
-			"\t+/- + Shift: adjust camera cones' length\n"
-			"\t+/- + Ctrl: adjust camera FOV\n"
-			"\t+/- + Alt: adjust points confidence visibility threshold\n"
-			"\n")
+			"Visualize any know point-cloud/mesh formats or MVS projects. Supply files through command line or Drag&Drop.\n")
 			<< visible;
 	}
 	if (!OPT::strExportType.empty())
