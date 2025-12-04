@@ -39,6 +39,12 @@
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 #endif
+
+#ifdef __APPLE__
+extern "C" void OpenMVS_InstallFileHandler();
+extern "C" void OpenMVS_ConsumePendingOpenFiles(std::vector<std::string>& out);
+#endif
+
 using namespace VIEWER;
 
 Window::Window()
@@ -83,6 +89,11 @@ bool Window::Initialize(const cv::Size& size, const String& windowTitle, Scene& 
 		DEBUG("Failed to initialize GLFW");
 		return false;
 	}
+
+	#ifdef __APPLE__
+	// Install macOS file open handler after GLFW initializes
+	OpenMVS_InstallFileHandler();
+	#endif
 
 	// Set GLFW window hints for OpenGL 3.3 Core Profile
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -269,6 +280,16 @@ void Window::Run() {
 			selectionController->update(deltaTime);
 			break;
 		}
+
+		#ifdef __APPLE__
+		// Check for files requested to open by Finder and open first
+		{
+			std::vector<std::string> pending;
+			OpenMVS_ConsumePendingOpenFiles(pending);
+			if (!pending.empty())
+				GetScene().Open(pending.front());
+		}
+		#endif
 
 		// Process events
 		if (renderOnlyOnChange)
@@ -738,16 +759,18 @@ void Window::HandleKeyboard(int key, int action, int mods) {
 void Window::HandleFileDrop(int count, const char** paths) {
 	if (count > 0) {
 		// Handle first dropped file
-		std::string filename(paths[0]);
-
+		String filename(paths[0]);
 		// Check file extension to determine if it's a scene or geometry file
-		std::string ext = filename.substr(filename.find_last_of('.') + 1);
-		std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-		if (ext == "mvs" || ext == "pmvs" || ext == "nvm" || ext == "sfm") {
+		String ext = Util::getFileExt(filename).ToLower();
+		if (ext == "mvs" || ext == "sfm" || ext == "dmap") {
 			// Scene file
-			GetScene().Open(filename, "");
-		} else if (ext == "ply" || ext == "obj" || ext == "off") {
+			String geometryFilename;
+			if (count > 1) {
+				// Use second dropped file as geometry file if available
+				geometryFilename = String(paths[1]);
+			}
+			GetScene().Open(filename, geometryFilename);
+		} else if (ext == "ply" || ext == "obj" || ext == "off" || ext == "gltf" || ext == "glb") {
 			// Geometry file
 			GetScene().Open(filename, "");
 		} else {

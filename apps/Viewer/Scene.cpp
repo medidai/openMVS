@@ -519,8 +519,8 @@ bool Scene::Export(const String& _fileName, const String& exportType, bool bView
 	String lastFileName;
 	const String fileName(!_fileName.empty() ? _fileName : sceneName);
 	const String baseFileName(Util::getFileFullName(fileName));
-	const bool bPoints(scene.pointcloud.Save(lastFileName=(baseFileName+_T("_pointcloud.ply")), nArchiveType==ARCHIVE_MVS && bViews));
-	const bool bMesh(scene.mesh.Save(lastFileName=(baseFileName+_T("_mesh")+(!exportType.empty()?exportType.c_str():(Util::getFileExt(fileName)==_T(".obj")?_T(".obj"):_T(".ply")))), cList<String>(), true));
+	const bool bPoints(scene.pointcloud.Save(lastFileName=(baseFileName+_T("_pointcloud")+(!exportType.empty()?exportType.c_str():(Util::getFileExt(fileName)==_T(".glb")?_T(".glb"):_T(".ply")))), nArchiveType==ARCHIVE_MVS && bViews));
+	const bool bMesh(scene.mesh.Save(lastFileName=(baseFileName+_T("_mesh")+(!exportType.empty()?exportType.c_str():(Util::getFileExt(fileName)==_T(".obj")?_T(".obj"):_T(".ply")))), {}, true));
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	if (VERBOSITY_LEVEL > 2 && (bPoints || bMesh))
 		scene.ExportCamerasMLP(Util::getFileFullName(lastFileName)+_T(".mlp"), lastFileName);
@@ -847,9 +847,9 @@ void Scene::OnCastRay(const Point2f& screenPos, const Ray3d& ray, int button, in
 								continue;
 							}
 							const MVS::Image& imageData = scene.images[idxImage];
-							const Point2 x(imageData.camera.TransformPointW2I(Cast<REAL>(window.selectionPoints[0])));
+							const Point3 x(imageData.camera.TransformPointW2I3(Cast<REAL>(window.selectionPoints[0])));
 							const float conf = scene.pointcloud.pointWeights.empty() ? 0.f : scene.pointcloud.pointWeights[newSelectionIdx][v];
-							strViews += String::FormatString("\n\t\t%s (%.2f %.2f pixel, %.2f conf)", Util::getFileNameExt(imageData.name).c_str(), x.x, x.y, conf);
+							strViews += String::FormatString("\n\t\t%s (%.2f %.2f pixel, %.2f depth, %.2f conf)", Util::getFileNameExt(imageData.name).c_str(), x.x, x.y, x.z, conf);
 						}
 						return strViews;
 					}().c_str()

@@ -37,6 +37,10 @@ endif()
 if(MSVC)
 	create_rc_files(${VIEWER_NAME} "${CMAKE_CURRENT_SOURCE_DIR}/Viewer.ico")
 	FILE(GLOB LIBRARY_FILES_C "*.cpp" "${CMAKE_CURRENT_BINARY_DIR}/*.rc")
+elseif(APPLE)
+	FILE(GLOB LIBRARY_FILES_C "*.cpp")
+	FILE(GLOB OBJC_MM_FILES "*.mm")
+	list(APPEND LIBRARY_FILES_C ${OBJC_MM_FILES})
 else()
 	FILE(GLOB LIBRARY_FILES_C "*.cpp")
 endif()
@@ -45,6 +49,12 @@ FILE(GLOB SHADERS_LIBRARY_FILES "shaders/*.*")
 SOURCE_GROUP("Shaders" FILES ${SHADERS_LIBRARY_FILES})
 
 cxx_executable_with_flags(${VIEWER_NAME} "Apps" "${cxx_default}" "MVS;glad::glad;${GLFW_STATIC_LIBRARIES};${glfw3_LIBRARY};${GLFW3_LIBRARY};glfw;imgui::imgui" ${LIBRARY_FILES_C} ${LIBRARY_FILES_H} ${SHADERS_LIBRARY_FILES})
+
+# On macOS, link Cocoa explicitly for our ObjC++ bridge and disable PCH for .mm
+if(APPLE)
+    set_source_files_properties(${OBJC_MM_FILES} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    target_link_libraries(${VIEWER_NAME} "-framework Cocoa")
+endif()
 
 # Build the Viewer as a GUI application on platforms that support it so
 # launching from the desktop does not open or attach a console/terminal.

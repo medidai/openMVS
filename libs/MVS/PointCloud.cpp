@@ -949,6 +949,8 @@ void PointCloud::PrintStatistics(const Image* pImages, const OBB3f* pObb) const
 			);
 		}
 	}
+	if (pointViews.empty() && normals.empty() && pointWeights.empty() && colors.empty())
+		return;
 	String strViews;
 	if (!pointViews.empty()) {
 		// print views distribution

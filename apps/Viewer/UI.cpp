@@ -1180,9 +1180,9 @@ void UI::ShowHelpDialog() {
 
 		// File Formats
 		ImGui::TextColored(ImVec4(1.f, 0.9f, 0.6f, 1.f), "Supported Formats:");
-		ImGui::Text("  Scene files:        .mvs, .dmap, .ply");
-		ImGui::Text("  Geometry files:     .ply, .obj");
-		ImGui::Text("  Export formats:     .ply, .obj");
+		ImGui::Text("  Scene files:        .mvs, .sfm, .dmap");
+		ImGui::Text("  Geometry files:     .ply, .obj, .gltf, .glb");
+		ImGui::Text("  Export formats:     .ply, .obj, .gltf, .glb");
 		ImGui::Separator();
 
 		// Tips
@@ -1219,7 +1219,8 @@ void UI::ShowExportDialog(Scene& scene) {
 
 		static int exportFormat = 0;
 		static bool bExportViews = true;
-		const char* formatOptions[] = { "PLY Point Cloud", "PLY Mesh", "OBJ Mesh", "GLTF Mesh" };
+		const char* formatOptions[] = { "PLY Point Cloud", "GLTF Point Cloud", "PLY Mesh", "OBJ Mesh", "GLTF Mesh" };
+		const char* formatExt[] = { ".ply", ".glb", ".ply", ".obj", ".glb" };
 		ImGui::Combo("Export Format", &exportFormat, formatOptions, IM_ARRAYSIZE(formatOptions));
 
 		ImGui::Separator();
@@ -1231,6 +1232,7 @@ void UI::ShowExportDialog(Scene& scene) {
 
 		switch (exportFormat) {
 		case 0: // PLY Point Cloud
+		case 1: // GLTF Point Cloud
 			if (hasPointCloud) {
 				ImGui::Text("✓ Point cloud: %zu points", mvs_scene.pointcloud.points.size());
 				if (!mvs_scene.pointcloud.pointViews.empty()) {
@@ -1248,9 +1250,9 @@ void UI::ShowExportDialog(Scene& scene) {
 				ImGui::TextColored(ImVec4(1.f, 0.6f, 0.6f, 1.f), "⚠ No point cloud data to export");
 			}
 			break;
-		case 1: // PLY Mesh
-		case 2: // OBJ Mesh
-		case 3: // GLTF Mesh
+		case 2: // PLY Mesh
+		case 3: // OBJ Mesh
+		case 4: // GLTF Mesh
 			if (hasMesh) {
 				ImGui::Text("✓ Mesh: %u vertices, %u faces", mvs_scene.mesh.vertices.size(), mvs_scene.mesh.faces.size());
 				if (!mvs_scene.mesh.faceTexcoords.empty() && !mvs_scene.mesh.texturesDiffuse.empty())
@@ -1265,28 +1267,18 @@ void UI::ShowExportDialog(Scene& scene) {
 
 		ImGui::Separator();
 
-		bool canExport = (exportFormat == 0 && hasPointCloud) || ((exportFormat == 1 || exportFormat == 2 || exportFormat == 3) && hasMesh);
-
+		bool canExport = ((exportFormat == 0 || exportFormat == 1) && hasPointCloud) ||
+			((exportFormat == 2 || exportFormat == 3 || exportFormat == 4) && hasMesh);
 		if (ImGui::Button("Export...", ImVec2(120, 0)) && canExport) {
 			String filename;
 			if (ShowSaveFileDialog(filename)) {
-				// Determine export type based on format selection
-				String exportType;
-				switch (exportFormat) {
-				case 0: exportType = ".ply"; break;
-				case 1: exportType = ".ply"; break;
-				case 2: exportType = ".obj"; break;
-				case 3: exportType = ".glb"; break;
-				}
-
 				// Ensure the filename has the correct extension
 				String baseFileName = Util::getFileFullName(filename);
-				String finalFileName = baseFileName + exportType;
-				scene.Export(finalFileName, exportType, bExportViews);
+				String finalFileName = baseFileName + formatExt[exportFormat];
+				scene.Export(finalFileName, formatExt[exportFormat], bExportViews);
 			}
 			showExportDialog = false;
 		}
-
 		if (!canExport) {
 			ImGui::SameLine();
 			ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.f), "(Export disabled - no compatible data)");
@@ -2810,10 +2802,11 @@ bool UI::ShowOpenFileDialog(String& filename, String& geometryFilename) {
 			WORKING_FOLDER_FULL,                        // initial path (absolute)
 			{
 				"OpenMVS Scene Files", "*.mvs",
-				"Mesh / Point Cloud Files", "*.ply", 
-				"Mesh Files", "*.obj",
-				"Mesh Files", "*.glb",
-				"Depth Map Files", "*.dmap",
+				"OpenMVS Depth Map Files", "*.dmap",
+				"PLY Mesh / Point Cloud Files", "*.ply", 
+				"GLTF Mesh / Point Cloud Files", "*.gltf",
+				"GLB Mesh / Point Cloud Files", "*.glb",
+				"OBJ Mesh Files", "*.obj",
 				"All Files", "*"
 			},                                          // filters
 			pfd::opt::multiselect                       // options
@@ -2843,9 +2836,10 @@ bool UI::ShowSaveFileDialog(String& filename) {
 			WORKING_FOLDER_FULL,                        // initial directory (like open dialog)
 			{
 				"OpenMVS Scene Files", "*.mvs",
-				"Mesh / Point Cloud Files", "*.ply",
-				"Mesh Files", "*.obj",
-				"Mesh Files", "*.glb",
+				"PLY Mesh / Point Cloud Files", "*.ply",
+				"GLTF Mesh / Point Cloud Files", "*.gltf",
+				"GLB Mesh / Point Cloud Files", "*.glb",
+				"OBJ Mesh Files", "*.obj",
 				"All Files", "*"
 			},                                          // filters
 			pfd::opt::none                              // options

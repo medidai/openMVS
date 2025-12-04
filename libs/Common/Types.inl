@@ -2374,7 +2374,7 @@ template <typename TYPE>
 template <typename SAMPLER, typename INTERTYPE>
 INTERTYPE TImage<TYPE>::sample(const SAMPLER& sampler, const TPoint2<typename SAMPLER::Type>& pt) const
 {
-	return Sampler::Sample< TImage<TYPE>, SAMPLER, TPoint2<typename SAMPLER::Type>, INTERTYPE >(*this, sampler, pt);
+	return Sampler::Sample< INTERTYPE, INTERTYPE, TImage<TYPE>, SAMPLER, TPoint2<typename SAMPLER::Type> >(*this, sampler, pt);
 }
 
 // convert color image to gray

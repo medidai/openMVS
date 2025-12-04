@@ -6,5 +6,5 @@ Exec=@EXEC_PATH@ %F
 Icon=@ICON_NAME@
 Terminal=false
 Categories=Graphics;Science;
-MimeType=@MIME_TYPE@;
+MimeType=application/x-openmvs-mvs;application/x-openmvs-dmap;model/ply;model/obj;model/gltf+json;model/gltf-binary;
 Version=@OpenMVS_VERSION@

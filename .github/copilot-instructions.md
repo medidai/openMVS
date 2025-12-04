@@ -69,6 +69,21 @@ typedef SEACAVE::String String;    // String type
 ```
 Most of OpenMVS code uses custom point and matrix types derived from OpenCV types, e.g., `SEACAVE::Point3f`, `SEACAVE::Matrix4f`. Hoewever, some components use Eigen3 types, e.g. `SEACAVE::AABB3d` and `SEACAVE::Ray3d` classes. There custom types support convertion operation to and from Eigen3 types.
 
+SEACAVE::cList template class is a custom vector implementation used throughout the codebase, fully compatible with std::vector. It provides additional functionality such as using or not the constructor for the elements, custom size type, and additional operations like GetMean, GetMedian, Sort, etc.
+
+Often used is also FOREACH macro for iterating over any vector-like container:
+```cpp
+FOREACH(index, container) {
+    auto& element = container[index];
+    // Do something with element
+}
+```
+Similarly, RFOREACH macro iterates in reverse order.
+
+TD_TIMER_START() and TD_TIMER_GET_FMT() macros are used for performance measurements. TD_TIMER_START() (similarly TD_TIMER_STARTD() paird with DEBUG() prints) starts a timer, and TD_TIMER_GET_FMT() returns a formatted string with the elapsed time since the timer was started.
+
+VERBOSE() macro is used for general logging messages. It works similarly to DEBUG() macro, but is intended for critical information, as it always prints regardless of debug level. DEBUG_EXTRA() and DEBUG_ULTIMATE() macros are used for more verbose logging, with DEBUG_ULTIMATE() being the most verbose.
+
 ### Configuration
 - Build-time config in `ConfigLocal.h` (generated)
 - Runtime options via boost::program_options pattern
