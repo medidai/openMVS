@@ -598,7 +598,12 @@ public:
 	template <typename T> inline TMatrix(const cv::Point3_<T>& rhs) : Base(rhs.x, rhs.y, rhs.z) {}
 	inline TMatrix(const cv::Mat& rhs) : Base(rhs) {}
 	#ifdef _USE_EIGEN
-	inline TMatrix(const EMat& rhs) { operator EMatMap () = rhs; }
+	template <typename Derived, typename std::enable_if<(
+		Derived::RowsAtCompileTime == m && Derived::ColsAtCompileTime == n
+	), int>::type = 0>
+	inline TMatrix(const Eigen::MatrixBase<Derived>& rhs) {
+		operator EMatMap () = rhs;
+	}
 	#endif
 
 	TMatrix(TYPE v0); //!< 1x1 matrix
@@ -635,7 +640,13 @@ public:
 	template <typename T> inline TMatrix& operator = (const cv::Matx<T,m,n>& rhs) { Base::operator = (rhs); return *this; }
 	inline TMatrix& operator = (const cv::Mat& rhs) { Base::operator = (rhs); return *this; }
 	#ifdef _USE_EIGEN
-	inline TMatrix& operator = (const EMat& rhs) { operator EMatMap () = rhs; return *this; }
+	template <typename Derived, typename std::enable_if<(
+		Derived::RowsAtCompileTime == m && Derived::ColsAtCompileTime == n
+	), int>::type = 0>
+	inline TMatrix& operator = (const Eigen::MatrixBase<Derived>& rhs) {
+		operator EMatMap () = rhs;
+		return *this;
+	}
 	#endif
 
 	inline bool IsEqual(const Base&) const;
@@ -652,6 +663,8 @@ public:
 	#ifdef _USE_EIGEN
 	// Access point as Eigen equivalent
 	inline operator EMat () const { return CEMatMap((const TYPE*)val); }
+	template <int N = n>
+	inline operator typename std::enable_if<(N>1), Eigen::Matrix<TYPE,m,n> >::type () const { return CEMatMap((const TYPE*)val); }
 	// Access point as Eigen::Map equivalent
 	inline operator CEMatMap() const { return CEMatMap((const TYPE*)val); }
 	inline operator EMatMap () { return EMatMap((TYPE*)val); }
@@ -874,6 +887,7 @@ public:
 	#ifdef _USE_EIGEN
 	// Access point as Eigen equivalent
 	inline operator EMat () const { return CEMatMap(getData(), rows, cols); }
+	inline operator Eigen::Matrix<TYPE,Eigen::Dynamic,Eigen::Dynamic> () const { return CEMatMap(getData(), rows, cols); }
 	// Access point as Eigen::Map equivalent
 	inline operator const CEMatMap () const { return CEMatMap(getData(), rows, cols); }
 	inline operator EMatMap () { return EMatMap(getData(), rows, cols); }

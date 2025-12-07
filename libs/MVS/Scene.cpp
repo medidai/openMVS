@@ -2013,7 +2013,7 @@ bool Scene::AlignTo(const Scene& scene)
 		DEBUG("error: the two scenes differ in number of cameras");
 		return false;
 	}
-	CLISTDEF0(Point3) points, pointsRef;
+	Point3Arr points, pointsRef;
 	FOREACH(idx, images) {
 		const Image& image = images[idx];
 		if (!image.IsValid())
@@ -2024,8 +2024,7 @@ bool Scene::AlignTo(const Scene& scene)
 		points.emplace_back(image.camera.C);
 		pointsRef.emplace_back(imageRef.camera.C);
 	}
-	Matrix4x4 transform;
-	SimilarityTransform(points, pointsRef, transform);
+	Matrix4x4 transform = SimilarityTransform(points, pointsRef);
 	Matrix3x3 rotation; Point3 translation; REAL scale;
 	DecomposeSimilarityTransform(transform, rotation, translation, scale);
 	Transform(rotation, translation, scale);
