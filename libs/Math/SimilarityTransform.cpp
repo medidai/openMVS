@@ -38,8 +38,8 @@
 
 // S T R U C T S ///////////////////////////////////////////////////
 
-// find the similarity transform that best aligns the given two sets of corresponding 3D points
-bool SEACAVE::SimilarityTransform(const CLISTDEF0(Point3)& points, const CLISTDEF0(Point3)& pointsRef, Matrix4x4& transform)
+// compute the similarity transform that best aligns the given two sets of corresponding 3D points
+Matrix4x4 SEACAVE::SimilarityTransform(const Point3Arr& points, const Point3Arr& pointsRef)
 {
 	ASSERT(points.size() == pointsRef.size());
 	typedef Eigen::Matrix<REAL,3,Eigen::Dynamic> PointsVec;
@@ -49,8 +49,8 @@ bool SEACAVE::SimilarityTransform(const CLISTDEF0(Point3)& points, const CLISTDE
 		p.col(i) = static_cast<const Point3::EVec&>(points[i]);
 		pRef.col(i) = static_cast<const Point3::EVec&>(pointsRef[i]);
 	}
-	transform = Eigen::umeyama(p, pRef);
-	return true;
+	Matrix4x4 transform = Eigen::umeyama(p, pRef);
+	return transform;
 } // SimilarityTransform
 /*----------------------------------------------------------------*/
 

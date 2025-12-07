@@ -43,11 +43,11 @@
 
 namespace SEACAVE {
 
-// find the similarity transform that best aligns the given two sets of corresponding 3D points
-bool SimilarityTransform(const CLISTDEF0(Point3)& points, const CLISTDEF0(Point3)& pointsRef, Matrix4x4& transform);
+// compute the similarity transform that best aligns the given two sets of corresponding 3D points
+MATH_API Matrix4x4 SimilarityTransform(const Point3Arr& points, const Point3Arr& pointsRef);
 
 // decompose similarity transform into rotation, translation and scale
-void DecomposeSimilarityTransform(const Matrix4x4& transform, Matrix3x3& R, Point3& t, REAL& s);
+MATH_API void DecomposeSimilarityTransform(const Matrix4x4& transform, Matrix3x3& R, Point3& t, REAL& s);
 /*----------------------------------------------------------------*/
 
 } // namespace SEACAVE
