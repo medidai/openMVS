@@ -114,7 +114,8 @@ ConfigLibrary()
 SET(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/build/Modules)
 
 # Find required packages
-SET(OpenMVS_EXTRA_INCLUDES "")
+# Note: With modern CMake and target-based propagation, we only collect libraries in OpenMVS_EXTRA_LIBS
+# Include directories are now handled via target_include_directories in the Common library
 SET(OpenMVS_EXTRA_LIBS "")
 
 if(OpenMVS_ENABLE_IPO)
@@ -129,16 +130,21 @@ if(OpenMVS_ENABLE_IPO)
 endif()
 
 if(OpenMVS_USE_OPENMP)
+	# MAC OS ARM64 OPENMP FIX: hint Homebrew paths
+	if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+		set(OpenMP_ROOT "/opt/homebrew/opt/libomp")
+	endif()
 	FIND_PACKAGE(OpenMP QUIET)
 	if(OPENMP_FOUND)
-		SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 		SET(_USE_OPENMP TRUE)
-		# cmake only check for separate OpenMP library on AppleClang 7+
-		# https://github.com/Kitware/CMake/blob/42212f7539040139ecec092547b7d58ef12a4d72/Modules/FindOpenMP.cmake#L252
-		if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang" AND (NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS "7.0"))
-			LIST(APPEND OpenMVS_EXTRA_LIBS ${OpenMP_libomp_LIBRARY})
+		LIST(APPEND OpenMVS_EXTRA_LIBS OpenMP::OpenMP_CXX)
+		if(NOT APPLE)
+			# Apply OpenMP flags only to C/C++ compilation, not CUDA
+			# CUDA will get OpenMP support via linking with OpenMP::OpenMP_CXX
+			string(APPEND CMAKE_CXX_FLAGS " ${OpenMP_CXX_FLAGS}")
+			string(APPEND CMAKE_C_FLAGS " ${OpenMP_C_FLAGS}")
 		endif()
-		MESSAGE(STATUS "Found OpenMP " ${OpenMP_VERSION} " " ${OpenMP_LIBRARY})
+		MESSAGE(STATUS "Found OpenMP " ${OpenMP_VERSION} " " ${OpenMP_CXX_INCLUDE_DIRS})
 	else()
 		MESSAGE(STATUS "Can't find OpenMP. Continuing without it.")
 	endif()
@@ -193,8 +199,13 @@ if(OpenMVS_USE_CUDA)
 		SET(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 		SET(CMAKE_CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 		SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
-		LIST(APPEND OpenMVS_EXTRA_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
-		LIST(APPEND OpenMVS_EXTRA_LIBS ${CUDAToolkit_LIBRARIES} cuda cudart curand)
+		# Add OpenMP support to CUDA host compiler
+		if(_USE_OPENMP)
+			SET(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler ${OpenMP_CXX_FLAGS}")
+		endif()
+		# Ensure CUDA toolkit include dirs are available for all targets
+		INCLUDE_DIRECTORIES(${CUDAToolkit_INCLUDE_DIRS})
+		LIST(APPEND OpenMVS_EXTRA_LIBS ${CUDAToolkit_LIBRARIES} CUDA::cuda_driver CUDA::cudart CUDA::curand)
 		SET(_USE_CUDA TRUE)
 		MESSAGE(STATUS "Found CUDA: " ${CMAKE_CUDA_COMPILER_VERSION} " with GPU arch: " ${CMAKE_CUDA_ARCHITECTURES})
 	else()
@@ -205,7 +216,6 @@ endif()
 if(OpenMVS_USE_BREAKPAD)
 	FIND_PACKAGE(BREAKPAD QUIET)
 	if(BREAKPAD_FOUND)
-		INCLUDE_DIRECTORIES(${BREAKPAD_INCLUDE_DIRS})
 		ADD_DEFINITIONS(${BREAKPAD_DEFINITIONS})
 		SET(_USE_BREAKPAD TRUE)
 		LIST(APPEND OpenMVS_EXTRA_LIBS ${BREAKPAD_LIBS})
@@ -218,7 +228,6 @@ SET(Boost_EXTRA_COMPONENTS "")
 if(OpenMVS_USE_PYTHON)
 	FIND_PACKAGE(Python3 COMPONENTS Interpreter Development REQUIRED)
 	if(Python3_FOUND)
-		LIST(APPEND OpenMVS_EXTRA_INCLUDES ${Python3_INCLUDE_DIRS})
 		LIST(APPEND OpenMVS_EXTRA_LIBS ${Python3_LIBRARIES})
 		LIST(APPEND Boost_EXTRA_COMPONENTS python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR})
 		MESSAGE(STATUS "Python ${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR} found (include: ${Python3_INCLUDE_DIRS})")
@@ -229,8 +238,8 @@ endif()
 
 FIND_PACKAGE(Boost REQUIRED COMPONENTS iostreams program_options system serialization OPTIONAL_COMPONENTS ${Boost_EXTRA_COMPONENTS})
 if(Boost_FOUND)
-	LIST(APPEND OpenMVS_EXTRA_INCLUDES ${Boost_INCLUDE_DIRS})
 	ADD_DEFINITIONS(${Boost_DEFINITIONS})
+	LIST(APPEND OpenMVS_EXTRA_LIBS ${Boost_LIBRARIES})
 	LINK_DIRECTORIES(${Boost_LIBRARY_DIRS})
 	SET(_USE_BOOST TRUE)
 	if(OpenMVS_USE_PYTHON AND Boost_${Boost_EXTRA_COMPONENTS}_FOUND)
@@ -238,25 +247,26 @@ if(Boost_FOUND)
 	endif()
 endif()
 
-FIND_PACKAGE(Eigen3 3.4 REQUIRED)
-if(EIGEN3_FOUND)
-	LIST(APPEND OpenMVS_EXTRA_INCLUDES ${EIGEN3_INCLUDE_DIR})
-	ADD_DEFINITIONS(${EIGEN3_DEFINITIONS})
+FIND_PACKAGE(Eigen3 CONFIG REQUIRED)
+if(Eigen3_FOUND)
+	if(Eigen3_VERSION VERSION_LESS "3.4")
+		MESSAGE(FATAL_ERROR "Eigen ${Eigen3_VERSION} found, but at least 3.4 is required")
+	endif()
+	LIST(APPEND OpenMVS_EXTRA_LIBS Eigen3::Eigen)
 	SET(_USE_EIGEN TRUE)
-	MESSAGE(STATUS "Eigen ${EIGEN3_VERSION} found (include: ${EIGEN3_INCLUDE_DIR})")
+	MESSAGE(STATUS "Eigen ${Eigen3_VERSION} found")
 endif()
 
 FIND_PACKAGE(OpenCV REQUIRED)
 if(OpenCV_FOUND)
-	LIST(APPEND OpenMVS_EXTRA_INCLUDES ${OpenCV_INCLUDE_DIRS})
 	ADD_DEFINITIONS(${OpenCV_DEFINITIONS})
+	LIST(APPEND OpenMVS_EXTRA_LIBS ${OpenCV_LIBS})
 	SET(_USE_OPENCV TRUE)
-	MESSAGE(STATUS "OpenCV ${OpenCV_VERSION} found (include: ${OpenCV_INCLUDE_DIRS})")
+	MESSAGE(STATUS "OpenCV ${OpenCV_VERSION} found")
 else()
 	MESSAGE(STATUS "Can't find OpenCV. Please specify OpenCV directory using OpenCV_DIR variable")
 endif()
 
-LIST(REMOVE_DUPLICATES OpenMVS_EXTRA_INCLUDES)
 LIST(REMOVE_DUPLICATES OpenMVS_EXTRA_LIBS)
 
 # Set defines
@@ -278,10 +288,6 @@ endif()
 if(OpenMVS_USE_OPENCV_JPEGXL_WRITE)
 	SET(_USE_OPENCV_JPEGXL_WRITE TRUE)
 endif()
-
-INCLUDE_DIRECTORIES(${OpenMVS_EXTRA_INCLUDES})
-INCLUDE_DIRECTORIES(${OpenMVS_SOURCE_DIR})
-INCLUDE_DIRECTORIES(${CMAKE_BINARY_DIR})
 
 # Add modules
 ADD_SUBDIRECTORY(libs)
@@ -316,7 +322,7 @@ INCLUDE(CMakePackageConfigHelpers)
 write_basic_package_version_file("${PROJECT_BINARY_DIR}/OpenMVSConfigVersion.cmake"
 	VERSION ${OpenMVS_VERSION}
 	COMPATIBILITY AnyNewerVersion)
-SET(INSTALL_INCLUDE_DIR_IN ${INSTALL_INCLUDE_DIR_PREFIX} ${OpenMVS_EXTRA_INCLUDES})
+# Note: Include paths are handled via imported targets and target_include_directories
 SET(INSTALL_CMAKE_DIR_IN ${INSTALL_CMAKE_DIR_PREFIX})
 configure_package_config_file("${CMAKE_CURRENT_SOURCE_DIR}/build/Templates/OpenMVSConfig.cmake.in"
 	"${PROJECT_BINARY_DIR}/OpenMVSConfig.cmake"

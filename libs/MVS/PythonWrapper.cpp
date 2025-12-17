@@ -39,7 +39,9 @@
 #include "Scene.h"
 #undef _LIB
 #define _USRDLL
+#ifndef BOOST_PYTHON_STATIC_LIB
 #define BOOST_PYTHON_STATIC_LIB
+#endif
 #include <boost/python.hpp>
 
 
