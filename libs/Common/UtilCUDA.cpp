@@ -184,7 +184,7 @@ CUresult initDevice(int deviceID)
 		return CUDA_ERROR_INVALID_DEVICE;
 	}
 	devices.emplace_back(device);
-	checkCudaError(cuCtxCreate(&devices.back().ctx, CU_CTX_SCHED_AUTO, device.ID));
+	checkCudaError(cuCtxCreate(&devices.back().ctx, nullptr, CU_CTX_SCHED_AUTO, device.ID));
 
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	char name[2048];
