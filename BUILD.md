@@ -26,6 +26,9 @@ The dependencies can be fetched and built automatically using `vcpkg` on all maj
 The latest pre-built stable binaries can be download from [here](https://github.com/cdcseacave/openMVS_sample/releases/latest).
 
 ```
+#Install necesary system packages, for ex. on Debian OS:
+sudo apt install git cmake autoconf autoconf-archive automake libtool bison gfortran pkg-config libxi-dev libx11-dev libxft-dev libxtst-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev xorg-dev libgl-dev libglu1-mesa-dev nasm
+
 #Clone OpenMVS
 git clone --recurse-submodules https://github.com/cdcseacave/openMVS.git
 
@@ -72,7 +75,7 @@ Python API
 The Python API can be enable by setting the `OpenMVS_USE_PYTHON` option to `ON` when running `cmake`. The Python API is built as a shared library and can be used in any Python project. Example:
 ```
 import pyOpenMVS
-    
+
 def run_mvs():
     # set the working folder; all files used next are relative to this folder (optional)
     pyOpenMVS.set_working_folder("folder/containing/the/scene")

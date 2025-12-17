@@ -666,6 +666,12 @@ macro(optimize_default_compiler_settings)
 	  set(BUILD_EXTRA_FLAGS "${BUILD_EXTRA_FLAGS} /Zc:__cplusplus")
 	endif()
 
+	# Fix macOS linker warnings about reducing alignment from 0x8000 to 0x4000
+	# This is caused by Eigen's alignment requirements exceeding macOS segment max alignment
+	if(APPLE)
+		set(BUILD_EXTRA_EXE_LINKER_FLAGS "${BUILD_EXTRA_EXE_LINKER_FLAGS} -Wl,-w")
+	endif()
+
 	# Extra link libs if the user selects building static libs:
 	# Android does not need these settings because they are already set by toolchain file
 	if(CMAKE_COMPILER_IS_GNUCXX AND NOT ANDROID AND NOT BUILD_SHARED_LIBS)

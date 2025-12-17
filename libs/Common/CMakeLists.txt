@@ -1,8 +1,9 @@
 # Find required packages
 FIND_PACKAGE(nanoflann REQUIRED)
+SET(COMMON_EXTRA_LIBS "")
 if(nanoflann_FOUND)
-	include_directories(${nanoflann_INCLUDE_DIRS})
-	add_definitions(${nanoflann_DEFINITIONS})
+	ADD_DEFINITIONS(${nanoflann_DEFINITIONS})
+	LIST(APPEND COMMON_EXTRA_LIBS nanoflann::nanoflann)
 	MESSAGE(STATUS "nanoflann ${nanoflann_VERSION} found")
 endif()
 
@@ -19,8 +20,13 @@ IF(CMAKE_VERSION VERSION_GREATER_EQUAL 3.16.0)
 	TARGET_PRECOMPILE_HEADERS(Common PRIVATE "Common.h")
 endif()
 
-# Link its dependencies
-TARGET_LINK_LIBRARIES(Common ${Boost_LIBRARIES} ${OpenCV_LIBS})
+# Add public include directories that propagate to dependent targets
+target_include_directories(Common PUBLIC
+	$<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
+)
+
+# Link its dependencies with PUBLIC visibility so they propagate
+TARGET_LINK_LIBRARIES(Common PUBLIC ${OpenMVS_EXTRA_LIBS} ${COMMON_EXTRA_LIBS})
 
 # Install
 SET_TARGET_PROPERTIES(Common PROPERTIES
