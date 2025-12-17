@@ -16,9 +16,6 @@
 // CUDA driver
 #include <cuda.h>
 
-// CUDA toolkit
-#include <cuda_runtime.h>
-
 #include <memory>
 
 

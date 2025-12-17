@@ -43,7 +43,6 @@
 #include <float.h>
 
 // CUDA toolkit
-#include <cuda_runtime.h>
 #include <math_constants.h>  // next to cuda_runtime.h
 #include <cuda_runtime_api.h>
 #include <cuda_texture_types.h>
