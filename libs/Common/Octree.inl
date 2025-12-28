@@ -227,7 +227,7 @@ inline void TOctree<ITEMARR_TYPE,TYPE,DIMS,DATA_TYPE>::Insert(const ITEMARR_TYPE
 	const POINT_TYPE center = aabb.GetCenter();
 	m_radius = aabb.GetSize().maxCoeff()/Type(2);
 	// single connected list of next item indices
-	_InsertData<Functor> insertData = {items.size(), split};
+	_InsertData<Functor> insertData {items.size(), split};
 	std::iota(insertData.successors.begin(), insertData.successors.end(), IDX_TYPE(1));
 	insertData.successors.back() = _InsertData<Functor>::NO_INDEX;
 	// setup each cell

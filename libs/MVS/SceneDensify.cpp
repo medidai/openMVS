@@ -45,8 +45,14 @@ using namespace MVS;
 #define DENSE_USE_OPENMP
 #endif
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("ScnDense"));
 
 // Dense3D data.events
 enum EVENT_TYPE {
@@ -245,7 +251,7 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 	depthData.size = viewRef.pImageData->image.size();
 
 	// initialize views
-	for (IIndex i=1; i<depthData.images.size(); ++i) {
+	for (IIndex i=1; i<depthData.images.size(); ) {
 		DepthData::ViewData& view = depthData.images[i];
 		if (loadDepthMaps > 0) {
 			// load known depth-map
@@ -256,14 +262,29 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 			NormalMap normalMap;
 			ConfidenceMap confMap;
 			ViewsMap viewsMap;
-			ImportDepthDataRaw(ComposeDepthFilePath(view.GetID(), "dmap"),
+			if (!ImportDepthDataRaw(ComposeDepthFilePath(view.GetID(), "dmap"),
 				imageFileName, IDs, imageSize, view.cameraDepthMap.K, view.cameraDepthMap.R, view.cameraDepthMap.C,
-				dMin, dMax, view.depthMap, normalMap, confMap, viewsMap, 1);
+				dMin, dMax, view.depthMap, normalMap, confMap, viewsMap, 1))
+			{
+				// neighbor depth-maps are needed during geometric-consistency iterations;
+				// some views may have failed depth estimation, so their depth-map is missing
+				VERBOSE("warning: skipping neighbor view %u (%s): cannot load depth-map '%s'",
+					view.GetID(), Util::getFileNameExt(view.pImageData->name).c_str(), ComposeDepthFilePath(view.GetID(), "dmap").c_str());
+				view.depthMap.release();
+				depthData.images.RemoveAtMove(i);
+				continue;
+			}
 			ASSERT(viewRef.image.size() == view.depthMap.size());
 		}
 		view.Init(viewRef.camera);
+		++i;
 	}
+	if (depthData.images.size() < 2) {
+		depthData.images.Release();
+		return false;
+ 	}
 
+	// initialize depth-map and normal-map for the reference image
 	if (loadDepthMaps > 0) {
 		// load known depth-map and normal-map
 		String imageFileName;
@@ -2590,3 +2611,5 @@ void Scene::PointCloudFilter(int thRemove)
 	DEBUG_EXTRA("Point-cloud filtered: %u/%u points (%d%%%%) (%s)", pointcloud.points.size(), numInitPoints, ROUND2INT((100.f*pointcloud.points.GetSize())/numInitPoints), TD_TIMER_GET_FMT().c_str());
 } // PointCloudFilter
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

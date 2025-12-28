@@ -76,8 +76,14 @@ LBPInference::EnergyType STCALL SmoothnessPotts(LBPInference::NodeID, LBPInferen
 }
 #endif
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("ScnTextr"));
 
 typedef Mesh::Vertex Vertex;
 typedef Mesh::VIndex VIndex;
@@ -507,7 +513,7 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 			rasterer.mask = DetectInvalidImageRegions(imageData.image);
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			if (VERBOSITY_LEVEL > 3)
-				cv::imwrite(String::FormatString("umask%04d.png", idxView), rasterer.mask);
+				SaveImage(rasterer.mask, String::FormatString("umask%04d.png", idxView));
 			#endif
 		}
 		rasterer.Clear();
@@ -2225,3 +2231,5 @@ bool Scene::TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsi
 	return true;
 } // TextureMesh
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

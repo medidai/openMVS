@@ -155,62 +155,6 @@ REAL Camera::DistanceSq(const Point3& X) const
 /*----------------------------------------------------------------*/
 
 
-// decomposition of projection matrix into KR[I|-C]: internal calibration ([3,3]), rotation ([3,3]) and translation ([3,1])
-// (comparable with OpenCV: normalized cv::decomposeProjectionMatrix)
-void MVS::DecomposeProjectionMatrix(const PMatrix& P, KMatrix& K, RMatrix& R, CMatrix& C)
-{
-	// extract camera center as the right null vector of P
-	const Vec4 hC(P.RightNullVector());
-	C = CMatrix(hC[0],hC[1],hC[2]) * INVERT(hC[3]);
-	// perform RQ decomposition
-	RQDecomp3x3<REAL>(cv::Mat(3,4,cv::DataType<REAL>::type,const_cast<REAL*>(P.val))(cv::Rect(0,0, 3,3)), K, R);
-	// normalize calibration matrix
-	K *= INVERT(K(2,2));
-	// ensure positive focal length
-	if (K(0,0) < 0) {
-		ASSERT(K(1,1) < 0);
-		NEGATE(K(0,0));
-		NEGATE(K(1,1));
-		NEGATE(K(0,1));
-		NEGATE(K(0,2));
-		NEGATE(K(1,2));
-		(TMatrix<REAL,2,3>&)R *= REAL(-1);
-	}
-	ASSERT(R.IsValid());
-} // DecomposeProjectionMatrix
-void MVS::DecomposeProjectionMatrix(const PMatrix& P, RMatrix& R, CMatrix& C)
-{
-	#ifndef _RELEASE
-	KMatrix K;
-	DecomposeProjectionMatrix(P, K, R, C);
-	ASSERT(K.IsEqual(Matrix3x3::IDENTITY, 1e-5));
-	#endif
-	// extract camera center as the right null vector of P
-	const Vec4 hC(P.RightNullVector());
-	C = CMatrix(hC[0],hC[1],hC[2]) * INVERT(hC[3]);
-	// get rotation
-	const cv::Mat mP(3,4,cv::DataType<REAL>::type,const_cast<REAL*>(P.val));
-	mP(cv::Rect(0,0, 3,3)).copyTo(R);
-	ASSERT(R.IsValid());
-} // DecomposeProjectionMatrix
-/*----------------------------------------------------------------*/
-
-// assemble projection matrix: P=KR[I|-C]
-void MVS::AssembleProjectionMatrix(const KMatrix& K, const RMatrix& R, const CMatrix& C, PMatrix& P)
-{
-	// compute temporary matrices
-	cv::Mat mP(3,4,cv::DataType<REAL>::type,const_cast<REAL*>(P.val));
-	cv::Mat M(mP, cv::Rect(0,0, 3,3));
-	cv::Mat(K * R).copyTo(M); //3x3
-	mP.col(3) = M * cv::Mat(-C); //3x1
-} // AssembleProjectionMatrix
-void MVS::AssembleProjectionMatrix(const RMatrix& R, const CMatrix& C, PMatrix& P)
-{
-	Eigen::Map<Matrix3x3::EMat,0,Eigen::Stride<4,0> >(P.val) = (const Matrix3x3::EMat)R;
-	Eigen::Map<Point3::EVec,0,Eigen::Stride<0,4> >(P.val+3) = ((const Matrix3x3::EMat)R) * (-((const Point3::EVec)C));
-} // AssembleProjectionMatrix
-/*----------------------------------------------------------------*/
-
 // compute the focus of attention of a set of cameras; only cameras
 // that have the focus of attention in front of them are considered
 Point3 MVS::ComputeCamerasFocusPoint(const CameraArr& cameras, const Point3* pInitialFocus)
@@ -240,7 +184,7 @@ Point3 MVS::ComputeCamerasFocusPoint(const CameraArr& cameras, const Point3* pIn
 	for (const Camera& camera: cameras) {
 		if (!camera.IsInFront(focus))
 			continue;
-		// https://en.wikipedia.org/wiki/Line–line_intersection#In_more_than_two_dimensions
+		// https://en.wikipedia.org/wiki/Lineï¿½line_intersection#In_more_than_two_dimensions
 		const Point3::EVec dir = camera.Direction();
 		const Matrix3x3::EMat m(Matrix3x3::EMat::Identity() - dir * dir.transpose());
 		const Matrix3x3::EMat mTm(m.transpose() * m);

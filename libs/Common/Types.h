@@ -368,6 +368,7 @@ template <typename TYPE, int m, int n> class TMatrix;
 template <typename TYPE, int DIMS> class TAABB;
 template <typename TYPE, int DIMS> class TRay;
 template <typename TYPE, int DIMS> class TPlane;
+template <typename TYPE> class TPoint3;
 
 // 2D point struct
 template <typename TYPE>
@@ -422,7 +423,10 @@ public:
 
 	// iterator base access to enable range-based for loops
 	inline const TYPE* begin() const { return &x; }
-	inline const TYPE* end() const { return &x+3; }
+	inline const TYPE* end() const { return &x+2; }
+
+	// get homogeneous coordinates
+	inline TPoint3<TYPE> homogeneous() const { return TPoint3<TYPE>(x, y, TYPE(1)); }
 
 	// 1D element access
 	inline const TYPE& operator ()(int i) const { ASSERT(i>=0 && i<2); return ptr()[i]; }
@@ -449,6 +453,10 @@ public:
 	inline operator CEVecMap () const { return CEVecMap(ptr()); }
 	inline operator EVecMap () { return EVecMap(ptr()); }
 	#endif
+
+	// cross product
+	inline TYPE cross(const Base& v) const { return x * v.y - y * v.x; }
+	inline TYPE cross(const Vec& v) const { return x * v(1) - y * v(0); }
 
 	#ifdef _USE_BOOST
 	// serialize
@@ -548,6 +556,12 @@ public:
 	// rotate point using the given parametrized rotation (axis-angle)
 	inline void RotateAngleAxis(const TPoint3& rot) { return (*this) = RotateAngleAxis((*this), rot); }
 	static TPoint3 RotateAngleAxis(const TPoint3& X, const TPoint3& rot);
+
+	// dot/cross product
+	inline TYPE dot(const Base& v) const { return x*v.x + y*v.y + z*v.z; }
+	inline TYPE dot(const Vec& v) const { return x*v(0) + y*v(1) + z*v(2); }
+	inline TPoint3 cross(const Base& v) const { return TPoint3(y*v.z - z*v.y, z*v.x - x*v.z, x*v.y - y*v.x); }
+	inline TPoint3 cross(const Vec& v) const { return TPoint3(y*v(2)-z*v(1), z*v(0)-x*v(2), x*v(1)-y*v(0)); }
 
 	#ifdef _USE_BOOST
 	// serialize
@@ -1373,6 +1387,7 @@ typedef TImage<float> Image32F;
 typedef TImage<double> Image64F;
 typedef TImage<Pixel8U> Image8U3;
 typedef TImage<Color8U> Image8U4;
+typedef TImage<Point2f> Image32F2;
 typedef TImage<Pixel32F> Image32F3;
 typedef TImage<Color32F> Image32F4;
 /*----------------------------------------------------------------*/
@@ -1403,15 +1418,17 @@ public:
 	inline ~TBitMatrix() { delete[] data; }
 
 	inline void create(int _rows, int _cols=1) {
-		if (!empty() && rows == _rows && cols == _cols)
-			return;
+		const int len(length());
 		rows = _rows; cols = _cols;
+		const int newLen = length();
+		if (!empty() && len == newLen)
+			return;
 		if (rows <=0 || cols <= 0) {
 			release();
 			return;
 		}
 		delete[] data;
-		data = new Type[length()];
+		data = new Type[newLen];
 	}
 	inline void create(const Size& sz) { create(sz.height, sz.width); }
 	inline void release() { delete[] data; data = NULL; }
@@ -1421,6 +1438,34 @@ public:
 		tmp.i = rows; rows = m.rows; m.rows = tmp.i;
 		tmp.i = cols; cols = m.cols; m.cols = tmp.i;
 		tmp.d = data; data = m.data; m.data = tmp.d;
+	}
+	inline void copyTo(cv::OutputArray _dst) const {
+		_dst.create(rows, cols, CV_8U);
+		cv::Mat dst(_dst.getMat());
+		for (int i=0; i<rows; ++i)
+			for (int j=0; j<cols; ++j)
+				dst.at<uint8_t>(i,j) = (isSet(i,j) ? uint8_t(255) : uint8_t(0));
+	}
+
+	inline TBitMatrix& operator = (const TBitMatrix& rhs) {
+		create(rhs.rows, rhs.cols);
+		if (!empty())
+			memcpy(data, rhs.data, sizeof(Type)*length());
+		return *this;
+	}
+	inline TBitMatrix& operator = (cv::InputArray _rhs) {
+		if (_rhs.dims() == 2 && _rhs.channels() == 1) {
+			const cv::Mat rhs(_rhs.getMat());
+			ASSERT(rhs.depth() == CV_8U);
+			create(rhs.rows, rhs.cols);
+			for (int i=0; i<rows; ++i)
+				for (int j=0; j<cols; ++j)
+					set(i,j, rhs.at<uint8_t>(i,j)!=0);
+		} else {
+			release();
+			ASSERT("TBitMatrix: invalid cv::InputArray type!" == NULL);
+		}
+		return *this;
 	}
 
 	inline void And(const TBitMatrix& m) {
@@ -1549,40 +1594,47 @@ struct TAccumulator {
 
 	AccumType value;
 	WeightType weight;
+	unsigned count;
 
-	inline TAccumulator() : value(INITTO(static_cast<Type*>(NULL), 0)), weight(0) {}
-	inline TAccumulator(const Type& v, const WeightType& w) : value(v), weight(w) {}
-	inline bool IsEmpty() const { return weight <= 0; }
+	inline TAccumulator();
+	inline TAccumulator(const Type& v, const WeightType& w) : value(v), weight(w), count(1) {}
+	inline bool IsEmpty() const { ASSERT((weight > 0 && count > 0) || (weight <= 0 && count == 0)); return weight <= 0; }
 	// adds the given weighted value to the internal value
 	inline void Add(const Type& v, const WeightType& w) {
 		value += v*w;
 		weight += w;
+		++count;
 	}
 	inline TAccumulator& operator +=(const TAccumulator& accum) {
 		value += accum.value;
 		weight += accum.weight;
+		count += accum.count;
 		return *this;
 	}
 	inline TAccumulator operator +(const TAccumulator& accum) const {
 		return TAccumulator(
 			value + accum.value,
-			weight + accum.weight
+			weight + accum.weight,
+			count + accum.count
 		);
 	}
 	// subtracts the given weighted value to the internal value
 	inline void Sub(const Type& v, const WeightType& w) {
 		value -= v*w;
 		weight -= w;
+		--count;
 	}
 	inline TAccumulator& operator -=(const TAccumulator& accum) {
 		value -= accum.value;
 		weight -= accum.weight;
+		count -= accum.count;
 		return *this;
 	}
 	inline TAccumulator operator -(const TAccumulator& accum) const {
 		return TAccumulator(
 			value - accum.value,
-			weight - accum.weight
+			weight - accum.weight,
+			count - accum.count
 		);
 	}
 	// returns the normalized version of the internal value
@@ -1591,6 +1643,9 @@ struct TAccumulator {
 	}
 	inline Type Normalized() const {
 		return Type(NormalizedFull());
+	}
+	inline WeightType NormalizedWeight() const {
+		return weight / count;
 	}
 	#ifdef _USE_BOOST
 	// implement BOOST serialization
@@ -1684,6 +1739,7 @@ struct PairIdx {
 /*----------------------------------------------------------------*/
 typedef CLISTDEF0(PairIdx) PairIdxArr;
 inline PairIdx MakePairIdx(uint32_t idxImageA, uint32_t idxImageB) {
+	ASSERT(idxImageA != idxImageB);
 	return (idxImageA<idxImageB ? PairIdx(idxImageA, idxImageB) : PairIdx(idxImageB, idxImageA));
 }
 /*----------------------------------------------------------------*/

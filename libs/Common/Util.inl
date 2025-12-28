@@ -13,6 +13,33 @@ namespace SEACAVE {
 
 // I N L I N E /////////////////////////////////////////////////////
 
+// uniformly scaled K (assuming standard K format)
+// note: 0.5 offset is to preserve pixel center convention (pixel centers at integer coordinates)
+template<typename TYPE>
+static inline TMatrix<TYPE,3,3> ScaleK(const TMatrix<TYPE,3,3>& K, TYPE s) {
+	return TMatrix<TYPE,3,3>(
+		K(0,0)*s, K(0,1)*s, (K(0,2)+TYPE(0.5))*s-TYPE(0.5),
+		TYPE(0),  K(1,1)*s, (K(1,2)+TYPE(0.5))*s-TYPE(0.5),
+		TYPE(0), TYPE(0), TYPE(1)
+	);
+}
+// same as above, but allow for different scale on x and y;
+// in order to preserve the aspect ratio of the original size, scale both focal lengths by
+// the smaller of the scale factors, resulting in adding pixels in the dimension that's growing;
+template<typename TYPE>
+static inline TMatrix<TYPE,3,3> ScaleK(const TMatrix<TYPE,3,3>& K, const cv::Size& size, const cv::Size& newSize, bool keepAspect=false) {
+	ASSERT(size.area() && newSize.area());
+	cv::Point_<TYPE> s(cv::Point_<TYPE>(newSize) / cv::Point_<TYPE>(size));
+	if (keepAspect)
+		s.x = s.y = MINF(s.x, s.y);
+	return TMatrix<TYPE,3,3>(
+		K(0,0)*s.x, K(0,1)*s.x, (K(0,2)+TYPE(0.5))*s.x-TYPE(0.5),
+		TYPE(0),    K(1,1)*s.y, (K(1,2)+TYPE(0.5))*s.y-TYPE(0.5),
+		TYPE(0),    TYPE(0),    TYPE(1)
+	);
+}
+/*----------------------------------------------------------------*/
+
 // normalize inhomogeneous 2D point by the given camera intrinsics K
 // K is assumed to be the [3,3] triangular matrix with: fx, fy, s, cx, cy and scale 1
 template<typename TYPE1, typename TYPE2, typename TYPE3>
@@ -42,35 +69,84 @@ inline void ComputeRelativePose(const TMatrix<TYPE,3,3>& Ri, const TPoint3<TYPE>
 } // ComputeRelativePose
 /*----------------------------------------------------------------*/
 
-// Triangulate the position of a 3D point
-// given two corresponding normalized projections and the pose of the second camera relative to the first one;
-// returns the triangulated 3D point from the point of view of the first camera
+// Triangulate the position of a 3D point using the midpoint method (linear least squares)
+// Finds the optimal depth parameters along each ray by minimizing the distance between closest points
+// Fast and efficient, but sensitive to near-parallel rays (small determinant)
+// Given two corresponding normalized projections and the pose of the second camera relative to the first one;
+// Returns the triangulated 3D point from the point of view of the first camera
 template<typename TYPE1, typename TYPE2>
 bool TriangulatePoint3D(
 	const TMatrix<TYPE1,3,3>& R, const TPoint3<TYPE1>& C,
-	const TPoint2<TYPE2>& pt1, const TPoint2<TYPE2>& pt2,
+	const TPoint3<TYPE2>& pt1, const TPoint3<TYPE2>& pt2,
 	TPoint3<TYPE1>& X
 ) {
-	// convert image points to 3-vectors (of unit length)
 	// used to describe landmark observations/bearings in camera frames
-	const TPoint3<TYPE1> f1(pt1.x,pt1.y,1);
-	const TPoint3<TYPE1> f2(pt2.x,pt2.y,1);
-	const TPoint3<TYPE1> f2_unrotated = R.t() * f2;
-	const TPoint2<TYPE1> b(C.dot(f1), C.dot(f2_unrotated));
+	const TPoint3<TYPE1> pt2_unrotated = R.t() * Cast<TYPE1>(pt2);
+	const TPoint2<TYPE1> b(C.dot(pt1), C.dot(pt2_unrotated));
 	// optimized inversion of A
-	const TYPE1 a = normSq(f1);
-	const TYPE1 c = f1.dot(f2_unrotated);
-	const TYPE1 d = -normSq(f2_unrotated);
+	const TYPE1 a = normSq(pt1);
+	const TYPE1 c = pt1.dot(pt2_unrotated);
+	const TYPE1 d = -normSq(pt2_unrotated);
 	const TYPE1 det = a*d+c*c;
-	if (ABS(det) < EPSILONTOLERANCE<TYPE1>())
-		return false;
+	if (ABS(det) < ZEROTOLERANCE<TYPE1>()*10)
+		return false; // rays are nearly parallel
 	const TYPE1 invDet = TYPE1(1)/det;
 	const TPoint2<TYPE1> lambda((d*b.x+c*b.y)*invDet, (a*b.y-c*b.x)*invDet);
-	const TPoint3<TYPE1> xm = lambda.x * f1;
-	const TPoint3<TYPE1> xn = C + lambda.y * f2_unrotated;
+	const TPoint3<TYPE1> xm = lambda.x * pt1;
+	const TPoint3<TYPE1> xn = C + lambda.y * pt2_unrotated;
 	X = (xm + xn)*TYPE1(0.5);
 	return true;
 } // TriangulatePoint3D
+// Triangulate the position of a 3D point using SVD-based DLT (Direct Linear Transform) method
+// This method is more robust to near-parallel ray configurations than the midpoint method above:
+//  - Midpoint: fails when det≈0 (rays nearly parallel) → catastrophic error amplification
+//  - DLT: SVD gracefully handles near-parallel rays via least-squares; only fails when point at infinity
+// However, DLT is computationally more expensive due to SVD/Eigen decomposition, plus the accuracy for near-parallel rays is still low
+// DLT works mathematically with unnormalized vectors, but normalized vectors are recommended for numerical robustness
+// Given two corresponding normalized projections and the pose of the second camera relative to the first one;
+// Returns the triangulated 3D point from the point of view of the first camera
+template<typename TYPE1, typename TYPE2>
+bool TriangulatePoint3DDLT(
+	const TMatrix<TYPE1,3,3>& R, const TPoint3<TYPE1>& C,
+	const TPoint3<TYPE2>& pt1, const TPoint3<TYPE2>& pt2,
+	TPoint3<TYPE1>& X
+) {
+	// Setup: Camera 1 is at origin with identity rotation
+	// Camera 2 has rotation R and translation -R*C (negation integrated in equations below)
+	const TPoint3<TYPE1> t2 = R * C;
+	// Build the design matrix A for DLT
+	// Each observation provides 2 equations: p x (P*X) = 0
+	// where p is the 2D point and P is the projection matrix
+	Eigen::Matrix<TYPE1, 4, 4> A;
+	// First camera (identity pose: [I|0])
+	const TYPE1 x1 = TYPE1(pt1.x), y1 = TYPE1(pt1.y), z1 = TYPE1(pt1.z);
+	A(0, 0) = TYPE1(0);  A(0, 1) = -z1;       A(0, 2) = y1;   A(0, 3) = TYPE1(0);
+	A(1, 0) = z1;        A(1, 1) = TYPE1(0);  A(1, 2) = -x1;  A(1, 3) = TYPE1(0);
+	// Second camera (pose: [R|t])
+	const TYPE1 x2 = TYPE1(pt2.x), y2 = TYPE1(pt2.y), z2 = TYPE1(pt2.z);
+	A(2, 0) = y2*R(2,0) - z2*R(1,0);  A(2, 1) = y2*R(2,1) - z2*R(1,1);
+	A(2, 2) = y2*R(2,2) - z2*R(1,2);  A(2, 3) = z2*t2.y   - y2*t2.z;
+	A(3, 0) = z2*R(0,0) - x2*R(2,0);  A(3, 1) = z2*R(0,1) - x2*R(2,1);
+	A(3, 2) = z2*R(0,2) - x2*R(2,2);  A(3, 3) = x2*t2.z   - z2*t2.x;
+	#if 0
+	// Solve using SVD: the solution is the right singular vector corresponding to smallest singular value
+	// JacobiSVD is optimized for small fixed-size matrices like 4x4
+	Eigen::JacobiSVD<Eigen::Matrix<TYPE1, 4, 4>> svd(A, Eigen::ComputeFullV);
+	const Eigen::Matrix<TYPE1, 4, 1> solution = svd.matrixV().col(3);
+	#else
+	// Solve for null space: find eigenvector of A^T*A corresponding to smallest eigenvalue
+	// This is much faster than full SVD since we only need one singular vector
+	// SelfAdjointEigenSolver is highly optimized for small symmetric matrices
+	Eigen::SelfAdjointEigenSolver<Eigen::Matrix<TYPE1, 4, 4>> eigensolver(A.transpose() * A, Eigen::ComputeEigenvectors);
+	const Eigen::Matrix<TYPE1, 4, 1> solution = eigensolver.eigenvectors().col(0); // smallest eigenvalue
+	#endif
+	// Check for valid solution (avoid division by near-zero)
+	if (ISZERO(solution(3)))
+		return false;
+	// Convert from homogeneous to 3D point
+	X = solution.hnormalized();
+	return true;
+} // TriangulatePoint3DDLT
 // same as above, but using the two camera poses;
 // returns the 3D point in world coordinates
 template<typename TYPE1, typename TYPE2>
@@ -81,7 +157,7 @@ bool TriangulatePoint3D(
 	const TPoint2<TYPE2>& x1, const TPoint2<TYPE2>& x2,
 	TPoint3<TYPE1>& X
 ) {
-	TPoint2<TYPE1> pt1, pt2;
+	TPoint3<TYPE1> pt1, pt2; pt1.z = TYPE1(1); pt2.z = TYPE1(1);
 	NormalizeProjectionInv(K1.val, x1.ptr(), pt1.ptr());
 	NormalizeProjectionInv(K2.val, x2.ptr(), pt2.ptr());
 	TMatrix<TYPE1,3,3> R; TPoint3<TYPE1> C;
@@ -286,7 +362,7 @@ FORCEINLINE TYPE ComputeAngle(const TMatrix<TYPE,3,3>& R1, const TMatrix<TYPE,3,
 // compute the Frobenius (or Euclidean) norm of the distance between the two matrices
 template<typename TYPE, int m, int n>
 inline TYPE FrobeniusNorm(const TMatrix<TYPE,m,n>& M) {
-	return SQRT(((typename TMatrix<TYPE,m,n>::EMatMap)M).cwiseAbs2().sum());
+	return SQRT(((typename TMatrix<TYPE,m,n>::CEMatMap)M).cwiseAbs2().sum());
 } // FrobeniusNorm
 template<typename TYPE, int m, int n>
 FORCEINLINE TYPE FrobeniusNorm(const TMatrix<TYPE,m,n>& M1, const TMatrix<TYPE,m,n>& M2) {
@@ -331,6 +407,20 @@ bool CheckCollinearity(const TPoint3<TYPE>* ptr, int count, bool checkPartialSub
 }
 /*----------------------------------------------------------------*/
 
+// converts encoded coordinates by cv::remap to float, assuming map1 is CV_16SC2 and map2 is CV_16UC1
+inline cv::Point2f CoordinateRemap2Float(const cv::Point2i& pt, const cv::Mat& map1, const cv::Mat& map2) {
+	// Get the integer portion from Map 1
+	const cv::Vec2s& integerPart = map1.at<cv::Vec2s>(pt);
+	// Extract the fractional portion from Map 2
+	// OpenCV uses the lower 10 bits for interpolation indices (typically)
+	const uint16_t fractionEncoded = map2.at<uint16_t>(pt);
+	// The fraction is split into 5 bits for x and 5 bits for y
+	// to index into a 32x32 interpolation table.
+	const float frac_x = static_cast<float>((fractionEncoded & (cv::INTER_TAB_SIZE - 1))) / static_cast<float>(cv::INTER_TAB_SIZE);
+	const float frac_y = static_cast<float>((fractionEncoded >> cv::INTER_BITS) & (cv::INTER_TAB_SIZE - 1)) / static_cast<float>(cv::INTER_TAB_SIZE);
+	return cv::Point2f((float)integerPart[0] + frac_x, (float)integerPart[1] + frac_y);
+}
+/*----------------------------------------------------------------*/
 
 // compute the corresponding ray for a given projection matrix P[3,4] and image point pt[2,1]
 // output ray[3,1]
@@ -377,6 +467,13 @@ inline void ProjectVertex_3x3_3_3_3(const TYPE1* R, const TYPE1* C, const TYPE1*
 	pt[1] = (TYPE2)(R[1*3+0]*T[0] + R[1*3+1]*T[1] + R[1*3+2]*T[2]);
 	pt[2] = (TYPE2)(R[2*3+0]*T[0] + R[2*3+1]*T[1] + R[2*3+2]*T[2]);
 } // ProjectVertex_3x3_3_3_3
+// (optimized ProjectVertex for H[3,3] and X[3,1], output pt[3,1])
+template<typename TYPE1, typename TYPE2, typename TYPE3>
+inline void ProjectVertex_3x3_3_3(const TYPE1* H, const TYPE2* X, TYPE3* pt) {
+	pt[0] = (TYPE3)(H[0*3+0]*X[0] + H[0*3+1]*X[1] + H[0*3+2]*X[2]);
+	pt[1] = (TYPE3)(H[1*3+0]*X[0] + H[1*3+1]*X[1] + H[1*3+2]*X[2]);
+	pt[2] = (TYPE3)(H[2*3+0]*X[0] + H[2*3+1]*X[1] + H[2*3+2]*X[2]);
+} // ProjectVertex_3x3_3_3
 // (optimized ProjectVertex for H[3,3] and X[2,1], output pt[3,1])
 template<typename TYPE1, typename TYPE2, typename TYPE3>
 inline void ProjectVertex_3x3_2_3(const TYPE1* H, const TYPE2* X, TYPE3* pt) {
@@ -965,6 +1062,9 @@ struct MeanStd {
 	TypeW GetVariance() const { return static_cast<TypeW>(GetVarianceN() / static_cast<TypeR>(size)); }
 	TypeW GetStdDev() const { return SQRT(GetVariance()); }
 	void Clear() { sum = sumSq = TypeW(0); size = 0; }
+	friend std::ostream& operator<<(std::ostream& os, const MeanStd& obj) {
+		return os << std::setprecision(12) << "Mean: " << obj.GetMean() << ", StdDev: " << obj.GetStdDev();
+	}
 };
 // same as above, but records also min/max values
 template<typename TYPE, typename TYPEW=TYPE, typename ARGTYPE=const TYPE&, typename TYPER=REAL>
@@ -991,6 +1091,10 @@ struct MeanStdMinMax : MeanStd<TYPE,TYPEW,ARGTYPE,TYPER> {
 	Type GetMin() const { return minVal; }
 	Type GetMax() const { return maxVal; }
 	Type GetRange() const { return maxVal - minVal; }
+	friend std::ostream& operator<<(std::ostream& os, const MeanStdMinMax& obj) {
+		return os << std::setprecision(12) << "Mean: " << obj.GetMean() << ", StdDev: " << obj.GetStdDev()
+			<< ", Min: " << obj.GetMin() << ", Max: " << obj.GetMax();
+	}
 };
 // same as above, but weighted
 template<typename TYPE, typename TYPEWIGHT=TYPE, typename TYPEW=TYPEWIGHT>
@@ -1031,7 +1135,7 @@ template<typename TYPE, typename TYPEW>
 inline std::pair<TYPEW,TYPEW> ComputeX84Threshold(const TYPE* const values, size_t size, TYPEW mul=TYPEW(5.2), const uint8_t* mask=NULL) {
 	ASSERT(size > 0);
 	// median = MEDIAN(values);
-	cList<TYPE, const TYPE&, 0> data;
+	CLISTDEF0(TYPE) data;
 	if (mask) {
 		// use only masked data
 		data.Reserve(size);
@@ -1042,15 +1146,13 @@ inline std::pair<TYPEW,TYPEW> ComputeX84Threshold(const TYPE* const values, size
 		// use all data
 		data.CopyOf(values, size);
 	}
-	TYPE* const mid = data.Begin() + size / 2;
-	std::nth_element(data.Begin(), mid, data.End());
-	const TYPEW median(*mid);
+	const TYPEW median(data.GetMedian());
 	// threshold = 5.2 * MEDIAN(ABS(values-median));
 	using TYPEI = typename MakeSigned<TYPE>::type;
 	for (TYPE& val: data)
 		val = TYPE(ABS(TYPEI(val)-TYPEI(median)));
-	std::nth_element(data.Begin(), mid, data.End());
-	return std::make_pair(median, mul*TYPEW(*mid));
+	const TYPEW medianDiff(data.GetMedian());
+	return std::make_pair(median, mul*medianDiff);
 } // ComputeX84Threshold
 /*----------------------------------------------------------------*/
 

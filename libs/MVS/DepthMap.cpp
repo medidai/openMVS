@@ -98,7 +98,7 @@ MDEFVAR_OPTDENSE_float(fMaxAngle, "Max Angle", "Max angle for accepting the dept
 MDEFVAR_OPTDENSE_float(fWeightPointInsideROI, "Weight Point Inside ROI", "weight a point inside ROI when estimating the neighbor views (0 - ignore ROI, <1 - weight more ROI points, 1 - consider only ROI points)", "0.7")
 MDEFVAR_OPTDENSE_float(fDescriptorMinMagnitudeThreshold, "Descriptor Min Magnitude Threshold", "minimum patch texture variance accepted when matching two patches (0 - disabled)", "0.02") // 0.02: pixels with patch texture variance below 0.0004 (0.02^2) will be removed from depthmap; 0.12: patch texture variance below 0.02 (0.12^2) is considered texture-less
 MDEFVAR_OPTDENSE_float(fDepthReprojectionErrorThreshold, "Depth Reprojection Error Threshold", "maximum relative difference between measured and depth projected pixel", "1.2")
-MDEFVAR_OPTDENSE_float(fDepthDiffThreshold, "Depth Diff Threshold", "maximum variance allowed for the depths during refinement", "0.01")
+MDEFVAR_OPTDENSE_float(fDepthDiffThreshold, "Depth Diff Threshold", "maximum variance allowed for the depths during fusion", "0.01")
 MDEFVAR_OPTDENSE_float(fNormalDiffThreshold, "Normal Diff Threshold", "maximum variance allowed for the normal during fusion (degrees)", "25")
 MDEFVAR_OPTDENSE_float(fPairwiseMul, "Pairwise Mul", "pairwise cost scale to match the unary cost", "0.3")
 MDEFVAR_OPTDENSE_float(fOptimizerEps, "Optimizer Eps", "MRF optimizer stop epsilon", "0.001")
@@ -125,8 +125,14 @@ MDEFVAR_OPTDENSE_float(fRandomSmoothBonus, "Random Smooth Bonus", "Score factor 
 }
 
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("DepthMap"));
 
 //constructor from reference of DepthData
 DepthData::DepthData(const DepthData& srcDepthData) :
@@ -2141,11 +2147,15 @@ bool MVS::ImportDepthDataRaw(const String& fileName, String& imageFileName,
 	fread(R.val, sizeof(REAL), 9, f.get());
 	fread(C.ptr(), sizeof(REAL), 3, f.get());
 
-	// read depth-map
+	// read depth-map meta-data
 	dMin = header.dMin;
 	dMax = header.dMax;
 	imageSize.width = header.imageWidth;
 	imageSize.height = header.imageHeight;
+	if (flags == 0)
+		return ferror(f.get()) == 0; // only header + meta requested
+
+	// read depth-map
 	if ((flags & HeaderDepthDataRaw::HAS_DEPTH) != 0) {
 		depthMap.create(header.depthHeight, header.depthWidth);
 		if (fread(depthMap.getData(), sizeof(float), depthMap.area(), f.get()) != static_cast<size_t>(depthMap.area())) {
@@ -2307,3 +2317,5 @@ void MVS::CompareNormalMaps(const NormalMap& normalMap, const NormalMap& normalM
 	);
 }
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

@@ -184,7 +184,14 @@ CUresult initDevice(int deviceID)
 		return CUDA_ERROR_INVALID_DEVICE;
 	}
 	devices.emplace_back(device);
+
+	// create context
+	#if defined(CUDA_VERSION) && CUDA_VERSION >= 13000
+	CUctxCreateParams params {};
+	checkCudaError(cuCtxCreate(&devices.back().ctx, &params, 1, device.ID));
+	#else
 	checkCudaError(cuCtxCreate(&devices.back().ctx, CU_CTX_SCHED_AUTO, device.ID));
+	#endif
 
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	char name[2048];

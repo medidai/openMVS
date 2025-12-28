@@ -1465,6 +1465,22 @@ inline TMatrix<TYPE,m,n> operator * (const TMatrix<TYPE,m,l>& m1, const TMatrix<
 	return TMatrix<TYPE,m,n>(m1, m2, cv::Matx_MatMulOp());
 }
 
+// TMatrix matrix-point multiplication (only for 3x3 matrices)
+template <typename TYPE, int m, int n, typename TYPE2>
+inline typename std::enable_if<m == 3 && n == 3, TPoint3<TYPE2>>::type operator *(const TMatrix<TYPE,m,n>& M, const TPoint3<TYPE2>& p) {
+	return TPoint3<TYPE2>(
+		M.val[0*3+0]*p.x + M.val[0*3+1]*p.y + M.val[0*3+2]*p.z,
+		M.val[1*3+0]*p.x + M.val[1*3+1]*p.y + M.val[1*3+2]*p.z,
+		M.val[2*3+0]*p.x + M.val[2*3+1]*p.y + M.val[2*3+2]*p.z);
+}
+template <typename TYPE, int m, int n, typename TYPE2>
+inline typename std::enable_if<m == 3 && n == 3, TPoint3<TYPE2>>::type operator *(const TMatrix<TYPE,m,n>& M, const TPoint2<TYPE2>& p) {
+	return TPoint3<TYPE2>(
+		M.val[0*3+0]*p.x + M.val[0*3+1]*p.y + M.val[0*3+2],
+		M.val[1*3+0]*p.x + M.val[1*3+1]*p.y + M.val[1*3+2],
+		M.val[2*3+0]*p.x + M.val[2*3+1]*p.y + M.val[2*3+2]);
+}
+
 template <typename TYPE, int m, int n, typename TYPE2>
 inline TMatrix<TYPE,m,n> operator / (const TMatrix<TYPE,m,n>& mat, TYPE2 v) {
 	typedef typename std::conditional<std::is_floating_point<TYPE2>::value,TYPE2,REAL>::type real_t;
@@ -1709,6 +1725,14 @@ template <typename FLT1, typename FLT2, int m, int n>
 inline TMatrix<FLT1,m,n> Cast(const TMatrix<FLT2,m,n>& v) {
 	return v;
 }
+/*----------------------------------------------------------------*/
+
+
+// C L A S S  //////////////////////////////////////////////////////
+
+template <typename TYPE, typename ACCUMTYPE, typename WEIGHTTYPE>
+TAccumulator<TYPE,ACCUMTYPE,WEIGHTTYPE>::TAccumulator()
+	: value(INITTO(static_cast<TYPE*>(NULL), 0)), weight(0), count(0) {}
 /*----------------------------------------------------------------*/
 
 
@@ -2979,11 +3003,10 @@ void TImage<TYPE>::DilateMean(TImage<TYPE>& dst, const TYPE& invalid) const
 /*----------------------------------------------------------------*/
 
 
-template <typename TYPE>
-bool TImage<TYPE>::Load(const String& fileName)
+static bool LoadImage(const String& fileName, cv::Mat& img, int expectedChannels = -1, int expectedDepth = -1)
 {
 	if (Util::getFileExt(fileName).ToLower() == ".pfm") {
-		if (Base::depth() != CV_32F)
+		if (expectedDepth != -1 && expectedDepth != CV_32F)
 			return false;
 		File fImage(fileName, File::READ, File::OPEN);
 		if (!fImage.isOpen())
@@ -3029,44 +3052,50 @@ bool TImage<TYPE>::Load(const String& fileName)
 		ASSERT(!bLittleEndian);
 		#endif
 		const int nChannels(bLittleEndian ? -((int)sc) : (int)sc);
-		if (nChannels != Base::channels())
+		if (expectedChannels != -1 && nChannels != expectedChannels)
 			return false;
-		Base::create(h, w);
-		ASSERT(sizeof(float)*Base::channels() == Base::step.p[1]);
-		const size_t rowbytes((size_t)Base::size.p[1]*Base::step.p[1]);
-		for (int i=rows; i>0; )
-			if (fImage.read(cv::Mat::template ptr<float>(--i), rowbytes) != rowbytes)
+		img.create(h, w, CV_MAKETYPE(CV_32F, nChannels));
+		ASSERT(sizeof(float)*nChannels == img.step.p[1]);
+		const size_t rowbytes((size_t)img.cols*img.step.p[1]);
+		for (int i=img.rows; i>0; )
+			if (fImage.read(img.ptr<float>(--i), rowbytes) != rowbytes)
 				return false;
 		return true;
 	}
-	cv::Mat img(cv::imread(fileName, cv::IMREAD_UNCHANGED));
+	img = cv::imread(fileName, expectedChannels == 1 ? cv::IMREAD_GRAYSCALE : cv::IMREAD_UNCHANGED);
 	if (img.empty()) {
 		VERBOSE("error: loading image '%s'", fileName.c_str());
 		return false;
 	}
-	if (img.channels() != Base::channels()) {
-		if (img.channels() == 3 && Base::channels() == 1)
+	if (expectedChannels != -1 && img.channels() != expectedChannels) {
+		if (img.channels() == 3 && expectedChannels == 1)
 			cv::cvtColor(img, img, cv::COLOR_BGR2GRAY);
-		else if (img.channels() == 1 && Base::channels() == 3)
+		else if (img.channels() == 1 && expectedChannels == 3)
 			cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
-		else if (img.channels() == 4 && Base::channels() == 1)
+		else if (img.channels() == 4 && expectedChannels == 1)
 			cv::cvtColor(img, img, cv::COLOR_BGRA2GRAY);
-		else if (img.channels() == 1 && Base::channels() == 4)
+		else if (img.channels() == 1 && expectedChannels == 4)
 			cv::cvtColor(img, img, cv::COLOR_GRAY2BGRA);
-		else if (img.channels() == 4 && Base::channels() == 3)
+		else if (img.channels() == 4 && expectedChannels == 3)
 			cv::cvtColor(img, img, cv::COLOR_BGRA2BGR);
 	}
-	if (img.type() == Base::type())
-		cv::swap(img, *this);
-	else
-		img.convertTo(*this, Base::type());
+	if (expectedDepth != -1 && img.depth() != expectedDepth)
+		img.convertTo(img, expectedDepth);
 	return true;
+}
+template <typename TYPE>
+bool TImage<TYPE>::Load(const String& fileName)
+{
+	return LoadImage(fileName, *this, Base::channels(), Base::depth());
 }
 /*----------------------------------------------------------------*/
 
-template <typename TYPE>
-bool TImage<TYPE>::Save(const String& fileName) const
+static bool SaveImage(const cv::Mat& img, const String& fileName)
 {
+	if (img.dims != 2) {
+		VERBOSE("error: only 2D images can be saved");
+		return false;
+	}
 	std::vector<int> compression_params;
 	const String ext(Util::getFileExt(fileName).ToLower());
 	if (ext == ".png") {
@@ -3084,7 +3113,7 @@ bool TImage<TYPE>::Save(const String& fileName) const
 	} else
 #endif
 	if (ext == ".pfm") {
-		if (Base::depth() != CV_32F)
+		if (img.depth() != CV_32F)
 			return false;
 		Util::ensureFolder(fileName);
 		File fImage(fileName, File::WRITE, File::CREATE | File::TRUNCATE);
@@ -3096,16 +3125,15 @@ bool TImage<TYPE>::Save(const String& fileName) const
 		#else
 		static const double scale(1.0);
 		#endif
-		fImage.print("Pf\n%d %d\n%lf\n", width(), height(), scale*Base::channels());
-		ASSERT(sizeof(float)*Base::channels() == Base::step.p[1]);
-		const size_t rowbytes = (size_t)Base::size.p[1]*Base::step.p[1];
-		for (int i=rows; i>0; )
-			fImage.write(cv::Mat::template ptr<const float>(--i), rowbytes);
+		fImage.print("Pf\n%d %d\n%lf\n", img.cols, img.rows, scale*img.channels());
+		ASSERT(sizeof(float)*img.channels() == img.step.p[1]);
+		const size_t rowbytes = (size_t)img.cols*img.step.p[1];
+		for (int i=img.rows; i>0; )
+			fImage.write(img.ptr<const float>(--i), rowbytes);
 		return true;
 	}
-
 	try {
-		if (!cv::imwrite(fileName, *this, compression_params)) {
+		if (!cv::imwrite(fileName, img, compression_params)) {
 			VERBOSE("error: saving image '%s'", fileName.c_str());
 			return false;
 		}
@@ -3115,6 +3143,11 @@ bool TImage<TYPE>::Save(const String& fileName) const
 		return false;
 	}
 	return true;
+}
+template <typename TYPE>
+bool TImage<TYPE>::Save(const String& fileName) const
+{
+	return SaveImage(*this, fileName);
 }
 /*----------------------------------------------------------------*/
 
@@ -3425,8 +3458,9 @@ namespace boost {
 		// Serialization support for cv::Mat
 		template<class Archive>
 		void save(Archive& ar, const cv::Mat& m, const unsigned int /*version*/) {
+			ASSERT(m.dims == 0 || m.dims == 2); // only empty or 2D mats supported
 			const int elem_type = m.type();
-			const size_t elem_size = m.elemSize();
+			const size_t elem_size = m.empty() ? 0 : m.elemSize();
 
 			ar & m.cols;
 			ar & m.rows;
@@ -3434,6 +3468,8 @@ namespace boost {
 			ar & elem_size;
 
 			const size_t data_size = elem_size * m.cols * m.rows;
+			if (data_size == 0)
+				return;
 			if (m.isContinuous()) {
 				ar & boost::serialization::make_array(m.ptr(), data_size);
 			} else {
@@ -3455,6 +3491,8 @@ namespace boost {
 			m.create(rows, cols, elem_type);
 
 			const size_t data_size = elem_size * m.cols * m.rows;
+			if (data_size == 0)
+				return;
 			ar & boost::serialization::make_array(m.ptr(), data_size);
 		}
 		template<class Archive>

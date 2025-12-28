@@ -311,4 +311,13 @@ DEFINE_CVDATATYPE(SEACAVE::Matrix3x4d)
 DEFINE_CVDATATYPE(SEACAVE::Matrix4x4d)
 /*----------------------------------------------------------------*/
 
+namespace SEACAVE {
+
+// Initialize / close the library; should be called at the beginning and end of the program
+void Initialize(LPCTSTR appname, unsigned nMaxThreads=0, int nProcessPriority=0);
+void Finalize();
+/*----------------------------------------------------------------*/
+
+} // namespace SEACAVE
+
 #endif // _COMMON_COMMON_H_

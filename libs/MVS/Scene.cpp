@@ -51,8 +51,14 @@ using namespace MVS;
 #define SCENE_USE_OPENMP
 #endif
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("Scene   "));
 
 void Scene::Release()
 {
@@ -2800,3 +2806,5 @@ void Scene::InitTowerScene(const int towerMode)
 	}
 } // InitTowerScene
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

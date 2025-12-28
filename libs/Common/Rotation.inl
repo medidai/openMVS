@@ -529,15 +529,15 @@ inline TRMatrixBase<TYPE>::TRMatrixBase(const Mat& mat)
 }
 
 template <typename TYPE>
-inline TRMatrixBase<TYPE>::TRMatrixBase(const Vec& w, TYPE phi)
-{
-	Set(w, phi);
-}
-
-template <typename TYPE>
 inline TRMatrixBase<TYPE>::TRMatrixBase(const Vec& rot)
 {
 	SetRotationAxisAngle(rot);
+}
+
+template <typename TYPE>
+inline TRMatrixBase<TYPE>::TRMatrixBase(const Vec& w, TYPE phi)
+{
+	Set(w, phi);
 }
 
 template <typename TYPE>
@@ -1286,8 +1286,13 @@ inline void TRMatrixBase<TYPE>::SetRotationAxisAngle(const Vec& rot)
 		val[8] = TYPE(1);
 	}
 	#else
-	*this = Eigen::SO3<TYPE>(rot).get_matrix();
+	*this = AxisAngleToRotation(rot);
 	#endif
+}
+template <typename TYPE>
+TRMatrixBase<TYPE> TRMatrixBase<TYPE>::AxisAngleToRotation(const Vec& rot)
+{
+	return Base(Eigen::SO3<TYPE>(rot).get_matrix());
 }
 
 template <typename TYPE>

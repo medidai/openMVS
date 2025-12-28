@@ -52,31 +52,70 @@ namespace SEACAVE {
 // S T R U C T S ///////////////////////////////////////////////////
 
 // Manage setting/removing bit flags
+// TYPE can be either an integer type or an enum type
 template <typename TYPE>
 class TFlags
 {
+private:
+	// Helper trait to get the underlying type for both enums and integer types
+	template<typename T, bool = std::is_enum<T>::value>
+	struct UnderlyingTypeHelper {
+		typedef T type;
+	};
+	template<typename T>
+	struct UnderlyingTypeHelper<T, true> {
+		typedef typename std::underlying_type<T>::type type;
+	};
+
 public:
+	typedef typename UnderlyingTypeHelper<TYPE>::type UnderlyingType;
 	typedef TYPE Type;
 
 public:
-	inline TFlags() : flags(0)							{ }
+	inline TFlags() : flags(static_cast<Type>(0))		{ }
 	inline TFlags(const TFlags& rhs) : flags(rhs.flags)	{ }
 	inline TFlags(Type f) : flags(f)					{ }
-	inline bool isSet(Type aFlag) const					{ return (flags & aFlag) == aFlag; }
-	inline bool isSet(Type aFlag, Type nF) const		{ return (flags & (aFlag|nF)) == aFlag; }
-	inline bool isSetExclusive(Type aFlag) const		{ return flags == aFlag; }
-	inline bool isAnySet(Type aFlag) const				{ return (flags & aFlag) != 0; }
-	inline bool isAnySet(Type aFlag, Type nF) const		{ const Type m(flags & (aFlag|nF)); return m != 0 && (m & nF) == 0; }
-	inline bool isAnySetExclusive(Type aFlag) const		{ return (flags & aFlag) != 0 && (flags & ~aFlag) == 0; }
-	inline void set(Type aFlag, bool bSet)				{ if (bSet) set(aFlag); else unset(aFlag); }
-	inline void set(Type aFlag)							{ flags |= aFlag; }
-	inline void unset(Type aFlag)						{ flags &= ~aFlag; }
-	inline void flip(Type aFlag)						{ flags ^= aFlag; }
-	inline void operator=(TFlags rhs)					{ flags = rhs.flags; }
-	inline operator Type() const						{ return flags; }
-	inline operator Type&()								{ return flags; }
+	// Only define this constructor when Type and UnderlyingType are different (i.e., for enums)
+	template<typename U = UnderlyingType, typename = typename std::enable_if<!std::is_same<Type, U>::value>::type>
+	inline TFlags(U f) : flags(static_cast<Type>(static_cast<UnderlyingType>(f)))	{ }
+	
+	// Accept both enum and underlying type for compatibility
+	template<typename T>
+	inline bool isSet(T aFlag) const					{ return (toUnderlying(flags) & toUnderlying(aFlag)) == toUnderlying(aFlag); }
+	template<typename T1, typename T2>
+	inline bool isSet(T1 aFlag, T2 nF) const			{ return (toUnderlying(flags) & (toUnderlying(aFlag)|toUnderlying(nF))) == toUnderlying(aFlag); }
+	template<typename T>
+	inline bool isSetExclusive(T aFlag) const			{ return toUnderlying(flags) == toUnderlying(aFlag); }
+	template<typename T>
+	inline bool isAnySet(T aFlag) const					{ return (toUnderlying(flags) & toUnderlying(aFlag)) != 0; }
+	template<typename T1, typename T2>
+	inline bool isAnySet(T1 aFlag, T2 nF) const			{ const UnderlyingType m(toUnderlying(flags) & (toUnderlying(aFlag)|toUnderlying(nF))); return m != 0 && (m & toUnderlying(nF)) == 0; }
+	template<typename T>
+	inline bool isAnySetExclusive(T aFlag) const		{ return (toUnderlying(flags) & toUnderlying(aFlag)) != 0 && (toUnderlying(flags) & ~toUnderlying(aFlag)) == 0; }
+	
+	template<typename T>
+	inline void set(T aFlag, bool bSet)					{ if (bSet) set(aFlag); else unset(aFlag); }
+	template<typename T>
+	inline void set(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) | toUnderlying(aFlag)); }
+	template<typename T>
+	inline void unset(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) & ~toUnderlying(aFlag)); }
+	template<typename T>
+	inline void flip(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) ^ toUnderlying(aFlag)); }
+	
+	inline TFlags& operator=(TFlags rhs)				{ flags = rhs.flags; return *this; }
+	inline TFlags& operator=(Type f)					{ flags = f; return *this; }
+	inline operator UnderlyingType() const				{ return static_cast<UnderlyingType>(flags); }
+	inline operator UnderlyingType&()					{ return reinterpret_cast<UnderlyingType&>(flags); }
+	
 protected:
 	Type flags;
+
+	// Helper to convert enum or integer to underlying type
+	template<typename T>
+	static inline constexpr UnderlyingType toUnderlying(T value) {
+		return static_cast<UnderlyingType>(value);
+	}
+
 	#ifdef _USE_BOOST
 	// implement BOOST serialization
 	friend class boost::serialization::access;
@@ -549,6 +588,63 @@ public:
 			start = end + delim.size();
 		}
 	}
+
+	// Parse index ranges; use commas/spaces to separate IDs and '-' for ranges (e.g., 1 2 10-15)
+	// returns error message in case of failure
+	static String parseIndexRanges(LPCSTR input, size_t maxCount, CLISTDEF0(IDX)& outIndices, LPCSTR entityLabel="") {
+		outIndices.clear();
+		if (input == nullptr || *input == '\0')
+			return String::FormatString("No %sdata available.", entityLabel);
+		if (maxCount == 0)
+			return String::FormatString("No %sdata size available.", entityLabel);
+		auto skipDelimiters = [](LPCSTR& cursor) {
+			while (*cursor && (std::isspace(*cursor) || *cursor == ','))
+				++cursor;
+		};
+		auto parseNumber = [](LPCSTR& cursor, IDX& value) -> bool {
+			if (!*cursor || !std::isdigit(*cursor))
+				return false;
+			value = 0;
+			const IDX maxValue = std::numeric_limits<IDX>::max();
+			while (*cursor && std::isdigit(*cursor)) {
+				const IDX digit = static_cast<IDX>(*cursor - '0');
+				if (value > (maxValue - digit) / 10)
+					return false;
+				value = value * 10 + digit;
+				++cursor;
+			}
+			return true;
+		};
+		LPCSTR cursor = input;
+		while (true) {
+			skipDelimiters(cursor);
+			if (*cursor == '\0')
+				break;
+			// Parse start of range
+			IDX startValue;
+			if (!parseNumber(cursor, startValue))
+				return String::FormatString("Invalid %sindex specification.", entityLabel);
+			skipDelimiters(cursor);
+			IDX endValue = startValue;
+			if (*cursor == '-') {
+				skipDelimiters(++cursor);
+				if (!parseNumber(cursor, endValue))
+					return String::FormatString("Incomplete %srange specification.", entityLabel);
+			}
+			if (startValue >= maxCount)
+				return String::FormatString("%sindex %zu out of range (0-%zu).", entityLabel, size_t(startValue), maxCount - 1);
+			if (endValue >= maxCount)
+				return String::FormatString("%sindex %zu out of range (0-%zu).", entityLabel, size_t(endValue), maxCount - 1);
+			if (endValue < startValue)
+				return String::FormatString("Invalid %srange: %zu-%zu.", entityLabel, size_t(startValue), size_t(endValue));
+			for (IDX idx = startValue; idx <= endValue; ++idx)
+				outIndices.push_back(idx);
+		}
+		if (outIndices.empty())
+			return String::FormatString("No valid %sindices provided.", entityLabel);
+		return {}; // success
+	}
+
 
 	static String getShortTimeString() {
 		char buf[8];

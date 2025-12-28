@@ -142,6 +142,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	unsigned nFuseFilter;
 	unsigned nOptimize;
 	int nIgnoreMaskLabel;
+	float fDepthDiffThreshold;
 	float fDepthReprojectionErrorThreshold;
 	bool bRemoveDmaps;
 	boost::program_options::options_description config("Densify options");
@@ -169,6 +170,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("sample-mesh", boost::program_options::value(&OPT::fSampleMesh)->default_value(0.f), "uniformly samples points on a mesh (0 - disabled, <0 - number of points, >0 - sample density per square unit)")
 		("fusion-mode", boost::program_options::value(&OPT::nFusionMode)->default_value(0), "depth-maps fusion mode (-2 - fuse disparity-maps, -1 - export disparity-maps only, 0 - depth-maps & fusion, 1 - export depth-maps only)")
 		("fusion-filter", boost::program_options::value(&nFuseFilter)->default_value(2), "filter used to fuse the depth-maps (0 - merge, 1 - fuse, 2 - dense-fuse)")
+		("fusion-depth-diff-threshold,t", boost::program_options::value(&fDepthDiffThreshold)->default_value(0.01f), "maximum variance allowed for the depths during fusion")
 		("fusion-reprojection-threshold,d", boost::program_options::value(&fDepthReprojectionErrorThreshold)->default_value(1.2f), "dense-fuse maximum distance between measured and depth projected pixel")
 		("postprocess-dmaps", boost::program_options::value(&nOptimize)->default_value(0), "flags used to filter the depth-maps after estimation (0 - disabled, 1 - remove-speckles, 2 - fill-gaps, 4 - adjust-confidence)")
 		("filter-point-cloud", boost::program_options::value(&OPT::thFilterPointCloud)->default_value(0), "filter dense point-cloud based on visibility (0 - disabled)")
@@ -273,6 +275,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	OPTDENSE::nFuseFilter = nFuseFilter;
 	OPTDENSE::nOptimize = nOptimize;
 	OPTDENSE::nIgnoreMaskLabel = nIgnoreMaskLabel;
+	OPTDENSE::fDepthDiffThreshold = fDepthDiffThreshold;
 	OPTDENSE::fDepthReprojectionErrorThreshold = fDepthReprojectionErrorThreshold;
 	OPTDENSE::bRemoveDmaps = bRemoveDmaps;
 	if (!bValidConfig && !OPT::strDenseConfigFileName.empty())
@@ -297,7 +300,7 @@ void Application::Finalize()
 int main(int argc, LPCTSTR* argv)
 {
 	#ifdef _DEBUGINFO
-	// set _crtBreakAlloc index to stop in <dbgheap.c> at allocation
+	// set _crtBreakAlloc index or use _CrtSetBreakAlloc() to stop in <dbgheap.c> at allocation
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);// | _CRTDBG_CHECK_ALWAYS_DF);
 	#endif
 

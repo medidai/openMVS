@@ -2708,7 +2708,7 @@ void* SettingsReadOpen(ImGuiContext*, ImGuiSettingsHandler* handler, const char*
 }
 
 void SettingsReadLine(ImGuiContext*, ImGuiSettingsHandler* handler, void* entry, const char* line) {
-	Window& window = *static_cast<Window*>(handler->UserData);
+	Window& window = *reinterpret_cast<Window*>(handler->UserData);
 
 	float x, y, z, w;
 	int intVal;
@@ -2764,7 +2764,7 @@ void SettingsReadLine(ImGuiContext*, ImGuiSettingsHandler* handler, void* entry,
 }
 
 void SettingsWriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf) {
-	Window& window = *static_cast<Window*>(handler->UserData);
+	Window& window = *reinterpret_cast<Window*>(handler->UserData);
 	buf->appendf("[%s][Window]\n", handler->TypeName);
 	buf->appendf("RenderOnlyOnChange=%d\n", window.renderOnlyOnChange ? 1 : 0);
 	buf->appendf("ClearColor=%f,%f,%f,%f\n", 

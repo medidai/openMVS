@@ -282,16 +282,18 @@ public:
 
 	/** @brief Copy constructor from 3x3 matrix
 		@attention Orthonormality of matrix is enforced automatically! */
-	inline TRMatrixBase(const Mat& mat);
+	inline explicit TRMatrixBase(const Mat& mat);
 
 	/** @brief Initialization from parametrized rotation (axis-angle) */
-	inline TRMatrixBase(const Vec& rot);
+	inline explicit TRMatrixBase(const Vec& rot);
+	/** or accept cv::Point3_<T> generically */
+	inline explicit TRMatrixBase(const cv::Point3_<TYPE>& rot) : TRMatrixBase(Vec(rot)) {}
 
 	/** @brief Initialization from rotation axis w and angle phi (in rad) using Rodrigues' formula */
 	inline TRMatrixBase(const Vec& w, const TYPE phi);
 
 	/** @brief Initialization from quaternion */
-	inline TRMatrixBase(const Quat& q);
+	inline explicit TRMatrixBase(const Quat& q);
 
 	/** @brief Initialization with the rotation from roll/pitch/yaw (in rad) */
 	inline TRMatrixBase(TYPE roll, TYPE pitch, TYPE yaw);
@@ -494,6 +496,7 @@ public:
 
 	// get parametrized rotation (axis-angle) from the rotation matrix
 	inline void SetRotationAxisAngle(const Vec& rot);
+	static TRMatrixBase AxisAngleToRotation(const Vec& rot);
 
 	// modify the rotation matrix by the given parametrized delta rotation (axis-angle)
 	inline void Apply(const Vec& delta);

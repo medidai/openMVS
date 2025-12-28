@@ -49,8 +49,14 @@ using namespace MVS;
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("PointCld"));
 
 PointCloud& MVS::PointCloud::Swap(PointCloud& rhs)
 {
@@ -1072,3 +1078,5 @@ void PointCloud::PrintStatistics(const Image* pImages, const OBB3f* pObb) const
 	);
 } // PrintStatistics
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")
