@@ -19,7 +19,6 @@
 // CUDA toolkit
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
-#include <cuda_texture_types.h>
 #include <curand_kernel.h>
 #include <vector_types.h>
 

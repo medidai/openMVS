@@ -43,8 +43,14 @@ using namespace STEREO;
 // uncomment to enable OpenCV filter demo
 //#define _USE_FILTER_DEMO
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("SemGblMt"));
 
 #ifdef _USE_FILTER_DEMO
 #include "opencv2/ximgproc/disparity_filter.hpp"
@@ -306,17 +312,17 @@ int disparityFiltering(cv::Mat left, cv::Mat right, int argc, const LPCSTR* argv
 	{
 		cv::Mat filtered_disp_vis;
 		cv::ximgproc::getDisparityVis(filtered_disp,filtered_disp_vis,vis_mult);
-		cv::imwrite(dst_path,filtered_disp_vis);
+		SaveImage(filtered_disp_vis, dst_path);
 	}
 	if(dst_raw_path!="None")
 	{
 		cv::Mat raw_disp_vis;
 		cv::ximgproc::getDisparityVis(left_disp,raw_disp_vis,vis_mult);
-		cv::imwrite(dst_raw_path,raw_disp_vis);
+		SaveImage(raw_disp_vis, dst_raw_path);
 	}
 	if(dst_conf_path!="None")
 	{
-		cv::imwrite(dst_conf_path,conf_map);
+		SaveImage(conf_map, dst_conf_path);
 	}
 
 	if(!no_display)
@@ -2364,3 +2370,5 @@ bool MVS::STEREO::ExportCamerasEngin(const Scene& scene, const String& fileName)
 	return true;
 } // ExportCamerasEngin
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

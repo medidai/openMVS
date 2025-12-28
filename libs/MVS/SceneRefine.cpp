@@ -67,8 +67,14 @@ using namespace MVS;
 #define DST_Image(var)
 #endif
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("ScnRefne"));
 
 typedef float Real;
 typedef Mesh::Vertex Vertex;
@@ -1431,3 +1437,5 @@ bool Scene::RefineMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsig
 	return true;
 } // RefineMesh
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

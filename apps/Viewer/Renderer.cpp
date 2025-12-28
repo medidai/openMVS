@@ -403,7 +403,7 @@ void Renderer::SetupAxesBuffers() {
 	axesVBO->Bind();
 	axesVAO->EnableAttribute(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 	// Create coordinate axes data
-	std::vector<float> axesVertices = {
+	std::vector<float> axesVertices {
 		// X axis (red)
 		0.f, 0.f, 0.f,
 		1.f, 0.f, 0.f,
@@ -419,7 +419,7 @@ void Renderer::SetupAxesBuffers() {
 	// Color attribute (location 1)
 	axesColorVBO->Bind();
 	axesVAO->EnableAttribute(1, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-	std::vector<float> axesColors = {
+	std::vector<float> axesColors {
 		// X axis (red)
 		1.f, 0.f, 0.f,
 		1.f, 0.f, 0.f,
@@ -492,7 +492,7 @@ void Renderer::SetupGizmoBuffers() {
 
 	// Add center axes geometry (append to the same buffers)
 	size_t centerAxesBaseVertex = vertices.size() / 3;
-	std::vector<float> axesVertices = {
+	std::vector<float> axesVertices {
 		// X axis
 		0.f, 0.f, 0.f,
 		1.f, 0.f, 0.f,
@@ -1262,7 +1262,6 @@ void Renderer::RenderCoordinateAxes(const Camera& camera) {
 
 	// Save current viewport and depth test state
 	GLint oldViewport[4];
-	GLboolean depthTestEnabled;
 	GL_CHECK(glGetIntegerv(GL_VIEWPORT, oldViewport));
 
 	// Set up a small viewport in the bottom right corner
@@ -1438,7 +1437,7 @@ void Renderer::RenderSelectionOverlay(const Window& window) {
 			float y1 = static_cast<float>(start.y());
 			float x2 = static_cast<float>(end.x());
 			float y2 = static_cast<float>(end.y());
-			std::vector<float> boxVertices = {
+			std::vector<float> boxVertices {
 				x1, y1,
 				x2, y1,
 				x2, y2,

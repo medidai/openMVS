@@ -61,12 +61,9 @@ void Log::UnregisterListener(ClbkRecordMsg clbk)
 Log::Idx Log::RegisterType(LPCTSTR lt)
 {
 	ASSERT(strlen(lt) == LOGTYPE_SIZE);
-	const Idx idx = (Idx)m_arrLogTypes.GetSize();
-	LogType& logType = m_arrLogTypes.AddEmpty();
-	Idx n = MINF((Idx)strlen(lt), (Idx)LOGTYPE_SIZE);
-	_tcsncpy(logType.szName, lt, n);
-	while (n < LOGTYPE_SIZE)
-		logType.szName[n++] = _T(' ');
+	const Idx idx = (Idx)m_arrLogTypes.size();
+	LogType& logType = m_arrLogTypes.emplace_back();
+	_tcsncpy(logType.szName, lt, LOGTYPE_SIZE);
 	logType.szName[LOGTYPE_SIZE] = _T('\0');
 	return idx;
 }
@@ -76,7 +73,7 @@ Log::Idx Log::RegisterType(LPCTSTR lt)
  */
 void Log::ResetTypes()
 {
-	m_arrLogTypes.Empty();
+	m_arrLogTypes.clear();
 }
 
 void Log::Write(LPCTSTR szFormat, ...)
@@ -145,9 +142,9 @@ void Log::_Record(Idx lt, LPCTSTR szFormat, va_list args)
 	#endif // _MSC_VER
 	#endif // LOG_DATE || LOG_TIME
 	#ifdef DEFAULT_LOGTYPE
-	LPCTSTR const logType(lt<m_arrLogTypes.GetSize() ? m_arrLogTypes[lt] : (LPCSTR)DEFAULT_LOGTYPE);
+	LPCTSTR const logType(lt<m_arrLogTypes.size() ? m_arrLogTypes[lt] : (LPCSTR)DEFAULT_LOGTYPE);
 	#else
-	LPCTSTR const logType(lt<m_arrLogTypes.GetSize() ? m_arrLogTypes[lt] : g_appType);
+	LPCTSTR const logType(lt<m_arrLogTypes.size() ? m_arrLogTypes[lt] : g_appType);
 	#endif
 	if ((size_t)_vsntprintf(szBuffer, 2048, szFormat, args) > 2048) {
 		// not enough space for the full string, reprint dynamically

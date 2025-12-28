@@ -45,3 +45,28 @@ namespace boost {
 } // namespace boost
 #endif
 #endif
+
+void SEACAVE::Initialize(LPCTSTR appname, unsigned nMaxThreads, int nProcessPriority) {
+	// initialize thread options
+	Process::setCurrentProcessPriority((Process::Priority)nProcessPriority);
+	#ifdef _USE_OPENMP
+	if (nMaxThreads != 0)
+		omp_set_num_threads(nMaxThreads);
+	#endif
+
+	#ifdef _USE_BREAKPAD
+	// initialize crash memory dumper
+	MiniDumper::Create(appname, WORKING_FOLDER);
+	#endif
+
+	// initialize random number generator
+	Util::Init();
+}
+
+void SEACAVE::Finalize() {
+	#if TD_VERBOSE != TD_VERBOSE_OFF
+	// print memory statistics
+	Util::LogMemoryInfo();
+	#endif
+}
+/*----------------------------------------------------------------*/

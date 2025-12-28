@@ -28,6 +28,8 @@
 	protected: static const Log::Idx ms_nLogType;
 #define DEFINE_LOG(classname, log) \
 	const Log::Idx classname::ms_nLogType(REGISTER_LOG(log));
+#define DEFINE_LOG_NAME(name, log) \
+	const Log::Idx name(REGISTER_LOG(log));
 
 #ifdef LOG_THREAD
 #include "CriticalSection.h"

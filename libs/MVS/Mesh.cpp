@@ -31,21 +31,6 @@
 
 #include "Common.h"
 #include "Mesh.h"
-// fix non-manifold vertices
-#include <boost/graph/adjacency_list.hpp>
-#include <boost/graph/filtered_graph.hpp>
-#include <boost/graph/connected_components.hpp>
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable: 4244 4267 4305)
-#ifdef _SUPPORT_CPP17
-namespace std {
-template <typename ArgumentType, typename ResultType>
-struct unary_function {
-};
-} // namespace std
-#endif // _SUPPORT_CPP17
-#endif // _MSC_VER
 // VCG: mesh reconstruction post-processing
 #define _SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS
 #include <vcg/complex/complex.h>
@@ -98,8 +83,14 @@ using namespace MVS;
 #include <unsupported/Eigen/BVH>
 #endif
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("Mesh    "));
 
 // free all memory
 void Mesh::Release()
@@ -1840,9 +1831,9 @@ bool Mesh::SaveGLTF(const String& fileName, bool bBinary) const
 			image->uri = Util::isFullPath(filename->c_str()) ?
 				Util::getRelativePath(*basepath, *filename) : String(*filename);
 			String basePath(*basepath);
-			return cv::imwrite(
-				Util::ensureFolderSlash(basePath) + image->uri,
-				cv::Mat(image->height, image->width, CV_8UC3, image->image.data()));
+			return SaveImage(
+				cv::Mat(image->height, image->width, CV_8UC3, image->image.data()),
+				Util::ensureFolderSlash(basePath) + image->uri);
 		}
 	};
 	tinygltf::TinyGLTF gltf;
@@ -2510,16 +2501,16 @@ static int ImproveVertexValence(Polyhedron& p, int valence_mode=2)
 
 static void UpdateMeshData(Polyhedron& p);
 
-// Description: 
+// Description:
 //  It iterates through all the mesh vertices and it tries to fix degenerate triangles.
 //  There are conditions that check for large and small angles.
 // Parameters:
-//  - degenerateAngleDeg 
+//  - degenerateAngleDeg
 //     - for large angles: if an angle is bigger than degenerateAngleDeg.
 //     - a good values to use is typically 170
-//  - collapseRatio 
+//  - collapseRatio
 //     - for small angles: given the corresponding edges (a,b,c) in all permutations, if (a/b < collapseRatio) & (a/c < collapseRatio)
-//     - a good value to use is 0.1 
+//     - a good value to use is 0.1
 static int FixDegeneracy(Polyhedron& p, double collapseRatio, double degenerateAngleDeg)
 {
 	DEBUG_LEVEL(3, "Fix degeneracy: %g collapse-ratio, %g degenerate-angle", collapseRatio, degenerateAngleDeg);
@@ -2729,7 +2720,7 @@ static void Smooth(Polyhedron& p, double delta, int mode=0)
 }
 
 
-// Description: 
+// Description:
 // - The goal of this method is to ensure that all the edges of the mesh are within the interval [epsilonMin,epsilonMax].
 //   In order to do so, edge collapses and edge split operations are performed.
 // - The method also attempts to fix degeneracies by invoking FixDegeneracy(collapseRatio,degenerate_angle_deg) and performs some local smoothing, based on the operating mode.
@@ -2740,7 +2731,7 @@ static void Smooth(Polyhedron& p, double delta, int mode=0)
 //          1 - fixDegeneracy=Yes smoothing=Yes; (default)
 //         10 - fixDegeneracy=Yes smoothing=No;
 // - max_iter (default=30) - maximum number of iterations to be performed; since there is no guarantee that one operations (such as a collapse, for example)
-//   will not in turn generate new degeneracies, operations are being performed on the mesh in an iterative fashion. 
+//   will not in turn generate new degeneracies, operations are being performed on the mesh in an iterative fashion.
 static void EnsureEdgeSize(Polyhedron& p, double epsilonMin, double epsilonMax, double collapseRatio, double degenerate_angle_deg, int mode, int max_iters, int comp_size_threshold)
 {
 	if (mode>0)
@@ -2835,7 +2826,7 @@ static void EnsureEdgeSize(Polyhedron& p, double epsilonMin, double epsilonMax, 
 		ComputeStatsEdge(p, edge);
 		VERBOSE("Edge size in [%g, %g] (requested in [%g, %g]): %d ops, %d iters", edge.min, edge.max, epsilonMin, epsilonMax, total_no_ops, iters);
 	}
-	#endif	
+	#endif
 }
 
 static void ComputeVertexNormals(Polyhedron& p)
@@ -2868,7 +2859,7 @@ static std::vector< std::pair<Vertex*, int> > GetRingNeighbourhood(Vertex& v, in
 	std::queue<Vertex*> elems;
 	std::vector< std::pair<Vertex*, int> > result;
 
-	// add base level	
+	// add base level
 	elems.push(&v);
 	neigh_map[&v]=0;
 
@@ -2979,7 +2970,7 @@ static void UpdateMeshData(Polyhedron& p)
 	// compute vertex normal
 	ComputeVertexNormals(p);
 	#if ROBUST_NORMALS>0
-	// compute robust vertex normal		
+	// compute robust vertex normal
 	for (Vertex_iterator vi=p.vertices_begin(); vi!=p.vertices_end(); vi++)
 		ComputeVertexRobustNormal(*vi, ROBUST_NORMALS);
 	#endif
@@ -2998,7 +2989,7 @@ static void UpdateMeshData(Polyhedron& p)
 		ComputeVertexLaplacianDeriv(*vi);
 	}
 
-	// set border edges	
+	// set border edges
 	for (Halfedge_iterator hi=p.border_halfedges_begin(); hi!=p.halfedges_end(); hi++)
 		hi->vertex()->setBorder();
 }
@@ -3018,7 +3009,7 @@ public:
 		typedef typename HDS::Vertex::Point Point;
 		CGAL::Polyhedron_incremental_builder_3<HDS> B(hds, false);
 		B.begin_surface(vertices.size(), faces.size());
-		// add the vertices		
+		// add the vertices
 		FOREACH(i, vertices) {
 			const Mesh::Vertex& v = vertices[i];
 			B.add_vertex(Point(v.x, v.y, v.z));
@@ -4905,3 +4896,5 @@ bool MVS::TestMeshProjectionMT(const Mesh& mesh, const Image& image) {
 }
 /*----------------------------------------------------------------*/
 #endif // _USE_OPENMP
+
+#pragma pop_macro("VERBOSE")

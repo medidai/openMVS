@@ -336,7 +336,7 @@ bool Export3DProjections(Scene& scene, const String& inputFileName) {
 int main(int argc, LPCTSTR* argv)
 {
 	#ifdef _DEBUGINFO
-	// set _crtBreakAlloc index to stop in <dbgheap.c> at allocation
+	// set _crtBreakAlloc index or use _CrtSetBreakAlloc() to stop in <dbgheap.c> at allocation
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);// | _CRTDBG_CHECK_ALWAYS_DF);
 	#endif
 
@@ -459,9 +459,6 @@ int main(int argc, LPCTSTR* argv)
 				scene.mesh.Save(baseFileName+_T("_raw")+OPT::strExportType);
 			}
 			#endif
-		} else if (!OPT::strMeshFileName.empty()) {
-			// load existing mesh to clean
-			scene.mesh.Load(MAKE_PATH_SAFE(OPT::strMeshFileName));
 		}
 
 		// clean the mesh

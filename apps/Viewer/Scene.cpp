@@ -378,9 +378,11 @@ bool Scene::Open(const String& fileName, String geometryFileName) {
 	sceneName = fileName;
 
 	// load the scene
-	WORKING_FOLDER = Util::getFilePath(fileName);
-	INIT_WORKING_FOLDER;
-	const MVS::Scene::SCENE_TYPE sceneType(scene.Load(fileName, true));
+	if (Util::isFullPath(fileName)) {
+		WORKING_FOLDER = Util::getFilePath(fileName);
+		INIT_WORKING_FOLDER;
+	}
+	const MVS::Scene::SCENE_TYPE sceneType(scene.Load(MAKE_PATH_FULL(WORKING_FOLDER_FULL, fileName), true));
 	if (sceneType == MVS::Scene::SCENE_NA) {
 		DEBUG("error: can not open scene '%s'", fileName.c_str());
 		window.SetVisible(true);
@@ -392,13 +394,13 @@ bool Scene::Open(const String& fileName, String geometryFileName) {
 		// try to load given mesh
 		MVS::Mesh mesh;
 		MVS::PointCloud pointcloud;
-		if (mesh.Load(geometryFileName)) {
+		if (mesh.Load(MAKE_PATH_FULL(WORKING_FOLDER_FULL, geometryFileName))) {
 			scene.mesh.Swap(mesh);
 			geometryName = geometryFileName;
 			geometryMesh = true;
 		} else
 		// try to load as a point-cloud
-		if (pointcloud.Load(geometryFileName)) {
+		if (pointcloud.Load(MAKE_PATH_FULL(WORKING_FOLDER_FULL, geometryFileName))) {
 			scene.pointcloud.Swap(pointcloud);
 			geometryName = geometryFileName;
 			geometryMesh = false;

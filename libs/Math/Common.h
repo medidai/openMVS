@@ -26,6 +26,7 @@
 
 #include "LMFit/lmmin.h"
 #include "RobustNorms.h"
+#include "SimilarityTransform.h"
 
 
 // D E F I N E S ///////////////////////////////////////////////////

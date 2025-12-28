@@ -56,8 +56,14 @@ using namespace MVS;
 // (faster, but not clear license policy)
 #define DELAUNAY_MAXFLOW_IBFS
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("ScnRecnt"));
 
 #ifdef DELAUNAY_MAXFLOW_IBFS
 #include "../Math/IBFS/IBFS.h"
@@ -282,9 +288,9 @@ vert_info_t::~vert_info_t() {
 }
 void vert_info_t::AllocateInfo() {
 	ASSERT(!views.IsEmpty());
-	viewsInfo = new view_info_t[views.GetSize()];
+	viewsInfo = new view_info_t[views.size()];
 	#ifndef _RELEASE
-	memset(viewsInfo, 0, sizeof(view_info_t)*views.GetSize());
+	memset(reinterpret_cast<void*>(viewsInfo), 0, sizeof(view_info_t)*views.size());
 	#endif
 }
 #endif
@@ -1157,3 +1163,5 @@ bool Scene::ReconstructMesh(float distInsert, bool bUseFreeSpaceSupport, bool bU
 	return true;
 }
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

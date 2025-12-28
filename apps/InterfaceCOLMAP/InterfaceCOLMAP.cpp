@@ -225,7 +225,7 @@ typedef uint64_t image_pair_t;
 typedef uint32_t point2D_t;
 typedef uint64_t point3D_t;
 
-const std::vector<String> mapCameraModel = {
+const std::vector<String> mapCameraModel {
 	"SIMPLE_PINHOLE",
 	"PINHOLE",
 	"SIMPLE_RADIAL",
@@ -760,7 +760,7 @@ bool ImportScene(const String& strFolder, const String& strOutFolder, Interface&
 			camera.C = Interface::Pos3d(0,0,0);
 			if (OPT::bNormalizeIntrinsics) {
 				// normalize camera intrinsics
-				camera.K = Camera::ScaleK<double>(camera.K, 1.0/Camera::GetNormalizationScale(colmapCamera.width, colmapCamera.height));
+				camera.K = ScaleK<double>(camera.K, 1.0/Camera::GetNormalizationScale(colmapCamera.width, colmapCamera.height));
 			} else {
 				camera.width = colmapCamera.width;
 				camera.height = colmapCamera.height;
@@ -1431,7 +1431,7 @@ bool ExportImagesCamera(const String& pathName, const Interface& scene)
 int main(int argc, LPCTSTR* argv)
 {
 	#ifdef _DEBUGINFO
-	// set _crtBreakAlloc index to stop in <dbgheap.c> at allocation
+	// set _crtBreakAlloc index or use _CrtSetBreakAlloc() to stop in <dbgheap.c> at allocation
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);// | _CRTDBG_CHECK_ALWAYS_DF);
 	#endif
 

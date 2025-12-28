@@ -762,7 +762,7 @@ void Window::HandleFileDrop(int count, const char** paths) {
 		String filename(paths[0]);
 		// Check file extension to determine if it's a scene or geometry file
 		String ext = Util::getFileExt(filename).ToLower();
-		if (ext == "mvs" || ext == "sfm" || ext == "dmap") {
+		if (ext == ".mvs" || ext == ".sfm" || ext == ".dmap") {
 			// Scene file
 			String geometryFilename;
 			if (count > 1) {
@@ -770,7 +770,7 @@ void Window::HandleFileDrop(int count, const char** paths) {
 				geometryFilename = String(paths[1]);
 			}
 			GetScene().Open(filename, geometryFilename);
-		} else if (ext == "ply" || ext == "obj" || ext == "off" || ext == "gltf" || ext == "glb") {
+		} else if (ext == ".ply" || ext == ".obj" || ext == ".off" || ext == ".gltf" || ext == ".glb") {
 			// Geometry file
 			GetScene().Open(filename, "");
 		} else {
@@ -833,7 +833,7 @@ void Window::SetCursorVisible(bool visible) {
 
 // Static method to get the associated Scene from the window
 Scene& Window::GetScene(GLFWwindow* window) {
-	return *static_cast<Scene*>(glfwGetWindowUserPointer(window));
+	return *reinterpret_cast<Scene*>(glfwGetWindowUserPointer(window));
 }
 
 Scene& Window::GetCurrentScene()
