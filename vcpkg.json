@@ -4,6 +4,7 @@
   "description": "OpenMVS: open Multi-View Stereo reconstruction library",
   "homepage": "https://cdcseacave.github.io/openMVS",
   "dependencies": [
+    "boost-math",
     "boost-iostreams",
     "boost-program-options",
     "boost-serialization",

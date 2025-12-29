@@ -31,6 +31,7 @@
 
 #include "../../libs/MVS/Common.h"
 #include "../../libs/MVS/Scene.h"
+#include "../../libs/Math/ConfidenceInterval.h"
 
 using namespace MVS;
 
@@ -64,6 +65,10 @@ bool UnitTests()
 	}
 	if (!SEACAVE::TestRayTriangleIntersection<double>(1000)) {
 		VERBOSE("ERROR: TestRayTriangleIntersection<double> failed!");
+		return false;
+	}
+	if (!TestConfidenceInterval()) {
+		VERBOSE("ERROR: TestConfidenceInterval failed!");
 		return false;
 	}
 	VERBOSE("All unit tests passed (%s)", TD_TIMER_GET_FMT().c_str());
