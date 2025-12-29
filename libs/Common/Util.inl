@@ -1045,6 +1045,7 @@ struct MeanStd {
 	MeanStd() : sum(0), sumSq(0), size(0) {}
 	MeanStd(const Type* values, size_t _size) : MeanStd() { Compute(values, _size); }
     bool IsValid() const { return size > 0; }
+	void Clear() { sum = sumSq = TypeW(0); size = 0; }
     void Update(ArgType v) {
 		const TypeW val(static_cast<TypeW>(v));
 		sum += val;
@@ -1061,7 +1062,9 @@ struct MeanStd {
 	TypeW GetVarianceN() const { return static_cast<TypeW>(sumSq - SQUARE(sum) / static_cast<TypeR>(size)); }
 	TypeW GetVariance() const { return static_cast<TypeW>(GetVarianceN() / static_cast<TypeR>(size)); }
 	TypeW GetStdDev() const { return SQRT(GetVariance()); }
-	void Clear() { sum = sumSq = TypeW(0); size = 0; }
+	// Bessel's corrected sample variance and standard deviation (divides by N-1)
+	TypeW GetSampleVariance() const { return static_cast<TypeW>(GetVarianceN() / static_cast<TypeR>(size - 1)); }
+	TypeW GetSampleStdDev() const { return SQRT(GetSampleVariance()); }
 	friend std::ostream& operator<<(std::ostream& os, const MeanStd& obj) {
 		return os << std::setprecision(12) << "Mean: " << obj.GetMean() << ", StdDev: " << obj.GetStdDev();
 	}

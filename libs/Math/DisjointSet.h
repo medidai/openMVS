@@ -1,20 +1,26 @@
-/*
- * DisjointSet.h
- *
- * Copyright (c) 2014-2025 SEACAVE
- *
- * Author(s):
- *
- *      cDc <cdc.seacave@gmail.com>
- */
+////////////////////////////////////////////////////////////////////
+// DisjointSet.h
+//
+// Copyright 2025 cDc@seacave
+// Distributed under the Boost Software License, Version 1.0
+// (See http://www.boost.org/LICENSE_1_0.txt)
 
 #ifndef _MATH_DISJOINTSET_H_
 #define _MATH_DISJOINTSET_H_
 
+
+// I N C L U D E S /////////////////////////////////////////////////
+
 #include <vector>
 #include <utility>
 
-namespace Math {
+
+// D E F I N E S ///////////////////////////////////////////////////
+
+
+namespace SEACAVE {
+
+// S T R U C T S ///////////////////////////////////////////////////
 
 /**
  * @brief Disjoint-set data structure for union-find
@@ -48,7 +54,7 @@ public:
 		const Type px = Find(x);
 		const Type py = Find(y);
 		if (px == py) return;
-		
+
 		if (rank[px] < rank[py]) {
 			parent[px] = py;
 		} else if (rank[px] > rank[py]) {
@@ -89,6 +95,6 @@ public:
 };
 /*----------------------------------------------------------------*/
 
-} // namespace Math
+} // namespace SEACAVE
 
 #endif // _MATH_DISJOINTSET_H_

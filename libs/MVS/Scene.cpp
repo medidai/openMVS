@@ -89,7 +89,7 @@ bool Scene::ImagesHaveNeighbors() const
 }
 
 
-bool Scene::LoadInterface(const String & fileName)
+bool Scene::LoadInterface(const String& fileName)
 {
 	TD_TIMER_STARTD();
 	Interface obj;
@@ -232,7 +232,7 @@ bool Scene::LoadInterface(const String & fileName)
 	return true;
 } // LoadInterface
 
-bool Scene::SaveInterface(const String & fileName, int version) const
+bool Scene::SaveInterface(const String& fileName, int version) const
 {
 	TD_TIMER_STARTD();
 	Interface obj;
@@ -461,7 +461,7 @@ bool Scene::LoadDMAP(const String& fileName)
 // each line store the view ID followed by the 3+ closest view IDs, ordered in decreasing overlap:
 //
 // <cam-id> <neighbor-cam-id-0> <neighbor-cam-id-1> <neighbor-cam-id-2> <...>
-// 
+//
 // for example:
 // 0 1 2 3 4
 // 1 0 2 3 4
@@ -824,7 +824,7 @@ bool Scene::EstimatePointCloudNormals(bool bRefine)
 	// using the homography matrix given by the plane define by the point and the normal,
 	// project each pixel from the target view patch to every reference view and compute the ZNCC score;
 	// use gradient descent to refine the normal estimate, keeping the depth constant.
-	
+
 	// Load images
 	// TODO: replace with images cache
 	bool bImagesReloaded(false);
@@ -1003,7 +1003,7 @@ bool Scene::EstimatePointCloudNormals(bool bRefine)
 		if (validTexels < nTexels)
 			continue;
 		targetMean /= nTexels;
-		
+
 		// Compute target patch variance
 		double targetVariance(0);
 		for (int i = 0; i < validTexels; ++i) {
