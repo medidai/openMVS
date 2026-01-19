@@ -58,7 +58,6 @@ Window::Window()
 	, lastMousePos(0, 0)
 	, lastFrame(0.0)
 	, selectionType(SEL_NA)
-	, selectionIdx(NO_IDX)
 	, selectedNeighborCamera(NO_ID)
 	, clearColor(0.3f, 0.4f, 0.5f, 1.f)
 	, minViews(2)
@@ -74,6 +73,7 @@ Window::Window()
 	, showMesh(true)
 	, showMeshWireframe(false)
 	, showMeshTextured(true)
+	, pendingScreenshotIncludeUI(false)
 {
 }
 
@@ -250,7 +250,9 @@ void Window::ResetView() {
 	camera.Reset();
 	currentControlMode = CONTROL_NONE;
 	SetControlMode(CONTROL_ARCBALL);
+	selectedNeighborCamera = NO_ID;
 	selectionType = SEL_NA;
+	selectionIdx.Release();
 }
 
 void Window::Reset() {
@@ -321,7 +323,7 @@ void Window::UploadRenderData() {
 	// Clear the selection since geometry has changed
 	selectionController->clearSelection();
 	selectionType = SEL_NA;
-	selectionIdx = NO_IDX;
+	selectionIdx.Release();
 
 	// Upload point cloud data if needed
 	if (!scene.GetScene().pointcloud.IsEmpty()) {
@@ -364,24 +366,8 @@ void Window::Render() {
 	// Start UI frame
 	ui->NewFrame(*this);
 
-	// Show UI
-	ui->ShowMainMenuBar(*this);
-
 	Scene& scene = GetScene();
 	if (scene.IsOpen()) {
-		// Show scene information
-		ui->ShowSceneInfo(*this);
-
-		// Show camera controls
-		ui->ShowCameraControls(*this);
-
-		// Show selection controls
-		ui->ShowSelectionControls(*this);
-
-		// Show render settings
-		ui->ShowRenderSettings(*this);
-		ui->ShowWorkflowWindows(*this);
-
 		// Render the scene contents
 		if (showPointCloud) {
 			renderer->RenderPointCloud(*this);
@@ -390,6 +376,12 @@ void Window::Render() {
 		}
 		if (showMesh)
 			renderer->RenderMesh(*this);
+
+		// Flush pending screenshot if requested (without UI)
+		if (!pendingScreenshotPath.empty() && !pendingScreenshotIncludeUI) {
+			CaptureScreenshot(pendingScreenshotPath);
+			pendingScreenshotPath.clear();
+		}
 
 		// Render cameras and selection highlights
 		if (showCameras)
@@ -405,7 +397,23 @@ void Window::Render() {
 
 		// Render 2D selection overlay (after all 3D rendering, before UI)
 		renderer->RenderSelectionOverlay(*this);
+
+		// Show scene information
+		ui->ShowSceneInfo(*this);
+
+		// Show camera controls
+		ui->ShowCameraControls(*this);
+
+		// Show selection controls
+		ui->ShowSelectionControls(*this);
+
+		// Show render settings
+		ui->ShowRenderSettings(*this);
+		ui->ShowWorkflowWindows(*this);
 	}
+
+	// Show UI
+	ui->ShowMainMenuBar(*this);
 
 	// Render gizmos or coordinate axes
 	if (currentControlMode == CONTROL_ARCBALL && arcballControls && arcballControls->getEnableGizmos()) {
@@ -418,6 +426,12 @@ void Window::Render() {
 
 	// Render UI
 	ui->Render(*this);
+
+	// Flush pending screenshot if requested (with UI)
+	if (!pendingScreenshotPath.empty()) {
+		CaptureScreenshot(pendingScreenshotPath);
+		pendingScreenshotPath.clear();
+	}
 
 	// End frame
 	renderer->EndFrame();
@@ -460,6 +474,14 @@ void Window::SetSceneBounds(const Point3f& center, const Point3f& size) {
 	camera.SetSceneBounds(center, size);
 	arcballControls->setSensitivity(norm(size) * 0.1);
 	firstPersonControls->setMovementSpeed(norm(size) * 0.1);
+}
+
+void Window::RequestScreenshot(const String& filename, bool includeUI) {
+	if (filename.empty())
+		return;
+	pendingScreenshotPath = filename;
+	pendingScreenshotIncludeUI = includeUI;
+	RequestRedraw();
 }
 
 GLFWwindow* Window::GetCurrentGLFWWindow()
@@ -596,6 +618,35 @@ void Window::HandleScroll(double yoffset) {
 }
 
 void Window::HandleKeyboard(int key, int action, int mods) {
+	const int disallowedMods = GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SUPER;
+	const bool shiftOnly = (mods & GLFW_MOD_SHIFT) && !(mods & disallowedMods);
+	if (action == GLFW_PRESS && shiftOnly) {
+		switch (key) {
+		case GLFW_KEY_A:
+			ui->ToggleSceneInfo();
+			RequestRedraw();
+			return;
+		case GLFW_KEY_Q:
+			ui->ToggleCameraInfoDialog();
+			RequestRedraw();
+			return;
+		case GLFW_KEY_C:
+			ui->ToggleCameraControls();
+			RequestRedraw();
+			return;
+		case GLFW_KEY_S:
+			ui->ToggleSelectionDialog();
+			RequestRedraw();
+			return;
+		case GLFW_KEY_R:
+			ui->ToggleRenderSettings();
+			RequestRedraw();
+			return;
+		default:
+			break;
+		}
+	}
+
 	// Skip UI if it wants to capture keyboard
 	if (ui->WantCaptureKeyboard())
 		return;
@@ -702,6 +753,23 @@ void Window::HandleKeyboard(int key, int action, int mods) {
 				ui->ToggleHelpDialog();
 				return;
 
+			// Screenshot
+			case GLFW_KEY_X:
+				#ifdef __APPLE__
+				if ((mods & GLFW_MOD_SUPER)) {
+				#else
+				if ((mods & GLFW_MOD_CONTROL)) {
+				#endif
+					String filename;
+					if (ui->ShowSaveImageDialog(filename)) {
+						if (Util::getFileExt(filename).empty())
+							filename += ".png";
+						RequestScreenshot(filename, (mods & GLFW_MOD_SHIFT) != 0);
+					}
+					return;
+				}
+				return;
+
 			// Rendering toggles
 			case GLFW_KEY_P:
 				showPointCloud = !showPointCloud;
@@ -777,6 +845,29 @@ void Window::HandleFileDrop(int count, const char** paths) {
 			DEBUG("Unsupported file format: %s", ext.c_str());
 		}
 	}
+}
+
+bool Window::CaptureScreenshot(const String& filename) {
+	const cv::Size& size = camera.GetSize();
+	if (size.empty()) {
+		DEBUG("error: invalid framebuffer size for screenshot");
+		return false;
+	}
+
+	Image8U4 imgRGBA(size);
+	GL_CHECK(glPixelStorei(GL_PACK_ALIGNMENT, 1));
+	GL_CHECK(glReadBuffer(GL_BACK));
+	GL_CHECK(glReadPixels(0, 0, size.width, size.height, GL_RGBA, GL_UNSIGNED_BYTE, imgRGBA.getData()));
+	Image8U3 img(size);
+	cv::cvtColor(imgRGBA, img, cv::COLOR_RGBA2BGR);
+	cv::flip(img, img, 0);
+
+	if (!img.Save(filename)) {
+		DEBUG("error: failed to write screenshot to '%s'", filename.c_str());
+		return false;
+	}
+	DEBUG("Screenshot saved to '%s'", filename.c_str());
+	return true;
 }
 
 double Window::UpdateTiming() {

@@ -688,7 +688,7 @@ static std::array<Point3f, 4> ComputeCameraFrustumCorners(const MVS::Image& imag
 	// This correctly handles cases where the principal point is not at the image center
 	Point3 imageCorners[4] = {
 		Point3(0, 0, depth),                                    // top-left
-		Point3(imageData.width, 0, depth),                      // top-right  
+		Point3(imageData.width, 0, depth),                      // top-right
 		Point3(imageData.width, imageData.height, depth),       // bottom-right
 		Point3(0, imageData.height, depth)                      // bottom-left
 	};
@@ -704,7 +704,7 @@ static std::array<Point3f, 4> ComputeCameraFrustumCorners(const MVS::Image& imag
 // Helper function to create camera frustum geometry for a single camera
 // Returns the vertices, colors, and indices for the camera wireframe
 static void CreateCameraFrustumGeometry(
-	const MVS::Image& imageData, 
+	const MVS::Image& imageData,
 	float depth,
 	const Eigen::Vector3f& centerColor,
 	const Eigen::Vector3f& frustumColor,
@@ -734,7 +734,7 @@ static void CreateCameraFrustumGeometry(
 	vertices.insert(vertices.end(), {worldPrincipalPoint.x, worldPrincipalPoint.y, worldPrincipalPoint.z});
 	colors.insert(colors.end(), {0.f, 1.f, 0.f}); // Green
 
-	// Add upwards direction indicator (blue) - line showing camera's up direction  
+	// Add upwards direction indicator (blue) - line showing camera's up direction
 	const Point3f worldUpPoint = imageData.camera.TransformPointI2W(Point3(pp.x, pp.y - imageData.height * 0.5f, depth)); // Half way up from center
 	vertices.insert(vertices.end(), {worldUpPoint.x, worldUpPoint.y, worldUpPoint.z});
 	colors.insert(colors.end(), {0.f, 0.f, 1.f}); // Blue
@@ -781,13 +781,13 @@ void Renderer::UploadCameras(const Window& window) {
 		size_t baseIndex = cameraVertices.size() / 3;
 		// Create camera frustum geometry using the shared function
 		CreateCameraFrustumGeometry(
-			imageData, 
-			depth, 
-			centerColor, 
+			imageData,
+			depth,
+			centerColor,
 			frustumColor,
-			cameraVertices, 
-			cameraColors, 
-			cameraIndices, 
+			cameraVertices,
+			cameraColors,
+			cameraIndices,
 			baseIndex
 		);
 		cameraIndexCount += 20; // 10 lines * 2 indices per line
@@ -858,14 +858,20 @@ void Renderer::UploadSelection(const Window& window) {
 	selectionPrimitiveCount = 0;
 	if (window.selectionType == Window::SEL_NA)
 		return;
+	const bool requiresSelectionIndex = window.selectionType == Window::SEL_POINT || window.selectionType == Window::SEL_CAMERA;
+	if (requiresSelectionIndex && !window.HasSelectionIds())
+		return;
+	const IDX primarySelectionIdx = window.GetSelectionId();
 
 	// Handle point selection with valid pointViews
 	std::vector<float> selectionVertices;
 	const MVS::Scene& scene = window.GetScene().GetScene();
 	if (window.selectionType == Window::SEL_POINT && scene.IsValid() && scene.pointcloud.IsValid()) {
+		if (primarySelectionIdx >= scene.pointcloud.points.size() || primarySelectionIdx >= scene.pointcloud.pointViews.size())
+			return;
 		// Create line geometry from each camera seeing this point to the point
-		const MVS::PointCloud::Point& selectedPoint = scene.pointcloud.points[window.selectionIdx];
-		const MVS::PointCloud::ViewArr& pointViews = scene.pointcloud.pointViews[window.selectionIdx];
+		const MVS::PointCloud::Point& selectedPoint = scene.pointcloud.points[primarySelectionIdx];
+		const MVS::PointCloud::ViewArr& pointViews = scene.pointcloud.pointViews[primarySelectionIdx];
 		selectionVertices.reserve(pointViews.size() * 6); // 2 points per line, 3 coordinates per point
 		for (const MVS::PointCloud::View& viewIdx : pointViews) {
 			ASSERT(viewIdx < scene.images.size());
@@ -885,45 +891,59 @@ void Renderer::UploadSelection(const Window& window) {
 	}
 	// Handle triangle selection
 	else if (window.selectionType == Window::SEL_TRIANGLE) {
-		const Point3f& v0 = window.selectionPoints[0];
-		const Point3f& v1 = window.selectionPoints[1];
-		const Point3f& v2 = window.selectionPoints[2];
-		selectionVertices.reserve(18); // 3 lines * 2 vertices * 3 floats
-		// Line v0-v1
-		selectionVertices.insert(selectionVertices.end(), { v0.x, v0.y, v0.z });
-		selectionVertices.insert(selectionVertices.end(), { v1.x, v1.y, v1.z });
-		// Line v1-v2
-		selectionVertices.insert(selectionVertices.end(), { v1.x, v1.y, v1.z });
-		selectionVertices.insert(selectionVertices.end(), { v2.x, v2.y, v2.z });
-		// Line v2-v0
-		selectionVertices.insert(selectionVertices.end(), { v2.x, v2.y, v2.z });
-		selectionVertices.insert(selectionVertices.end(), { v0.x, v0.y, v0.z });
+		const MVS::Mesh& mesh = scene.mesh;
+		if (mesh.IsEmpty())
+			return;
+		selectionVertices.reserve(window.GetSelectionCount() * 18);
+		for (IDX selectedFaceIdx : window.GetSelectionIds()) {
+			if (selectedFaceIdx >= mesh.faces.size())
+				continue;
+			const MVS::Mesh::Face& face = mesh.faces[selectedFaceIdx];
+			const Point3f& v0 = mesh.vertices[face[0]];
+			const Point3f& v1 = mesh.vertices[face[1]];
+			const Point3f& v2 = mesh.vertices[face[2]];
+			// Line v0-v1
+			selectionVertices.insert(selectionVertices.end(), { v0.x, v0.y, v0.z });
+			selectionVertices.insert(selectionVertices.end(), { v1.x, v1.y, v1.z });
+			// Line v1-v2
+			selectionVertices.insert(selectionVertices.end(), { v1.x, v1.y, v1.z });
+			selectionVertices.insert(selectionVertices.end(), { v2.x, v2.y, v2.z });
+			// Line v2-v0
+			selectionVertices.insert(selectionVertices.end(), { v2.x, v2.y, v2.z });
+			selectionVertices.insert(selectionVertices.end(), { v0.x, v0.y, v0.z });
+		}
+		if (selectionVertices.empty())
+			return;
 	}
 	// Handle camera selection
 	else if (window.selectionType == Window::SEL_CAMERA) {
-		const Image& image = window.GetScene().GetImages()[window.selectionIdx];
-		const MVS::Image& selectedImage = scene.images[image.idx];
-		ASSERT(selectedImage.IsValid());
+		const ImageArr& viewerImages = window.GetScene().GetImages();
 		const float depth = window.GetCamera().GetSceneDistance() * window.cameraSize * 10.f;
-		// Get frustum corners
-		std::array<Point3f, 4> worldCorners = ComputeCameraFrustumCorners(selectedImage, depth);
-		// Reserve space for lines: 4 (center to corners) + 4 (corner rectangle) = 8 lines × 2 vertices × 3 coordinates = 48 floats
-		selectionVertices.reserve(48);
-		// Lines from camera center to each corner (4 lines)
-		const Point3f center = selectedImage.camera.C;
-		for (int j = 0; j < 4; ++j) {
-			// Line from center to corner j
-			selectionVertices.insert(selectionVertices.end(), {center.x, center.y, center.z});
-			selectionVertices.insert(selectionVertices.end(), {worldCorners[j].x, worldCorners[j].y, worldCorners[j].z});
+		bool hasValidCamera = false;
+		for (IDX cameraIdx : window.GetSelectionIds()) {
+			if (cameraIdx >= viewerImages.size())
+				continue;
+			const Image& image = viewerImages[cameraIdx];
+			const MVS::Image& selectedImage = scene.images[image.idx];
+			if (!selectedImage.IsValid())
+				continue;
+			std::array<Point3f, 4> worldCorners = ComputeCameraFrustumCorners(selectedImage, depth);
+			selectionVertices.reserve(selectionVertices.size() + 48);
+			const Point3f center = selectedImage.camera.C;
+			for (int j = 0; j < 4; ++j) {
+				selectionVertices.insert(selectionVertices.end(), {center.x, center.y, center.z});
+				selectionVertices.insert(selectionVertices.end(), {worldCorners[j].x, worldCorners[j].y, worldCorners[j].z});
+			}
+			for (int j = 0; j < 4; ++j) {
+				const Point3f& corner1 = worldCorners[j];
+				const Point3f& corner2 = worldCorners[(j + 1) % 4];
+				selectionVertices.insert(selectionVertices.end(), {corner1.x, corner1.y, corner1.z});
+				selectionVertices.insert(selectionVertices.end(), {corner2.x, corner2.y, corner2.z});
+			}
+			hasValidCamera = true;
 		}
-		// Rectangle connecting the four corners (4 lines)
-		for (int j = 0; j < 4; ++j) {
-			// Line from corner j to corner (j+1)%4
-			const Point3f& corner1 = worldCorners[j];
-			const Point3f& corner2 = worldCorners[(j + 1) % 4];
-			selectionVertices.insert(selectionVertices.end(), {corner1.x, corner1.y, corner1.z});
-			selectionVertices.insert(selectionVertices.end(), {corner2.x, corner2.y, corner2.z});
-		}
+		if (!hasValidCamera)
+			return;
 	}
 
 	// Set the primitive count (number of vertices)
@@ -977,7 +997,7 @@ void Renderer::UploadBounds(const MVS::Scene& scene) {
 	const int edges[12][2] = {
 		// X-axis edges (differ in bit 0)
 		{0,1}, {2,3}, {4,5}, {6,7},
-		// Y-axis edges (differ in bit 1)  
+		// Y-axis edges (differ in bit 1)
 		{0,2}, {1,3}, {4,6}, {5,7},
 		// Z-axis edges (differ in bit 2)
 		{0,4}, {1,5}, {2,6}, {3,7}
@@ -1178,7 +1198,7 @@ void Renderer::RenderImageOverlays(const Window& window) {
 
 void Renderer::RenderSelection(const Window& window) {
 	// Highlight selected point in point cloud if applicable
-	if (window.showPointCloud && window.selectionType == Window::SEL_POINT && pointCount > 0) {
+	if (window.showPointCloud && window.selectionType == Window::SEL_POINT && pointCount > 0 && window.HasSelectionIds()) {
 		// Use the geometry selection shader for highlighting
 		geometrySelectionShader->Use();
 		geometrySelectionShader->SetBool("useHighlight", true);
@@ -1191,8 +1211,12 @@ void Renderer::RenderSelection(const Window& window) {
 		// We need access to the actual point cloud data to extract selected point
 		pointCloudVAO->Bind();
 
-		// Render selected point individually using glDrawArrays with offset
-		GL_CHECK(glDrawArrays(GL_POINTS, window.selectionIdx, 1));
+		// Render each selected point individually using glDrawArrays with offset
+		for (IDX selectedIdx : window.GetSelectionIds()) {
+			if (selectedIdx >= pointCount)
+				continue;
+			GL_CHECK(glDrawArrays(GL_POINTS, static_cast<GLint>(selectedIdx), 1));
+		}
 
 		pointCloudVAO->Unbind();
 	}
@@ -1283,7 +1307,7 @@ void Renderer::RenderCoordinateAxes(const Camera& camera) {
 	// Create an orthographic projection matrix that maps [-1,1] to the widget viewport
 	Eigen::Matrix4f orthoProj = Eigen::Matrix4f::Identity();
 	orthoProj(0,0) = 1.5f;  // Scale X to fit nicely in widget
-	orthoProj(1,1) = 1.5f;  // Scale Y to fit nicely in widget  
+	orthoProj(1,1) = 1.5f;  // Scale Y to fit nicely in widget
 	orthoProj(2,2) = -0.1f; // Small Z range for orthographic
 
 	// Get only the rotation part of the view matrix (no translation)
@@ -1340,7 +1364,7 @@ void Renderer::RenderArcballGizmos(const Camera& camera, const class ArcballCont
 	// Colors for X, Y, Z axes (red, green, blue)
 	Eigen::Vector3f colors[3] = {
 		Eigen::Vector3f(1.f, 0.5f, 0.5f), // X - red
-		Eigen::Vector3f(0.5f, 1.f, 0.5f), // Y - green  
+		Eigen::Vector3f(0.5f, 1.f, 0.5f), // Y - green
 		Eigen::Vector3f(0.5f, 0.5f, 1.f)  // Z - blue
 	};
 
@@ -1362,7 +1386,7 @@ void Renderer::RenderArcballGizmos(const Camera& camera, const class ArcballCont
 			// X-axis: rotate 90 degrees around Y-axis
 			transform.topLeftCorner<3, 3>() *= Eigen::AngleAxisf(FHALF_PI, Eigen::Vector3f::UnitY()).toRotationMatrix();
 		} else if (axis == 2) {
-			// Z-axis: rotate 90 degrees around X-axis  
+			// Z-axis: rotate 90 degrees around X-axis
 			transform.topLeftCorner<3, 3>() *= Eigen::AngleAxisf(FHALF_PI, Eigen::Vector3f::UnitX()).toRotationMatrix();
 		}
 		// Y-axis uses default circle orientation (no additional rotation needed)
@@ -1408,7 +1432,7 @@ void Renderer::RenderArcballGizmos(const Camera& camera, const class ArcballCont
 }
 
 void Renderer::RenderSelectionOverlay(const Window& window) {
-	// Only render overlay if in selection mode  
+	// Only render overlay if in selection mode
 	if (window.GetControlMode() != Window::CONTROL_SELECTION)
 		return;
 	SelectionController& selectionController = window.GetSelectionController();
@@ -1648,6 +1672,8 @@ Renderer::PickResult Renderer::PickPrimitiveAt(const Point2f& screenPos, int rad
 	const size_t numPixels = (size_t)w * (size_t)h;
 	std::vector<GLuint> idBuf(numPixels);
 	std::vector<float> depthBuf(numPixels);
+	GL_CHECK(glPixelStorei(GL_PACK_ALIGNMENT, 1));
+	GL_CHECK(glReadBuffer(GL_COLOR_ATTACHMENT0));
 	// Read integer ID buffer
 	GL_CHECK(glReadPixels(minX, minY, w, h, GL_RED_INTEGER, GL_UNSIGNED_INT, idBuf.data()));
 	// Read depth buffer

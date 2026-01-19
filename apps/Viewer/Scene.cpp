@@ -81,15 +81,15 @@ class EventWorkflow : public Event
 {
 public:
 	Scene* pScene;
-	
-	EventWorkflow(Scene* _pScene) 
+
+	EventWorkflow(Scene* _pScene)
 		: Event(EVT_JOB), pScene(_pScene) {}
-	
+
 	virtual ~EventWorkflow() {}
-	
+
 	// Execute the workflow (must be implemented by derived classes)
 	virtual bool Execute() = 0;
-	
+
 	// Run wrapper that handles state management
 	bool Run(void*) final {
 		const bool success = Execute();
@@ -324,7 +324,7 @@ void Scene::CheckWorkflowCompletion() {
 
 void Scene::FinalizeWorkflow(bool success) {
 	SEACAVE::Lock lock(workflowMutex);
-	
+
 	// Check if we need to finalize (already done or not running)
 	const WorkflowState state = workflowState.load();
 	if (state != WF_STATE_COMPLETED && state != WF_STATE_FAILED)
@@ -334,12 +334,12 @@ void Scene::FinalizeWorkflow(bool success) {
 	const double currentTime = glfwGetTime();
 	const double duration = (workflowStartTime > 0.0) ? (currentTime - workflowStartTime) : 0.0;
 	const WorkflowType type = currentWorkflowType.load();
-	
+
 	// Add to workflow history
 	workflowHistory.push_back({type, duration, success});
 
 	if (success) {
-		DEBUG("Workflow completed successfully: %s (%.2f seconds)", 
+		DEBUG("Workflow completed successfully: %s (%.2f seconds)",
 			type == WF_ESTIMATE_ROI ? "Estimate ROI" :
 			type == WF_DENSIFY ? "Densify" :
 			type == WF_RECONSTRUCT ? "Reconstruct Mesh" :
@@ -349,14 +349,14 @@ void Scene::FinalizeWorkflow(bool success) {
 
 		// Re-upload geometry to GPU buffers
 		window.UploadRenderData();
-		
+
 		// Mark geometry as modified
 		geometryModified.store(true);
 
 		// Request window redraw
 		window.RequestRedraw();
 	} else {
-		DEBUG("Workflow failed: %s", 
+		DEBUG("Workflow failed: %s",
 			type == WF_ESTIMATE_ROI ? "Estimate ROI" :
 			type == WF_DENSIFY ? "Densify" :
 			type == WF_RECONSTRUCT ? "Reconstruct Mesh" :
@@ -751,8 +751,8 @@ void Scene::OnCastRay(const Point2f& screenPos, const Ray3d& ray, int button, in
 		}
 		if (window.selectionType != Window::SEL_NA && now-window.selectionTime < timeDblClick) {
 			// this is a double click, center scene at the selected element
-			if (window.selectionType == Window::SEL_CAMERA)
-				window.GetCamera().SetCameraViewMode(window.selectionIdx);
+			if (window.selectionType == Window::SEL_CAMERA && window.HasSelectionIds())
+				window.GetCamera().SetCameraViewMode(static_cast<MVS::IIndex>(window.GetSelectionId()));
 			else {
 				window.GetCamera().DisableCameraViewMode();
 				OnCenterScene(window.selectionPoints[3]);
@@ -814,7 +814,7 @@ void Scene::OnCastRay(const Point2f& screenPos, const Ray3d& ray, int button, in
 				window.selectedNeighborCamera = newSelectionIdx;
 			} else {
 				// Normal selection
-				window.selectionIdx = newSelectionIdx;
+				window.SetSelectionId(newSelectionIdx);
 				window.selectedNeighborCamera = NO_ID;
 				window.selectionPoints[0] = newSelectionPoints[0];
 				window.selectionPoints[1] = newSelectionPoints[1];
@@ -918,8 +918,8 @@ void Scene::OnSelectPointsByCamera(bool highlightCameraVisiblePoints) {
 	SelectionController& selectionController = window.GetSelectionController();
 	// Prefer explicit selection of a camera, otherwise use camera-view-mode currentCamID
 	MVS::IIndex camViewerIdx = NO_ID;
-	if (window.selectionType == Window::SEL_CAMERA && window.selectionIdx != NO_ID)
-		camViewerIdx = window.selectionIdx;
+	if (window.selectionType == Window::SEL_CAMERA && window.HasSelectionIds())
+		camViewerIdx = static_cast<MVS::IIndex>(window.GetSelectionId());
 	else if (window.GetCamera().IsCameraViewMode())
 		camViewerIdx = window.GetCamera().GetCurrentCamID();
 	if (!highlightCameraVisiblePoints || camViewerIdx == NO_ID) {
@@ -1087,11 +1087,11 @@ MVS::Scene Scene::CropToPoints(const MVS::PointCloud::IndexArr& selectedPointInd
 		return MVS::Scene(); // Return empty scene
 	}
 	if (selectedImageIndices.size() == scene.images.size()) {
-		VERBOSE("Cropping scene: all %u images see at least %u points from %u selected; nothing to do", 
+		VERBOSE("Cropping scene: all %u images see at least %u points from %u selected; nothing to do",
 			selectedImageIndices.size(), minPoints, scene.pointcloud.GetSize());
 		return MVS::Scene(); // If all images are selected, return empty scene
 	}
-	VERBOSE("Cropping scene: found %u images that see at least %u points from %u selected", 
+	VERBOSE("Cropping scene: found %u images that see at least %u points from %u selected",
 		selectedImageIndices.size(), minPoints, scene.pointcloud.GetSize());
 	return scene.SubScene(selectedImageIndices);
 }

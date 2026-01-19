@@ -42,8 +42,14 @@
 
 using namespace VIEWER;
 
+
+// D E F I N E S ///////////////////////////////////////////////////
+
 constexpr float PAD = 10.f;
 constexpr size_t MAX_UI_LOG_LINES = 9000;
+
+
+// S T R U C T S ///////////////////////////////////////////////////
 
 UI::UI()
 	: showSceneInfo(false)
@@ -82,6 +88,21 @@ UI::~UI() {
 	Release();
 }
 
+
+namespace {
+const char* ImGuiGetClipboardText(void* glfwWindow) {
+	if (glfwWindow == nullptr)
+		return "";
+	const char* clipboard = glfwGetClipboardString(static_cast<GLFWwindow*>(glfwWindow));
+	return clipboard != nullptr ? clipboard : "";
+}
+void ImGuiSetClipboardText(void* glfwWindow, const char* text) {
+	if (glfwWindow == nullptr)
+		return;
+	glfwSetClipboardString(static_cast<GLFWwindow*>(glfwWindow), text != nullptr ? text : "");
+}
+} // namespace
+
 bool UI::Initialize(Window& window, const String& glslVersion) {
 	// Setup Dear ImGui context
 	#ifndef _RELEASE
@@ -90,6 +111,9 @@ bool UI::Initialize(Window& window, const String& glslVersion) {
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.GetClipboardTextFn = ImGuiGetClipboardText;
+	io.SetClipboardTextFn = ImGuiSetClipboardText;
+	io.ClipboardUserData = window.GetGLFWWindow();
 	iniPath = Util::getApplicationFolder() + "Viewer.ini";
 	io.IniFilename = iniPath.c_str();
 
@@ -195,9 +219,8 @@ void UI::ShowMainMenuBar(Window& window) {
 		ShowSavePromptDialog(window);
 
 	// Only show menu bar if it should be visible
-	if (!showMainMenu) {
+	if (!showMainMenu)
 		return;
-	}
 
 	if (ImGui::BeginMainMenuBar()) {
 		// Update last interaction time when menu bar is actively being used
@@ -239,6 +262,34 @@ void UI::ShowMainMenuBar(Window& window) {
 				window.SetVisible(true);
 			}
 			#ifdef __APPLE__
+			if (ImGui::MenuItem("Save Screenshot...", "Cmd+Shift+P", false, window.IsValid())) {
+			#else
+			if (ImGui::MenuItem("Save Screenshot", "Ctrl+X", false, window.IsValid())) {
+			#endif
+				window.SetVisible(false);
+				String filename = "screenshot.png";
+				if (ShowSaveImageDialog(filename)) {
+					if (Util::getFileExt(filename).empty())
+						filename += ".png";
+					window.RequestScreenshot(filename);
+				}
+				window.SetVisible(true);
+			}
+			#ifdef __APPLE__
+			if (ImGui::MenuItem("Save Screenshot (with UI)...", "Cmd+Opt+Shift+P", false, window.IsValid())) {
+			#else
+			if (ImGui::MenuItem("Save Screenshot (with UI)", "Ctrl+Shift+X", false, window.IsValid())) {
+			#endif
+				window.SetVisible(false);
+				String filename = "screenshot.png";
+				if (ShowSaveImageDialog(filename)) {
+					if (Util::getFileExt(filename).empty())
+						filename += ".png";
+					window.RequestScreenshot(filename, true);
+				}
+				window.SetVisible(true);
+			}
+			#ifdef __APPLE__
 			if (ImGui::MenuItem("Close", "Cmd+W", false, scene.IsOpen())) {
 			#else
 			if (ImGui::MenuItem("Close", "Ctrl+W", false, scene.IsOpen())) {
@@ -253,35 +304,35 @@ void UI::ShowMainMenuBar(Window& window) {
 				// Show export dialog with export format options
 				showExportDialog = true;
 			}
-		ImGui::Separator();
-		#ifdef __APPLE__
-		if (ImGui::MenuItem("Exit", "Cmd+Q")) {
-		#else
-		if (ImGui::MenuItem("Exit", "Alt+F4")) {
-		#endif
-			// Check if geometry was modified and show save prompt
-			if (scene.IsGeometryModified()) {
-				showSavePromptDialog = true;
-			} else {
-				glfwSetWindowShouldClose(window.GetGLFWWindow(), GLFW_TRUE);
+			ImGui::Separator();
+			#ifdef __APPLE__
+			if (ImGui::MenuItem("Exit", "Cmd+Q")) {
+			#else
+			if (ImGui::MenuItem("Exit", "Alt+F4")) {
+			#endif
+				// Check if geometry was modified and show save prompt
+				if (scene.IsGeometryModified()) {
+					showSavePromptDialog = true;
+				} else {
+					glfwSetWindowShouldClose(window.GetGLFWWindow(), GLFW_TRUE);
+				}
 			}
+			ImGui::EndMenu();
 		}
-		ImGui::EndMenu();
-	}
 
 		if (ImGui::BeginMenu("View")) {
 			lastMenuInteraction = glfwGetTime(); // Update interaction time when menu is open
-			ImGui::MenuItem("Scene Info", nullptr, &showSceneInfo);
-			ImGui::MenuItem("Camera Info", nullptr, &showCameraInfoDialog);
-			ImGui::MenuItem("Camera Controls", nullptr, &showCameraControls);
-			ImGui::MenuItem("Selection Dialog", nullptr, &showSelectionDialog);
-			ImGui::MenuItem("Render Settings", nullptr, &showRenderSettings);
+			ImGui::MenuItem("Scene Info", "Shift+A", &showSceneInfo);
+			ImGui::MenuItem("Camera Info", "Shift+Q", &showCameraInfoDialog);
+			ImGui::MenuItem("Camera Controls", "Shift+C", &showCameraControls);
+			ImGui::MenuItem("Selection Dialog", "Shift+S", &showSelectionDialog);
+			ImGui::MenuItem("Render Settings", "Shift+R", &showRenderSettings);
 			ImGui::Separator();
-		ImGui::MenuItem("Console", nullptr, &showConsoleOverlay);
-		ImGui::MenuItem("Performance Overlay", nullptr, &showPerformanceOverlay);
-		ImGui::MenuItem("Workflow Overlay", nullptr, &showWorkflowOverlay);
-		ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
-		ImGui::MenuItem("Selection Overlay", nullptr, &showSelectionOverlay);
+			ImGui::MenuItem("Console", nullptr, &showConsoleOverlay);
+			ImGui::MenuItem("Performance Overlay", nullptr, &showPerformanceOverlay);
+			ImGui::MenuItem("Workflow Overlay", nullptr, &showWorkflowOverlay);
+			ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
+			ImGui::MenuItem("Selection Overlay", nullptr, &showSelectionOverlay);
 			ImGui::Separator();
 			ImGui::MenuItem("Show Point Cloud", "P", &window.showPointCloud);
 			ImGui::MenuItem("Show Mesh", "M", &window.showMesh);
@@ -296,36 +347,36 @@ void UI::ShowMainMenuBar(Window& window) {
 			ImGui::EndMenu();
 		}
 
-	if (ImGui::BeginMenu("Workflow")) {
-		lastMenuInteraction = glfwGetTime();
-		const Scene& scene = window.GetScene();
-		const bool hasScene = scene.IsOpen();
-		const MVS::Scene& mvsScene = scene.GetScene();
-		const bool hasImages = hasScene && mvsScene.IsValid();
-		const bool hasPoints = hasImages && mvsScene.pointcloud.IsValid();
-		const bool hasMesh = hasImages && !mvsScene.mesh.IsEmpty();
-		const bool workflowRunning = scene.IsWorkflowRunning();
-		const auto addWorkflowEntry = [&](const char* label, bool enabled, bool& toggleFlag, const char* tooltip) {
-			// Disable if workflow is running or prerequisites not met
-			const bool canRun = enabled && !workflowRunning;
-			if (ImGui::MenuItem(label, nullptr, false, canRun))
-				toggleFlag = true;
-			else if (!canRun && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-				if (workflowRunning)
-					ImGui::SetTooltip("A workflow is currently running");
-				else
-					ImGui::SetTooltip("%s", tooltip);
-			}
-		};
-		addWorkflowEntry("Estimate ROI", hasPoints, showEstimateROIWorkflow, "Requires calibrated images and point-cloud.");
-		addWorkflowEntry("Densify Point Cloud", hasImages, showDensifyWorkflow, "Requires calibrated images.");
-		addWorkflowEntry("Reconstruct Mesh", hasPoints, showReconstructWorkflow, "Requires a dense point-cloud.");
-		addWorkflowEntry("Refine Mesh", hasMesh, showRefineWorkflow, "Requires an existing mesh.");
-		addWorkflowEntry("Texture Mesh", hasMesh, showTextureWorkflow, "Requires a mesh and images.");
-		ImGui::Separator();
-		addWorkflowEntry("Batch Process", hasImages, showBatchWorkflow, "Requires calibrated images.");
-		ImGui::EndMenu();
-	}
+		if (ImGui::BeginMenu("Workflow")) {
+			lastMenuInteraction = glfwGetTime();
+			const Scene& scene = window.GetScene();
+			const bool hasScene = scene.IsOpen();
+			const MVS::Scene& mvsScene = scene.GetScene();
+			const bool hasImages = hasScene && mvsScene.IsValid();
+			const bool hasPoints = hasImages && mvsScene.pointcloud.IsValid();
+			const bool hasMesh = hasImages && !mvsScene.mesh.IsEmpty();
+			const bool workflowRunning = scene.IsWorkflowRunning();
+			const auto addWorkflowEntry = [&](const char* label, bool enabled, bool& toggleFlag, const char* tooltip) {
+				// Disable if workflow is running or prerequisites not met
+				const bool canRun = enabled && !workflowRunning;
+				if (ImGui::MenuItem(label, nullptr, false, canRun))
+					toggleFlag = true;
+				else if (!canRun && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+					if (workflowRunning)
+						ImGui::SetTooltip("A workflow is currently running");
+					else
+						ImGui::SetTooltip("%s", tooltip);
+				}
+			};
+			addWorkflowEntry("Estimate ROI", hasPoints, showEstimateROIWorkflow, "Requires calibrated images and point-cloud.");
+			addWorkflowEntry("Densify Point Cloud", hasImages, showDensifyWorkflow, "Requires calibrated images.");
+			addWorkflowEntry("Reconstruct Mesh", hasPoints, showReconstructWorkflow, "Requires a dense point-cloud.");
+			addWorkflowEntry("Refine Mesh", hasMesh, showRefineWorkflow, "Requires an existing mesh.");
+			addWorkflowEntry("Texture Mesh", hasMesh, showTextureWorkflow, "Requires a mesh and images.");
+			ImGui::Separator();
+			addWorkflowEntry("Batch Process", hasImages, showBatchWorkflow, "Requires calibrated images.");
+			ImGui::EndMenu();
+		}
 
 		if (ImGui::BeginMenu("Help")) {
 			lastMenuInteraction = glfwGetTime(); // Update interaction time when menu is open
@@ -450,8 +501,10 @@ void UI::ShowCameraControls(Window& window) {
 			window.RequestRedraw();
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Toggle camera frustum display (C key)");
-		if (ImGui::SliderFloat("Camera Size", &window.cameraSize, 0.005f, 0.5f, "%.4f"))
+		if (ImGui::SliderFloat("Camera Size", &window.cameraSize, 0.005f, 0.5f, "%.4f")) {
 			window.GetRenderer().UploadCameras(window);
+			window.GetRenderer().UploadSelection(window);
+		}
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Adjust camera size");
 
@@ -599,7 +652,7 @@ void UI::ShowSelectionControls(Window& window) {
 		ImGui::Separator();
 		ImGui::Text("Selection Statistics");
 		if (selectionController.hasSelection()) {
-			ImGui::Text("Selected: %zu points, %zu faces", 
+			ImGui::Text("Selected: %zu points, %zu faces",
 				selectionController.getSelectedPointCount(),
 				selectionController.getSelectedFaceCount());
 		} else {
@@ -670,7 +723,7 @@ void UI::ShowSelectionControls(Window& window) {
 						window.SetVisible(true);
 						ImGui::CloseCurrentPopup();
 					} else {
-						ImGui::TextColored(ImVec4(1.f, 0.6f, 0.6f, 1.f), 
+						ImGui::TextColored(ImVec4(1.f, 0.6f, 0.6f, 1.f),
 							"No images see %d or more selected points!", minPoints);
 					}
 				}
@@ -682,7 +735,7 @@ void UI::ShowSelectionControls(Window& window) {
 
 			// Confirmation popups
 			if (ImGui::BeginPopupModal("Confirm Remove Selected", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-				ImGui::Text("Remove %zu selected points/faces?", 
+				ImGui::Text("Remove %zu selected points/faces?",
 					selectionController.getSelectedPointCount() + selectionController.getSelectedFaceCount());
 				ImGui::TextColored(ImVec4(1.f, 0.6f, 0.6f, 1.f), "This operation cannot be undone!");
 				ImGui::Separator();
@@ -816,8 +869,8 @@ void UI::ShowPerformanceOverlay(Window& window) {
 	if (!showPerformanceOverlay)
 		return;
 
-	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | 
-								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | 
+	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
 								   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
 
 	const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -857,13 +910,13 @@ void UI::ShowWorkflowOverlay(Window& window) {
 	const Scene& scene = window.GetScene();
 	const bool workflowRunning = scene.IsWorkflowRunning();
 	const auto& history = scene.GetWorkflowHistory();
-	
+
 	// Only show if there's an active workflow or history
 	if (!showWorkflowOverlay || (!workflowRunning && history.empty()))
 		return;
 
-	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | 
-								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | 
+	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
 								   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
 
 	const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -885,42 +938,42 @@ void UI::ShowWorkflowOverlay(Window& window) {
 		if (workflowRunning) {
 			const Scene::WorkflowType type = scene.GetCurrentWorkflowType();
 			const double elapsed = scene.GetWorkflowElapsedTime();
-			const char* workflowName = 
+			const char* workflowName =
 				type == Scene::WF_ESTIMATE_ROI ? "Estimate ROI" :
 				type == Scene::WF_DENSIFY ? "Densify" :
 				type == Scene::WF_RECONSTRUCT ? "Reconstruct Mesh" :
 				type == Scene::WF_REFINE ? "Refine Mesh" :
 				type == Scene::WF_TEXTURE ? "Texture Mesh" : "Unknown";
-			
+
 			ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "Running: %s", workflowName);
 			ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-1, 0));
 			ImGui::Text("Elapsed: %.1f s", elapsed);
 			ImGui::Separator();
 		}
-		
+
 		// Workflow history stats
 		if (!history.empty()) {
 			ImGui::Text("Completed: %zu", history.size());
-			
+
 			// Show last few workflows
 			const size_t maxShow = 5;
 			const size_t start = history.size() > maxShow ? history.size() - maxShow : 0;
 			for (size_t i = start; i < history.size(); ++i) {
 				const auto& entry = history[i];
-				const char* name = 
+				const char* name =
 					entry.type == Scene::WF_ESTIMATE_ROI ? "ROI" :
 					entry.type == Scene::WF_DENSIFY ? "Densify" :
 					entry.type == Scene::WF_RECONSTRUCT ? "Reconstruct" :
 					entry.type == Scene::WF_REFINE ? "Refine" :
 					entry.type == Scene::WF_TEXTURE ? "Texture" : "?";
-				
+
 				if (entry.success) {
 					ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "%s: %.1f s", name, entry.duration);
 				} else {
 					ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "%s: FAILED", name);
 				}
 			}
-			
+
 			if (ImGui::SmallButton("Clear History")) {
 				const_cast<Scene&>(scene).ClearWorkflowHistory();
 			}
@@ -932,8 +985,8 @@ void UI::ShowWorkflowOverlay(Window& window) {
 void UI::ShowViewportOverlay(const Window& window) {
 	if (!showViewportOverlay) return;
 
-	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | 
-								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | 
+	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
 								   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
 
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1078,11 +1131,13 @@ void UI::ShowHelpDialog() {
 			ImGui::Text("  Cmd+O         Open Scene");
 			ImGui::Text("  Cmd+S         Save Scene");
 			ImGui::Text("  Cmd+Shift+S   Save Scene As");
+			ImGui::Text("  Cmd+X         Save Screenshot");
 			ImGui::Text("  Cmd+Q         Exit");
 		} else {
 			ImGui::Text("  Ctrl+O        Open Scene");
 			ImGui::Text("  Ctrl+S        Save Scene");
 			ImGui::Text("  Ctrl+Shift+S  Save Scene As");
+			ImGui::Text("  Ctrl+X        Save Screenshot");
 			ImGui::Text("  Alt+F4        Exit");
 		}
 		ImGui::Separator();
@@ -1302,9 +1357,11 @@ void UI::ShowCameraInfoDialog(Window& window) {
 		const ImageArr& images = scene.GetImages();
 		const MVS::Scene& mvs_scene = scene.GetScene();
 
+		const bool hasCameraSelection = window.selectionType == Window::SEL_CAMERA && window.HasSelectionIds();
+		const IDX selectedCameraIdx = window.GetSelectionId();
 		// Check if we have a selected camera
-		if (window.selectionType == Window::SEL_CAMERA && window.selectionIdx < images.size()) {
-			const Image& image = images[window.selectionIdx];
+		if (hasCameraSelection && selectedCameraIdx < images.size()) {
+			const Image& image = images[selectedCameraIdx];
 			ASSERT(image.idx < mvs_scene.images.size());
 			const MVS::Image& imageData = mvs_scene.images[image.idx];
 			const MVS::Camera& camera = imageData.camera;
@@ -1335,7 +1392,7 @@ void UI::ShowCameraInfoDialog(Window& window) {
 			if (ImGui::CollapsingHeader("Image Additional Information")) {
 				// Check if image is loaded
 				if (!imageData.image.empty()) {
-					ImGui::Text("  Image Status: Loaded (%dx%dx%d)", 
+					ImGui::Text("  Image Status: Loaded (%dx%dx%d)",
 						imageData.image.cols, imageData.image.rows, imageData.image.channels());
 				} else {
 					ImGui::Text("  Image Status: Not loaded");
@@ -1368,7 +1425,7 @@ void UI::ShowCameraInfoDialog(Window& window) {
 			// Camera extrinsics
 			ImGui::Text("Camera Extrinsics");
 			ImGui::Text("  Position: (%.6f, %.6f, %.6f)", camera.C.x, camera.C.y, camera.C.z);
-			ImGui::Text("  Rotation (Euler XYZ): %.3f°, %.3f°, %.3f°", 
+			ImGui::Text("  Rotation (Euler XYZ): %.3f°, %.3f°, %.3f°",
 				R2D(eulerAngles.x), R2D(eulerAngles.y), R2D(eulerAngles.z));
 
 			// Show full rotation matrix
@@ -1383,13 +1440,13 @@ void UI::ShowCameraInfoDialog(Window& window) {
 			// Neighbors information
 			ImGui::Text("Neighbor Images: %u", imageData.neighbors.size());
 			ImGui::Text("Selected Neighbor Index: %s", window.selectedNeighborCamera == NO_ID ? "NA" : std::to_string(window.selectedNeighborCamera).c_str());
-			ImGui::Text("Selected Neighbor Angle: %s", 
+			ImGui::Text("Selected Neighbor Angle: %s",
 				window.selectedNeighborCamera == NO_ID ? "NA" : String::FormatString("%.2f", R2D(ACOS(ComputeAngle(
-					mvs_scene.images[images[window.selectionIdx].idx].camera.Direction().ptr(),
+					mvs_scene.images[images[selectedCameraIdx].idx].camera.Direction().ptr(),
 					mvs_scene.images[images[window.selectedNeighborCamera].idx].camera.Direction().ptr())))).c_str());
 			if (window.selectedNeighborCamera != NO_ID && window.selectionType == Window::SEL_CAMERA) {
 				// Compute and display relative pose if a neighbor camera is selected
-				const Image& mainView = images[window.selectionIdx];
+				const Image& mainView = images[selectedCameraIdx];
 				const Image& neighView = images[window.selectedNeighborCamera];
 				const MVS::Camera& camMain = mvs_scene.images[mainView.idx].camera;
 				const MVS::Camera& camNeigh = mvs_scene.images[neighView.idx].camera;
@@ -1437,9 +1494,10 @@ void UI::ShowCameraInfoDialog(Window& window) {
 						if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 							// Select and focus on the neighbor camera
 							window.selectionType = Window::SEL_CAMERA;
-							window.selectionIdx = scene.ImageIdxMVS2Viewer(neighbor.ID);
+							const MVS::IIndex selectionIdx = scene.ImageIdxMVS2Viewer(neighbor.ID);
+							window.SetSelectionId(selectionIdx);
 							window.selectedNeighborCamera = NO_ID;
-							window.GetCamera().SetCameraViewMode(window.selectionIdx);
+							window.GetCamera().SetCameraViewMode(selectionIdx);
 							window.GetRenderer().UploadSelection(window);
 							ImGui::SetWindowFocus(nullptr); // Defocus dialog window
 							window.RequestRedraw();
@@ -1485,7 +1543,7 @@ void UI::ShowSelectionDialog(Window& window) {
 	if (!showSelectionDialog) return;
 
 	// Input buffers for the dialog
-	static char selectionInputBuffer[256] = "";
+	static char selectionInputBuffer[4096] = "";
 	static int selectionType = 0; // 0 Point, 1 Face, 2 Camera by Index, 3 Camera by Name
 
 	// Set dialog properties
@@ -1505,37 +1563,37 @@ void UI::ShowSelectionDialog(Window& window) {
 		ImGui::Separator();
 
 		// Input fields based on selection type
-		IDX selectionIdx = NO_IDX;
 		const Scene& scene = window.GetScene();
 		const MVS::Scene& mvs_scene = scene.GetScene();
-		ImGui::InputText("##selectionInput", selectionInputBuffer, sizeof(selectionInputBuffer),
-			selectionType < 3 ? ImGuiInputTextFlags_CharsDecimal : ImGuiInputTextFlags_None);
+		IDXArr selectionIndices;
+		String selectionError;
+
+		ImGui::InputText("##selectionInput", selectionInputBuffer, sizeof(selectionInputBuffer), ImGuiInputTextFlags_None);
+		ImGui::SameLine();
+		if (ImGui::Button("Paste")) {
+			const char* clipboard = ImGui::GetClipboardText();
+			if (clipboard && *clipboard) {
+				std::strncpy(selectionInputBuffer, clipboard, sizeof(selectionInputBuffer) - 1);
+				selectionInputBuffer[sizeof(selectionInputBuffer) - 1] = '\0';
+			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Clear"))
+			selectionInputBuffer[0] = '\0';
+		if (selectionType < 3)
+			ImGui::TextDisabled("Use commas/spaces to separate IDs and '-' for ranges (e.g., 1 2 10-15).");
+
 		if (strlen(selectionInputBuffer) > 0) {
 			switch (selectionType) {
 			case 0: { // Point by Index
-				const int pointIndex = atoi(selectionInputBuffer);
-				if (pointIndex >= 0 && pointIndex < (int)mvs_scene.pointcloud.points.size())
-					selectionIdx = pointIndex;
-				else
-					ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid point index! Range: 0-%lu", mvs_scene.pointcloud.points.size() - 1);
+				selectionError = Util::parseIndexRanges(selectionInputBuffer, mvs_scene.pointcloud.points.size(), selectionIndices, "point");
 				} break;
-
 			case 1: { // Face by Index
-				const int faceIndex = atoi(selectionInputBuffer);
-				if (faceIndex >= 0 && faceIndex < (int)mvs_scene.mesh.faces.size())
-					selectionIdx = faceIndex;
-				else
-					ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid face index! Range: 0-%u", mvs_scene.mesh.faces.size() - 1);
+				selectionError = Util::parseIndexRanges(selectionInputBuffer, mvs_scene.mesh.faces.size(), selectionIndices, "face");
 				} break;
-
 			case 2: { // Camera by Index
-				const int cameraIndex = atoi(selectionInputBuffer);
-				if (cameraIndex >= 0 && cameraIndex < (int)mvs_scene.images.size())
-					selectionIdx = cameraIndex;
-				else
-					ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid camera index! Range: 0-%u", mvs_scene.images.size() - 1);
+				selectionError = Util::parseIndexRanges(selectionInputBuffer, mvs_scene.images.size(), selectionIndices, "camera");
 				} break;
-
 			case 3: { // Camera by Name
 				int cameraIndex = -1;
 				const ImageArr& images = scene.GetImages();
@@ -1549,30 +1607,34 @@ void UI::ShowSelectionDialog(Window& window) {
 						}
 					}
 				}
-				if (cameraIndex != -1)
-					selectionIdx = cameraIndex;
-				else
-					ImGui::TextColored(ImVec4(1, 0, 0, 1), "Camera name not found!");
+				if (cameraIndex != -1) {
+					selectionIndices.assign(1, static_cast<IDX>(cameraIndex));
+				} else {
+					selectionError = "Camera name not found!";
+				}
 				} break;
 			}
 		}
+		if (!selectionError.empty())
+			ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s", selectionError.c_str());
 
 		ImGui::Separator();
 
 		// Buttons
-		if (ImGui::Button("Select", ImVec2(120, 0)) && selectionIdx != NO_IDX) {
+		if (ImGui::Button("Select", ImVec2(120, 0)) && selectionError.empty()) {
 			// Perform the selection based on the type
+			const IDX primarySelectionIdx = selectionIndices.front();
 			switch (selectionType) {
 			case 0: { // Point by Index
 				window.selectionType = Window::SEL_POINT;
-				window.selectionIdx = selectionIdx;
-				window.selectionPoints[0] = mvs_scene.pointcloud.points[selectionIdx];
+				window.SetSelectionIds(selectionIndices);
+				window.selectionPoints[0] = mvs_scene.pointcloud.points[primarySelectionIdx];
 			} break;
 
 			case 1: { // Face by Index
 				window.selectionType = Window::SEL_TRIANGLE;
-				window.selectionIdx = selectionIdx;
-				const MVS::Mesh::Face& face = mvs_scene.mesh.faces[selectionIdx];
+				window.SetSelectionIds(selectionIndices);
+				const MVS::Mesh::Face& face = mvs_scene.mesh.faces[primarySelectionIdx];
 				window.selectionPoints[0] = mvs_scene.mesh.vertices[face[0]];
 				window.selectionPoints[1] = mvs_scene.mesh.vertices[face[1]];
 				window.selectionPoints[2] = mvs_scene.mesh.vertices[face[2]];
@@ -1581,8 +1643,8 @@ void UI::ShowSelectionDialog(Window& window) {
 			case 2:   // Camera by Index
 			case 3: { // Camera by Name
 				window.selectionType = Window::SEL_CAMERA;
-				window.selectionIdx = selectionIdx;
-				const MVS::Image& imageData = mvs_scene.images[scene.GetImages()[selectionIdx].idx];
+				window.SetSelectionIds(selectionIndices);
+				const MVS::Image& imageData = mvs_scene.images[scene.GetImages()[primarySelectionIdx].idx];
 				window.selectionPoints[0] = imageData.camera.C;
 			} break;
 			}
@@ -1591,7 +1653,7 @@ void UI::ShowSelectionDialog(Window& window) {
 			// Update renderer and request redraw
 			window.GetRenderer().UploadSelection(window);
 			window.RequestRedraw();
-			
+
 			// Close dialog
 			showSelectionDialog = false;
 			ImGui::CloseCurrentPopup();
@@ -1611,16 +1673,16 @@ void UI::ShowSavePromptDialog(Window& window) {
 	if (!showSavePromptDialog) return;
 
 	Scene& scene = window.GetScene();
-	
+
 	ImGui::OpenPopup("Save Changes?");
 	ImVec2 center = ImGui::GetMainViewport()->GetCenter();
 	ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-	
+
 	if (ImGui::BeginPopupModal("Save Changes?", &showSavePromptDialog, ImGuiWindowFlags_AlwaysAutoResize)) {
 		ImGui::Text("The geometry has been modified.");
 		ImGui::Text("Do you want to save the changes before exiting?");
 		ImGui::Separator();
-		
+
 		if (ImGui::Button("Save", ImVec2(120, 0))) {
 			// Save the scene
 			if (scene.Save()) {
@@ -1632,7 +1694,7 @@ void UI::ShowSavePromptDialog(Window& window) {
 			ImGui::CloseCurrentPopup();
 			glfwSetWindowShouldClose(window.GetGLFWWindow(), GLFW_TRUE);
 		}
-		
+
 		ImGui::SameLine();
 		if (ImGui::Button("Don't Save", ImVec2(120, 0))) {
 			// Exit without saving
@@ -1640,14 +1702,14 @@ void UI::ShowSavePromptDialog(Window& window) {
 			ImGui::CloseCurrentPopup();
 			glfwSetWindowShouldClose(window.GetGLFWWindow(), GLFW_TRUE);
 		}
-		
+
 		ImGui::SameLine();
 		if (ImGui::Button("Cancel", ImVec2(120, 0))) {
 			// Cancel exit
 			showSavePromptDialog = false;
 			ImGui::CloseCurrentPopup();
 		}
-		
+
 		ImGui::EndPopup();
 	}
 }
@@ -1832,8 +1894,8 @@ void UI::ShowSelectionOverlay(const Window& window) {
 	// Only show if there's a valid selection
 	if (window.selectionType == Window::SEL_NA) return;
 
-	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | 
-								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | 
+	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+								   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
 								   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
 
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1853,31 +1915,35 @@ void UI::ShowSelectionOverlay(const Window& window) {
 		if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			showSelectionDialog = true;
 		const Scene& scene = window.GetScene();
+		const bool hasSelectionIds = window.HasSelectionIds();
+		const IDX selectionIdx = window.GetSelectionId();
 		switch (window.selectionType) {
 		case Window::SEL_TRIANGLE: {
 			const MVS::Scene& mvs_scene = scene.GetScene();
 			ImGui::Text("Face selected:");
-			ImGui::Text("  index: %zu", window.selectionIdx);
-			if (!mvs_scene.mesh.IsEmpty() && window.selectionIdx < mvs_scene.mesh.faces.size()) {
-				const MVS::Mesh::Face& face = mvs_scene.mesh.faces[window.selectionIdx];
-				ImGui::Text("  vertex 1: %u (%.3f, %.3f, %.3f)", face[0], 
+			if (hasSelectionIds)
+				ImGui::Text("  index: %zu", selectionIdx);
+			if (hasSelectionIds && !mvs_scene.mesh.IsEmpty() && selectionIdx < mvs_scene.mesh.faces.size()) {
+				const MVS::Mesh::Face& face = mvs_scene.mesh.faces[selectionIdx];
+				ImGui::Text("  vertex 1: %u (%.3f, %.3f, %.3f)", face[0],
 					window.selectionPoints[0].x, window.selectionPoints[0].y, window.selectionPoints[0].z);
-				ImGui::Text("  vertex 2: %u (%.3f, %.3f, %.3f)", face[1], 
+				ImGui::Text("  vertex 2: %u (%.3f, %.3f, %.3f)", face[1],
 					window.selectionPoints[1].x, window.selectionPoints[1].y, window.selectionPoints[1].z);
-				ImGui::Text("  vertex 3: %u (%.3f, %.3f, %.3f)", face[2], 
+				ImGui::Text("  vertex 3: %u (%.3f, %.3f, %.3f)", face[2],
 					window.selectionPoints[2].x, window.selectionPoints[2].y, window.selectionPoints[2].z);
 			}
 			break; }
 		case Window::SEL_POINT: {
 			const MVS::Scene& mvs_scene = scene.GetScene();
 			ImGui::Text("Point selected:");
-			ImGui::Text("  index: %zu (%.3f, %.3f, %.3f)", 
-				window.selectionIdx,
-				window.selectionPoints[0].x, window.selectionPoints[0].y, window.selectionPoints[0].z);
+			if (hasSelectionIds)
+				ImGui::Text("  index: %zu (%.3f, %.3f, %.3f)",
+					selectionIdx,
+					window.selectionPoints[0].x, window.selectionPoints[0].y, window.selectionPoints[0].z);
 
 			// Show view information if available
-			if (!mvs_scene.pointcloud.pointViews.empty() && window.selectionIdx < mvs_scene.pointcloud.pointViews.size()) {
-				const MVS::PointCloud::ViewArr& views = mvs_scene.pointcloud.pointViews[window.selectionIdx];
+			if (hasSelectionIds && !mvs_scene.pointcloud.pointViews.empty() && selectionIdx < mvs_scene.pointcloud.pointViews.size()) {
+				const MVS::PointCloud::ViewArr& views = mvs_scene.pointcloud.pointViews[selectionIdx];
 				if (!views.empty()) {
 					ImGui::Text("  views: %u", views.size());
 					// Show first few views to avoid overwhelming the display
@@ -1887,12 +1953,12 @@ void UI::ShowSelectionOverlay(const Window& window) {
 						if (idxImage < mvs_scene.images.size()) {
 							const MVS::Image& imageData = mvs_scene.images[idxImage];
 							const Point2 x(imageData.camera.TransformPointW2I(Cast<REAL>(window.selectionPoints[0])));
-							const float conf = mvs_scene.pointcloud.pointWeights.empty() ? 0.f : 
-								mvs_scene.pointcloud.pointWeights[window.selectionIdx][v];
+							const float conf = mvs_scene.pointcloud.pointWeights.empty() ? 0.f :
+								mvs_scene.pointcloud.pointWeights[selectionIdx][v];
 
 							String fileName = Util::getFileNameExt(imageData.name);
-							ImGui::Text("    %s (%.1f %.1f px, %.2f conf)", 
-								fileName.c_str(), x.x, x.y, conf);
+							ImGui::Text("    %d (%s at %.1f %.1f px, %.2f conf)",
+								idxImage, fileName.c_str(), x.x, x.y, conf);
 						}
 					}
 					if (views.size() > maxViewsToShow && mvs_scene.IsValid())
@@ -1903,8 +1969,8 @@ void UI::ShowSelectionOverlay(const Window& window) {
 		case Window::SEL_CAMERA: {
 			const ImageArr& images = scene.GetImages();
 			const MVS::Scene& mvs_scene = scene.GetScene();
-			if (window.selectionIdx < images.size()) {
-				const Image& image = images[window.selectionIdx];
+			if (hasSelectionIds && selectionIdx < images.size()) {
+				const Image& image = images[selectionIdx];
 				if (image.idx < mvs_scene.images.size()) {
 					const MVS::Image& imageData = mvs_scene.images[image.idx];
 					const MVS::Camera& camera = imageData.camera;
@@ -1921,7 +1987,7 @@ void UI::ShowSelectionOverlay(const Window& window) {
 					ImGui::Text("  intrinsics: fx %.1f, fy %.1f", camera.K(0, 0), camera.K(1, 1));
 					ImGui::Text("             cx %.1f, cy %.1f", camera.K(0, 2), camera.K(1, 2));
 					ImGui::Text("  position: %.3g, %.3g, %.3g", camera.C.x, camera.C.y, camera.C.z);
-					ImGui::Text("  rotation: %.1f°, %.1f°, %.1f°", 
+					ImGui::Text("  rotation: %.1f°, %.1f°, %.1f°",
 						R2D(eulerAngles.x), R2D(eulerAngles.y), R2D(eulerAngles.z));
 					ImGui::Text("  avg depth: %.2g", imageData.avgDepth);
 					ImGui::Text("  neighbors: %u", (unsigned)imageData.neighbors.size());
@@ -2767,12 +2833,12 @@ void SettingsWriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuf
 	Window& window = *reinterpret_cast<Window*>(handler->UserData);
 	buf->appendf("[%s][Window]\n", handler->TypeName);
 	buf->appendf("RenderOnlyOnChange=%d\n", window.renderOnlyOnChange ? 1 : 0);
-	buf->appendf("ClearColor=%f,%f,%f,%f\n", 
-		window.clearColor[0], window.clearColor[1], 
+	buf->appendf("ClearColor=%f,%f,%f,%f\n",
+		window.clearColor[0], window.clearColor[1],
 		window.clearColor[2], window.clearColor[3]);
 	buf->appendf("CameraSize=%f\n", window.cameraSize);
 	buf->appendf("PointSize=%f\n", window.pointSize);
-	buf->appendf("EstimateSfMNormals=%d\n", 
+	buf->appendf("EstimateSfMNormals=%d\n",
 		window.GetScene().estimateSfMNormals ? 1 : 0);
 	buf->appendf("EstimateSfMPatches=%d\n",
 		window.GetScene().estimateSfMPatches ? 1 : 0);
@@ -2781,15 +2847,15 @@ void SettingsWriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuf
 	buf->appendf("ShowMeshTextured=%d\n", window.showMeshTextured ? 1 : 0);
 	buf->appendf("ImageOverlayOpacity=%f\n", window.imageOverlayOpacity);
 	buf->appendf("FontScale=%f\n", window.userFontScale);
-	buf->appendf("ArcballRenderGizmos=%d\n", 
+	buf->appendf("ArcballRenderGizmos=%d\n",
 		window.GetArcballControls().getEnableGizmos() ? 1 : 0);
-	buf->appendf("ArcballRenderGizmosCenter=%d\n", 
+	buf->appendf("ArcballRenderGizmosCenter=%d\n",
 		window.GetArcballControls().getEnableGizmosCenter() ? 1 : 0);
-	buf->appendf("ArcballRotationSensitivity=%f\n", 
+	buf->appendf("ArcballRotationSensitivity=%f\n",
 		window.GetArcballControls().getRotationSensitivity());
-	buf->appendf("ArcballZoomSensitivity=%f\n", 
+	buf->appendf("ArcballZoomSensitivity=%f\n",
 		window.GetArcballControls().getZoomSensitivity());
-	buf->appendf("ArcballPanSensitivity=%f\n", 
+	buf->appendf("ArcballPanSensitivity=%f\n",
 		window.GetArcballControls().getPanSensitivity());
 }
 
@@ -2803,7 +2869,7 @@ bool UI::ShowOpenFileDialog(String& filename, String& geometryFilename) {
 			{
 				"OpenMVS Scene Files", "*.mvs",
 				"OpenMVS Depth Map Files", "*.dmap",
-				"PLY Mesh / Point Cloud Files", "*.ply", 
+				"PLY Mesh / Point Cloud Files", "*.ply",
 				"GLTF Mesh / Point Cloud Files", "*.gltf",
 				"GLB Mesh / Point Cloud Files", "*.glb",
 				"OBJ Mesh Files", "*.obj",
@@ -2846,6 +2912,31 @@ bool UI::ShowSaveFileDialog(String& filename) {
 		);
 
 		// Get the result - save_file returns a string directly, not a vector
+		auto result = dialog.result();
+		if (!result.empty()) {
+			filename = result;
+			return true;
+		}
+	} catch (const std::exception& e) {
+		DEBUG("File dialog error: %s", e.what());
+	}
+	return false;
+}
+
+bool UI::ShowSaveImageDialog(String& filename) {
+	try {
+		auto dialog = pfd::save_file(
+			"Save Screenshot",                          // title
+			WORKING_FOLDER_FULL,                        // initial directory (like open dialog)
+			{
+				"PNG Image", "*.png",
+				"JPEG Image", "*.jpg",
+				"JPEGXL Image", "*.jxl",
+				"All Files", "*"
+			},
+			pfd::opt::none
+		);
+
 		auto result = dialog.result();
 		if (!result.empty()) {
 			filename = result;
