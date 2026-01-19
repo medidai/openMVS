@@ -78,7 +78,7 @@ public:
 	// Only define this constructor when Type and UnderlyingType are different (i.e., for enums)
 	template<typename U = UnderlyingType, typename = typename std::enable_if<!std::is_same<Type, U>::value>::type>
 	inline TFlags(U f) : flags(static_cast<Type>(static_cast<UnderlyingType>(f)))	{ }
-	
+
 	// Accept both enum and underlying type for compatibility
 	template<typename T>
 	inline bool isSet(T aFlag) const					{ return (toUnderlying(flags) & toUnderlying(aFlag)) == toUnderlying(aFlag); }
@@ -92,7 +92,7 @@ public:
 	inline bool isAnySet(T1 aFlag, T2 nF) const			{ const UnderlyingType m(toUnderlying(flags) & (toUnderlying(aFlag)|toUnderlying(nF))); return m != 0 && (m & toUnderlying(nF)) == 0; }
 	template<typename T>
 	inline bool isAnySetExclusive(T aFlag) const		{ return (toUnderlying(flags) & toUnderlying(aFlag)) != 0 && (toUnderlying(flags) & ~toUnderlying(aFlag)) == 0; }
-	
+
 	template<typename T>
 	inline void set(T aFlag, bool bSet)					{ if (bSet) set(aFlag); else unset(aFlag); }
 	template<typename T>
@@ -101,12 +101,12 @@ public:
 	inline void unset(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) & ~toUnderlying(aFlag)); }
 	template<typename T>
 	inline void flip(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) ^ toUnderlying(aFlag)); }
-	
+
 	inline TFlags& operator=(TFlags rhs)				{ flags = rhs.flags; return *this; }
 	inline TFlags& operator=(Type f)					{ flags = f; return *this; }
 	inline operator UnderlyingType() const				{ return static_cast<UnderlyingType>(flags); }
 	inline operator UnderlyingType&()					{ return reinterpret_cast<UnderlyingType&>(flags); }
-	
+
 protected:
 	Type flags;
 
@@ -591,7 +591,7 @@ public:
 
 	// Parse index ranges; use commas/spaces to separate IDs and '-' for ranges (e.g., 1 2 10-15)
 	// returns error message in case of failure
-	static String parseIndexRanges(LPCSTR input, size_t maxCount, CLISTDEF0(IDX)& outIndices, LPCSTR entityLabel="") {
+	static String parseIndexRanges(LPCSTR input, size_t maxCount, CLISTDEFSCALAR(IDX)& outIndices, LPCSTR entityLabel="") {
 		outIndices.clear();
 		if (input == nullptr || *input == '\0')
 			return String::FormatString("No %sdata available.", entityLabel);

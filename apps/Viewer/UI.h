@@ -109,6 +109,11 @@ public:
 	void ShowEmptySceneOverlay(const Window& window);
 	void ShowWorkflowWindows(Window& window);
 	void ToggleHelpDialog() { showHelpDialog = !showHelpDialog; }
+	void ToggleSceneInfo() { showSceneInfo = !showSceneInfo; }
+	void ToggleCameraInfoDialog() { showCameraInfoDialog = !showCameraInfoDialog; }
+	void ToggleCameraControls() { showCameraControls = !showCameraControls; }
+	void ToggleSelectionDialog() { showSelectionDialog = !showSelectionDialog; }
+	void ToggleRenderSettings() { showRenderSettings = !showRenderSettings; }
 	void SetSelectionControls(bool v) { showSelectionControls = v; }
 	void SetUserFontScale(float scale);
 
@@ -121,6 +126,7 @@ public:
 	void ShowSavePromptDialog(Window& window);
 	static bool ShowOpenFileDialog(String& filename, String& geometryFilename);
 	static bool ShowSaveFileDialog(String& filename);
+	static bool ShowSaveImageDialog(String& filename);
 
 	// Input handling
 	void RecordLog(const String& msg);

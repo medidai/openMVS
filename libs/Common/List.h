@@ -69,6 +69,7 @@
 #define CLISTREFVECTOR(CLIST, var, vec) uint8_t _ArrData##var[sizeof(CLIST)]; new(_ArrData##var) CLIST(vec.size(), const_cast<CLIST::Type*>(&vec[0])); const CLIST& var(*reinterpret_cast<const CLIST*>(_ArrData##var))
 #endif
 
+#define CLISTDEFSCALAR(TYPE) SEACAVE::cList< TYPE, TYPE, 0 >
 #define CLISTDEF0(TYPE) SEACAVE::cList< TYPE, const TYPE&, 0 >
 #define CLISTDEF2(TYPE) SEACAVE::cList< TYPE, const TYPE&, 2 >
 #define CLISTDEF0IDX(TYPE,IDXTYPE) SEACAVE::cList< TYPE, const TYPE&, 0, 16, IDXTYPE >
@@ -328,7 +329,7 @@ public:
 		_vector[idx1] = _vector[idx2];
 		_vector[idx2] = tmp;
 	}
-	
+
 	inline bool		operator==(const cList& rList) const {
 		if (_size != rList._size)
 			return false;

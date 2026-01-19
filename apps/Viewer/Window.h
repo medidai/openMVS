@@ -93,7 +93,7 @@ public:
 	SELECTION selectionType;
 	Point3f selectionPoints[4];
 	double selectionTimeClick, selectionTime;
-	IDX selectionIdx; // index of selected point/triangle/camera (NO_ID if none) (if camera, the index is in the Viewer scene images)
+	IDXArr selectionIdx; // indices of selected point/triangle/camera (empty if none) (if camera, the indices are in the Viewer scene images)
 	MVS::IIndex selectedNeighborCamera; // index of neighbor camera to highlight (NO_ID if none) (index is in the Viewer scene images)
 
 	// Settings
@@ -112,6 +112,8 @@ public:
 	bool showMeshWireframe;
 	bool showMeshTextured;
 	std::vector<bool> meshSubMeshVisible; // control visibility of individual sub-meshes (using unsigned char instead of bool for ImGui compatibility)
+	String pendingScreenshotPath;
+	bool pendingScreenshotIncludeUI;
 
 public:
 	Window();
@@ -142,6 +144,20 @@ public:
 	FirstPersonControls& GetFirstPersonControls() { return *firstPersonControls; }
 	SelectionController& GetSelectionController() const { return *selectionController; }
 
+	// Selection helpers
+	bool HasSelectionIds() const { return !selectionIdx.empty(); }
+	size_t GetSelectionCount() const { return selectionIdx.size(); }
+	IDX GetSelectionId(size_t index = 0) const { return index < selectionIdx.size() ? selectionIdx[index] : IDX(NO_IDX); }
+	const IDXArr& GetSelectionIds() const { return selectionIdx; }
+	void ClearSelectionIds() { selectionIdx.clear(); }
+	void SetSelectionId(IDX idx) {
+		if (idx == IDX(NO_IDX) || idx == IDX(NO_ID))
+			selectionIdx.clear();
+		else
+			selectionIdx.assign(1, idx);
+	}
+	void SetSelectionIds(IDXArr& indices) { selectionIdx = std::move(indices); }
+
 	// Renderer access
 	Renderer& GetRenderer() { return *renderer; }
 	const Renderer& GetRenderer() const { return *renderer; }
@@ -158,6 +174,7 @@ public:
 	const Eigen::Vector2d& GetDevicePixelRatio() const { return devicePixelRatio; }
 	const cv::Size& GetSize() const { return camera.GetSize(); }
 	void SetSceneBounds(const Point3f& center, const Point3f& size);
+	void RequestScreenshot(const String& filename, bool includeUI = false);
 	GLFWwindow* GetGLFWWindow() const { return window; }
 	static GLFWwindow* GetCurrentGLFWWindow();
 	static Window& GetCurrentWindow();
@@ -183,6 +200,7 @@ private:
 	void HandleScroll(double yoffset);
 	void HandleKeyboard(int key, int action, int mods);
 	void HandleFileDrop(int count, const char** paths);
+	bool CaptureScreenshot(const String& filename);
 
 	double UpdateTiming();
 	void UpdateDevicePixelRatio();
