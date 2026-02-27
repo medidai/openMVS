@@ -210,39 +210,6 @@ struct MeshTexture {
 	};
 	typedef cList<SeamVertex,const SeamVertex&,1,256,uint32_t> SeamVertices;
 
-	// used to iterate vertex labels
-	struct PatchIndex {
-		bool bIndex;
-		union {
-			uint32_t idxPatch;
-			uint32_t idxSeamVertex;
-		};
-	};
-	typedef CLISTDEF0(PatchIndex) PatchIndices;
-	struct VertexPatchIterator {
-		uint32_t idx;
-		uint32_t idxPatch;
-		const SeamVertex::Patches* pPatches;
-		inline VertexPatchIterator(const PatchIndex& patchIndex, const SeamVertices& seamVertices) : idx(NO_ID) {
-			if (patchIndex.bIndex) {
-				pPatches = &seamVertices[patchIndex.idxSeamVertex].patches;
-			} else {
-				idxPatch = patchIndex.idxPatch;
-				pPatches = NULL;
-			}
-		}
-		inline operator uint32_t () const {
-			return idxPatch;
-		}
-		inline bool Next() {
-			if (pPatches == NULL)
-				return (idx++ == NO_ID);
-			if (++idx >= pPatches->size())
-				return false;
-			idxPatch = (*pPatches)[idx].idxPatch;
-			return true;
-		}
-	};
 
 	// used to sample seam edges
 	typedef TAccumulator<Color> AccumColor;
@@ -289,12 +256,12 @@ public:
 	#if TEXOPT_FACEOUTLIER != TEXOPT_FACEOUTLIER_NA
 	bool FaceOutlierDetection(FaceDataArr& faceDatas, float fOutlierThreshold) const;
 	#endif
-	
+
 	void CreateVirtualFaces(const FaceDataViewArr& facesDatas, FaceDataViewArr& virtualFacesDatas, VirtualFaceIdxsArr& virtualFaces, unsigned minCommonCameras=2, float thMaxNormalDeviation=25.f) const;
 	IIndexArr SelectBestView(const FaceDataArr& faceDatas, FIndex fid, unsigned minCommonCameras, float ratioAngleToQuality) const;
 
 	bool FaceViewSelection(unsigned minCommonCameras, float fOutlierThreshold, float fRatioDataSmoothness, int nIgnoreMaskLabel, const IIndexArr& views);
-	
+
 	void CreateSeamVertices();
 	void GlobalSeamLeveling();
 	void LocalSeamLeveling();
@@ -623,7 +590,7 @@ IIndexArr MeshTexture::SelectBestView(const FaceDataArr& faceDatas, FIndex fid, 
 {
 	ASSERT(!faceDatas.empty());
 	#if 1
-	
+
 	// compute scores based on the view quality and its angle to the face normal
 	float maxQuality = 0;
 	for (const FaceData& faceData: faceDatas)
@@ -647,7 +614,7 @@ IIndexArr MeshTexture::SelectBestView(const FaceDataArr& faceDatas, FIndex fid, 
 	});
 
 	#else
-	
+
 	// sort qualityPodium in relation to faceDatas[index].quality decreasing
 	IIndexArr qualityPodium(faceDatas.size());
 	std::iota(qualityPodium.begin(), qualityPodium.end(), 0);
@@ -685,7 +652,7 @@ IIndexArr MeshTexture::SelectBestView(const FaceDataArr& faceDatas, FIndex fid, 
 	scorePodium.Sort([&scores](IIndex i, IIndex j) {
 		return scores[i] < scores[j];
 	});
-	
+
 	#endif
 	IIndexArr cameras(MINF(minCommonCameras, faceDatas.size()));
 	FOREACH(i, cameras)
@@ -700,7 +667,7 @@ static bool IsFaceVisible(const MeshTexture::FaceDataArr& faceDatas, const IInde
 		for (IIndex camId : cameraList) {
 			if (cfCam == camId) {
 				if (++camFoundCounter == cameraList.size())
-					return true;	
+					return true;
 				break;
 			}
 		}
@@ -1136,7 +1103,7 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 
 			graph.clear();
 		}
-		
+
 		// create the graph of faces: each vertex is a face and the edges are the edges shared by the faces
 		FOREACH(idxFace, faces) {
 			MAYBEUNUSED const Mesh::FIndex idx((Mesh::FIndex)boost::add_vertex(graph));
@@ -1364,45 +1331,26 @@ void MeshTexture::GlobalSeamLeveling()
 	ASSERT(!seamVertices.empty());
 	const unsigned numPatches(texturePatches.size()-1);
 
-	// find the patch ID for each vertex
-	PatchIndices patchIndices(vertices.size());
-	patchIndices.Memset(0);
-	FOREACH(f, faces) {
-		const uint32_t idxPatch(mapIdxPatch[components[f]]);
-		const Face& face = faces[f];
-		for (int v=0; v<3; ++v)
-			patchIndices[face[v]].idxPatch = idxPatch;
-	}
-	FOREACH(i, seamVertices) {
-		const SeamVertex& seamVertex = seamVertices[i];
-		ASSERT(!seamVertex.patches.empty());
-		PatchIndex& patchIndex = patchIndices[seamVertex.idxVertex];
-		patchIndex.bIndex = true;
-		patchIndex.idxSeamVertex = i;
-	}
-
 	// assign a row index within the solution vector x to each vertex/patch
 	ASSERT(vertices.size() < static_cast<VIndex>(std::numeric_limits<MatIdx>::max()));
-	MatIdx rowsX(0);
 	typedef std::unordered_map<uint32_t,MatIdx> VertexPatch2RowMap;
 	cList<VertexPatch2RowMap> vertpatch2rows(vertices.size());
-	FOREACH(i, vertices) {
-		const PatchIndex& patchIndex = patchIndices[i];
-		VertexPatch2RowMap& vertpatch2row = vertpatch2rows[i];
-		if (patchIndex.bIndex) {
-			// vertex is part of multiple patches
-			const SeamVertex& seamVertex = seamVertices[patchIndex.idxSeamVertex];
-			ASSERT(seamVertex.idxVertex == i);
-			for (const SeamVertex::Patch& patch: seamVertex.patches) {
-				ASSERT(patch.idxPatch != numPatches);
-				vertpatch2row[patch.idxPatch] = rowsX++;
-			}
-		} else
-		if (patchIndex.idxPatch < numPatches) {
-			// vertex is part of only one patch
-			vertpatch2row[patchIndex.idxPatch] = rowsX++;
-		}
+
+	// find the patch IDs for each vertex
+	FOREACH(f, faces) {
+		const uint32_t idxPatch(mapIdxPatch[components[f]]);
+		if (idxPatch == numPatches)
+			continue;
+		const Face& face = faces[f];
+		for (int v=0; v<3; ++v)
+			vertpatch2rows[face[v]][idxPatch] = 0;
 	}
+
+	// assign a row to each vertex/patch
+	MatIdx rowsX(0);
+	FOREACH(i, vertices)
+		for (auto& [idxPatch, row] : vertpatch2rows[i])
+			row = rowsX++;
 
 	// fill Tikhonov's Gamma matrix (regularization constraints)
 	const float lambda(0.1f);
@@ -1412,24 +1360,17 @@ void MeshTexture::GlobalSeamLeveling()
 	FOREACH(v, vertices) {
 		adjVerts.Empty();
 		scene.mesh.GetAdjVertices(v, adjVerts);
-		VertexPatchIterator itV(patchIndices[v], seamVertices);
-		while (itV.Next()) {
-			const uint32_t idxPatch(itV);
-			if (idxPatch == numPatches)
-				continue;
-			const MatIdx col(vertpatch2rows[v].at(idxPatch));
+		for (const auto& [idxPatch, col] : vertpatch2rows[v]) {
+			ASSERT(idxPatch < numPatches);
 			for (const VIndex vAdj: adjVerts) {
 				if (v >= vAdj)
 					continue;
-				VertexPatchIterator itVAdj(patchIndices[vAdj], seamVertices);
-				while (itVAdj.Next()) {
-					const uint32_t idxPatchAdj(itVAdj);
-					if (idxPatch == idxPatchAdj) {
-						const MatIdx colAdj(vertpatch2rows[vAdj].at(idxPatchAdj));
-						rows.emplace_back(rowsGamma, col, lambda);
-						rows.emplace_back(rowsGamma, colAdj, -lambda);
-						++rowsGamma;
-					}
+				const auto itVAdj(vertpatch2rows[vAdj].find(idxPatch));
+				if (itVAdj != vertpatch2rows[vAdj].end()) {
+					const MatIdx colAdj(itVAdj->second);
+					rows.emplace_back(rowsGamma, col, lambda);
+					rows.emplace_back(rowsGamma, colAdj, -lambda);
+					++rowsGamma;
 				}
 			}
 		}
@@ -1899,29 +1840,21 @@ void MeshTexture::LocalSeamLeveling()
 			if (idxVertPatch0 == SeamVertex::Patches::NO_INDEX)
 				continue;
 			const SeamVertex::Patch& patch0 = seamVertex0.patches[idxVertPatch0];
-			const TexCoord p0(patch0.proj-offset);
+			const TexCoord p0(patch0.proj - offset);
 			// for each edge of this vertex belonging to this patch...
 			for (const SeamVertex::Patch::Edge& edge0: patch0.edges) {
 				// select the same edge leaving from the adjacent vertex
 				const SeamVertex& seamVertex1 = seamVertices[edge0.idxSeamVertex];
-				const uint32_t idxVertPatch0Adj(seamVertex1.patches.Find(idxPatch));
-				ASSERT(idxVertPatch0Adj != SeamVertex::Patches::NO_INDEX);
-				const SeamVertex::Patch& patch0Adj = seamVertex1.patches[idxVertPatch0Adj];
-				const TexCoord p0Adj(patch0Adj.proj-offset);
-				// find the other patch sharing the same edge (edge with same adjacent vertex)
-				FOREACH(idxVertPatch1, seamVertex0.patches) {
-					if (idxVertPatch1 == idxVertPatch0)
+				const SeamVertex::Patch& patch0Adj = seamVertex1.patches[seamVertex1.patches.Find(idxPatch)];
+				const TexCoord p0Adj(patch0Adj.proj - offset);
+				// find the other patch sharing the same edge
+				for (const SeamVertex::Patch& patch1: seamVertex0.patches) {
+					if (patch1.idxPatch == idxPatch)
 						continue;
-					const SeamVertex::Patch& patch1 = seamVertex0.patches[idxVertPatch1];
-					const uint32_t idxEdge1(patch1.edges.Find(edge0.idxSeamVertex));
-					if (idxEdge1 == SeamVertex::Patch::Edges::NO_INDEX)
-						continue;
-					const TexCoord& p1(patch1.proj);
+					if (patch1.edges.Find(edge0.idxSeamVertex) == SeamVertex::Patch::Edges::NO_INDEX)
+						continue; // edge not shared with this patch
 					// select the same edge belonging to the second patch leaving from the adjacent vertex
-					const uint32_t idxVertPatch1Adj(seamVertex1.patches.Find(patch1.idxPatch));
-					ASSERT(idxVertPatch1Adj != SeamVertex::Patches::NO_INDEX);
-					const SeamVertex::Patch& patch1Adj = seamVertex1.patches[idxVertPatch1Adj];
-					const TexCoord& p1Adj(patch1Adj.proj);
+					const SeamVertex::Patch& patch1Adj = seamVertex1.patches[seamVertex1.patches.Find(patch1.idxPatch)];
 					// this is an edge separating two (valid) patches;
 					// draw it on this patch as the mean color of the two patches
 					const Image8U3& image1(images[texturePatches[patch1.idxPatch].label].image);
@@ -1939,17 +1872,15 @@ void MeshTexture::LocalSeamLeveling()
 							: image(_image), mask(_mask), image0(_image0), image1(_image1),
 							p0(_p0), p0Dir(_p0Adj-_p0), p1(_p1), p1Dir(_p1Adj-_p1), length((float)norm(p0Dir)) {}
 						inline void operator()(const ImageRef& pt) {
-							const float l((float)norm(TexCoord(pt)-p0)/length);
 							// compute mean color
-							const TexCoord samplePos0(p0 + p0Dir * l);
-							const Color color0(image0.sample<Sampler,Color>(sampler, samplePos0));
-							const TexCoord samplePos1(p1 + p1Dir * l);
-							const Color color1(image1.sample<Sampler,Color>(sampler, samplePos1)/255.f);
+							const float l((float)norm(TexCoord(pt)-p0)/length);
+							const Color color0(image0.sample<Sampler,Color>(sampler, p0 + p0Dir * l));
+							const Color color1(image1.sample<Sampler,Color>(sampler, p1 + p1Dir * l)/255.f);
 							image(pt) = Color((color0 + color1) * 0.5f);
 							// set mask edge also
 							mask(pt) = border;
 						}
-					} data(image, mask, imageOrg, image1, p0, p0Adj, p1, p1Adj);
+					} data(image, mask, imageOrg, image1, p0, p0Adj, patch1.proj, patch1Adj.proj);
 					Image32F3::DrawLine(p0, p0Adj, data);
 					// skip remaining patches,
 					// as a manifold edge is shared by maximum two face (one in each patch), which we found already
@@ -1964,7 +1895,7 @@ void MeshTexture::LocalSeamLeveling()
 				const Image8U3& img(images[texturePatches[patch.idxPatch].label].image);
 				accumColor.Add(img.sample<Sampler,Color>(sampler, patch.proj)/255.f, 1.f);
 			}
-			const ImageRef pt(ROUND2INT(patch0.proj-offset));
+			const ImageRef pt(ROUND2INT(p0));
 			image(pt) = accumColor.Normalized();
 			mask(pt) = border;
 		}
@@ -2142,7 +2073,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 					// try again with a bigger texture
 					textureSize *= 2;
 					if (maxTextureSize > 0)
-						textureSize = MAXF(textureSize, maxTextureSize);
+						textureSize = MINF(textureSize, maxTextureSize);
 					unplacedRects.JoinRemove(newPlacedRects);
 				}
 			}
