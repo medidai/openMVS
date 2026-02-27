@@ -33,6 +33,7 @@
 CMakeSettings.json
 .vs/
 .idea/
+.venv/
 .vscode/
 out/
 bin*/
