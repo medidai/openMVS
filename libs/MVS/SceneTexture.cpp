@@ -69,6 +69,7 @@ using namespace MVS;
 #include "../Math/LBP.h"
 namespace MVS {
 constexpr LBPInference::EnergyType LBPMaxEnergy(1);
+constexpr LBPInference::EnergyType LBPMinWeight(0.5f);
 // Potts model as smoothness function
 LBPInference::EnergyType STCALL SmoothnessPotts(LBPInference::NodeID, LBPInference::NodeID, LBPInference::LabelID l1, LBPInference::LabelID l2) {
 	return l1 == l2 && l1 != 0 && l2 != 0 ? LBPInference::EnergyType(0) : LBPMaxEnergy;
@@ -111,10 +112,15 @@ struct MeshTexture {
 		FIndex idxFace;
 		Image8U mask;
 		bool validFace;
+		const float scaleMaskX, scaleMaskY;
 
-		RasterMesh(const Mesh::VertexArr& _vertices, const Camera& _camera, DepthMap& _depthMap, FaceMap& _faceMap)
-			: Base(_vertices, _camera, _depthMap), faceMap(_faceMap) {}
-		void Clear() {
+		RasterMesh(const Mesh::VertexArr& _vertices, const Camera& _camera, DepthMap& _depthMap, FaceMap& _faceMap, const cv::Size& maskSize)
+			: Base(_vertices, _camera, _depthMap), faceMap(_faceMap), scaleMaskX((float)maskSize.width / _faceMap.cols), scaleMaskY((float)maskSize.height / _faceMap.rows) {}
+		inline bool ProjectVertex(const Point3f& pt, int v, Triangle& t) {
+			return (t.ptc[v] = camera.TransformPointW2C(Cast<REAL>(pt))).z > 0 &&
+				depthMap.isInsideWithBorder<float,5>(t.pti[v] = camera.TransformPointC2I(t.ptc[v]));
+		}
+		inline void Clear() {
 			Base::Clear();
 			faceMap.memset((uint8_t)NO_ID);
 		}
@@ -125,7 +131,7 @@ struct MeshTexture {
 			Depth& depth = depthMap(pt);
 			if (depth == 0 || depth > z) {
 				depth = z;
-				faceMap(pt) = validFace && (validFace = (mask(pt) != 0)) ? idxFace : NO_ID;
+				faceMap(pt) = validFace && (validFace = (mask((int)(pt.y * scaleMaskY), (int)(pt.x * scaleMaskX)) != 0)) ? idxFace : NO_ID;
 			}
 		}
 	};
@@ -425,7 +431,18 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 			++progress;
 			continue;
 		}
-		// load image
+		// load image at full native resolution
+		if (!imageData.ReloadImage(0, false)) {
+			#ifdef TEXOPT_USE_OPENMP
+			bAbort = true;
+			#pragma omp flush (bAbort)
+			continue;
+			#else
+			return false;
+			#endif
+		}
+		const cv::Size fullSize(imageData.GetSize());
+		// load image at requested working resolution
 		unsigned level(nResolutionLevel);
 		const unsigned imageSize(imageData.RecomputeMaxResolution(level, nMinResolution));
 		if ((imageData.image.empty() || MAXF(imageData.width,imageData.height) != imageSize) && !imageData.ReloadImage(imageSize)) {
@@ -463,18 +480,20 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 		// select faces inside view frustum
 		Mesh::FaceIdxArr cameraFaces;
 		Mesh::FacesInserter inserter(cameraFaces);
-		const TFrustum<float,5> frustum(Matrix3x4f(imageData.camera.P), (float)imageData.width, (float)imageData.height);
+		const cv::Size highResSize(fullSize.width*2, fullSize.height*2);
+		const Camera cameraHighRes(imageData.GetCamera(scene.platforms, highResSize));
+		const TFrustum<float,5> frustum(Matrix3x4f(cameraHighRes.P), (float)highResSize.width, (float)highResSize.height);
 		octree.Traverse(frustum, inserter);
 		// project all triangles in this view and keep the closest ones
-		faceMap.create(imageData.GetSize());
-		depthMap.create(imageData.GetSize());
-		RasterMesh rasterer(vertices, imageData.camera, depthMap, faceMap);
+		faceMap.create(highResSize);
+		depthMap.create(highResSize);
+		RasterMesh rasterer(vertices, cameraHighRes, depthMap, faceMap, fullSize);
 		RasterMesh::Triangle triangle;
 		RasterMesh::TriangleRasterizer triangleRasterizer(triangle, rasterer);
 		if (nIgnoreMaskLabel >= 0) {
 			// import mask
 			BitMatrix bmask;
-			DepthEstimator::ImportIgnoreMask(imageData, imageData.GetSize(), (uint8_t)OPTDENSE::nIgnoreMaskLabel, bmask, &rasterer.mask);
+			DepthEstimator::ImportIgnoreMask(imageData, fullSize, (uint8_t)OPTDENSE::nIgnoreMaskLabel, bmask, &rasterer.mask);
 		} else if (nIgnoreMaskLabel == -1) {
 			// creating mask to discard invalid regions created during image radial undistortion
 			rasterer.mask = DetectInvalidImageRegions(imageData.image);
@@ -507,6 +526,8 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 		// + sharpness: sharper image or image resolution or how close is to the face will result in higher gradient on the same face
 		//				ON GLOSS IMAGES it happens to have a high volatile sharpness depending on how the light reflects under different angles
 		// + angle: low angle increases the surface area
+		const float scaleWeightX((float)imageData.width / highResSize.width);
+		const float scaleWeightY((float)imageData.height / highResSize.height);
 		for (int j=0; j<faceMap.rows; ++j) {
 			for (int i=0; i<faceMap.cols; ++i) {
 				const FIndex& idxFace = faceMap(j,i);
@@ -514,6 +535,8 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 				if (idxFace == NO_ID)
 					continue;
 				FaceDataArr& faceDatas = facesDatas[idxFace];
+				const int imgY((int)(j*scaleWeightY));
+				const int imgX((int)(i*scaleWeightX));
 				#if TEXOPT_FACEOUTLIER != TEXOPT_FACEOUTLIER_NA
 				uint32_t& area = areas[idxFace];
 				if (area++ == 0) {
@@ -523,18 +546,18 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 					// create new face-data
 					FaceData& faceData = faceDatas.emplace_back();
 					faceData.idxView = idxView;
-					faceData.quality = imageGradMag(j,i);
+					faceData.quality = imageGradMag(imgY,imgX);
 					#if TEXOPT_FACEOUTLIER != TEXOPT_FACEOUTLIER_NA
-					faceData.color = imageData.image(j,i);
+					faceData.color = imageData.image(imgY,imgX);
 					#endif
 				} else {
 					// update face-data
 					ASSERT(!faceDatas.empty());
 					FaceData& faceData = faceDatas.back();
 					ASSERT(faceData.idxView == idxView);
-					faceData.quality += imageGradMag(j,i);
+					faceData.quality += imageGradMag(imgY,imgX);
 					#if TEXOPT_FACEOUTLIER != TEXOPT_FACEOUTLIER_NA
-					faceData.color += Color(imageData.image(j,i));
+					faceData.color += Color(imageData.image(imgY,imgX));
 					#endif
 				}
 			}
@@ -962,6 +985,19 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 		// compute face normals and smoothen them
 		scene.mesh.SmoothNormalFaces();
 
+		#if TEXOPT_INFERENCE == TEXOPT_INFERENCE_LBP
+		// compute average face area and average edge length for scale-independent MRF optimization
+		double sumArea(0);
+		double sumEdgeLength(0);
+		FOREACH(f, faces) {
+			sumArea += scene.mesh.ComputeArea(f);
+			for (int i=0; i<3; ++i)
+				sumEdgeLength += norm(scene.mesh.vertices[faces[f][i]] - scene.mesh.vertices[faces[f][(i+1)%3]]);
+		}
+		const float avgFaceArea((float)(sumArea / faces.size()));
+		const float avgEdgeLength((float)(sumEdgeLength / (faces.size() * 3)));
+		#endif
+
 		// list all views for each face
 		FaceDataViewArr facesDatas;
 		if (!ListCameraFaces(facesDatas, fOutlierThreshold, nIgnoreMaskLabel, views))
@@ -982,12 +1018,15 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 			FaceDataViewArr virtualFacesDatas;
 			VirtualFaceIdxsArr virtualFaces; // stores each virtual face as an array of mesh face ID
 			CreateVirtualFaces(facesDatas, virtualFacesDatas, virtualFaces, minCommonCameras);
+			FloatArr virtualFaceAreas(virtualFaces.size());
+			virtualFaceAreas.Memset(0);
 			Mesh::FaceIdxArr mapFaceToVirtualFace(faces.size()); // for each mesh face ID, store the virtual face ID witch contains it
 			size_t controlCounter(0);
 			FOREACH(idxVF, virtualFaces) {
 				const Mesh::FaceIdxArr& vf = virtualFaces[idxVF];
 				for (FIndex idxFace : vf) {
 					mapFaceToVirtualFace[idxFace] = idxVF;
+					virtualFaceAreas[idxVF] += scene.mesh.ComputeArea(idxFace);
 					++controlCounter;
 				}
 			}
@@ -1060,8 +1099,24 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 						for (boost::tie(ei, eie) = boost::out_edges(f, graph); ei != eie; ++ei) {
 							ASSERT(f == (FIndex)ei->m_source);
 							const FIndex fAdj((FIndex)ei->m_target);
-							if (f < fAdj) // add edges only once
-								inference.SetNeighbors(f, fAdj);
+							ASSERT(fAdj != NO_ID);
+							if (f < fAdj) { // add edges only once
+								float edgeLength = 0.f;
+								// compute total shared edge length between virtual faces f and fAdj
+								for (FIndex idxFace : virtualFaces[f]) {
+									for (int i=0; i<3; ++i) {
+										const FIndex neighborFace = faceFaces[idxFace][i];
+										if (mapFaceToVirtualFace[neighborFace] == fAdj) {
+											// this edge is shared with virtual face fAdj
+											const VIndex v0 = faces[idxFace][i];
+											const VIndex v1 = faces[idxFace][(i+1)%3];
+											edgeLength += (float)norm(scene.mesh.vertices[v0] - scene.mesh.vertices[v1]);
+										}
+									}
+								}
+								const float edgeWeight = LBPMinWeight + edgeLength / avgEdgeLength;
+								inference.SetNeighbors(f, fAdj, edgeWeight);
+							}
 						}
 					}
 				}
@@ -1069,15 +1124,16 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 				// set data costs for all labels (except label 0 - undefined)
 				FOREACH(f, virtualFacesDatas) {
 					const FaceDataArr& faceDatas = virtualFacesDatas[f];
+					const float faceWeight = virtualFaceAreas[f] / avgFaceArea;
 					if (faceDatas.empty()) {
 						// set costs for label 0 (undefined)
-						inference.SetDataCost(Label(0), f, MaxEnergy);
+						inference.SetDataCost(Label(0), f, MaxEnergy * (faceWeight + LBPMinWeight));
 						continue;
 					}
 					for (const FaceData& faceData: faceDatas) {
 						const Label label((Label)faceData.idxView+1);
 						const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
-						const float dataCost((1.f-normalizedQuality)*MaxEnergy);
+						const float dataCost((1.f-normalizedQuality)*MaxEnergy * faceWeight);
 						inference.SetDataCost(label, f, dataCost);
 					}
 				}
@@ -1157,8 +1213,14 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 						for (boost::tie(ei, eie) = boost::out_edges(f, graph); ei != eie; ++ei) {
 							ASSERT(f == (FIndex)ei->m_source);
 							const FIndex fAdj((FIndex)ei->m_target);
-							if (f < fAdj) // add edges only once
-								inference.SetNeighbors(f, fAdj);
+							if (f < fAdj) { // add edges only once
+								VIndex shared[2];
+								MAYBEUNUSED const bool bShared(scene.mesh.GetEdgeVertices(f, fAdj, shared));
+								ASSERT(bShared);
+								const float edgeLength = (float)norm(scene.mesh.vertices[shared[0]] - scene.mesh.vertices[shared[1]]);
+								const float edgeWeight = LBPMinWeight + edgeLength / avgEdgeLength;
+								inference.SetNeighbors(f, fAdj, edgeWeight);
+							}
 						}
 					}
 				}
@@ -1166,15 +1228,16 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 				// set data costs for all labels (except label 0 - undefined)
 				FOREACH(f, facesDatas) {
 					const FaceDataArr& faceDatas = facesDatas[f];
+					const float faceWeight = scene.mesh.ComputeArea(f) / avgFaceArea;
 					if (faceDatas.empty()) {
 						// set costs for label 0 (undefined)
-						inference.SetDataCost(Label(0), f, MaxEnergy);
+						inference.SetDataCost(Label(0), f, MaxEnergy * (faceWeight + LBPMinWeight));
 						continue;
 					}
 					for (const FaceData& faceData: faceDatas) {
 						const Label label((Label)faceData.idxView+1);
 						const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
-						const float dataCost((1.f-normalizedQuality)*MaxEnergy);
+						const float dataCost((1.f-normalizedQuality)*MaxEnergy * faceWeight);
 						inference.SetDataCost(label, f, dataCost);
 					}
 				}

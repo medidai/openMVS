@@ -511,7 +511,7 @@ void Mesh::GetFaceFaces(FIndex f, FaceIdxArr& afaces) const
 	}
 }
 
-void Mesh::GetEdgeVertices(FIndex f0, FIndex f1, uint32_t* vs0, uint32_t* vs1) const
+bool Mesh::GetEdgeVertices(FIndex f0, FIndex f1, uint32_t* vs0, uint32_t* vs1) const
 {
 	const Face& face0 = faces[f0];
 	const Face& face1 = faces[f1];
@@ -520,9 +520,25 @@ void Mesh::GetEdgeVertices(FIndex f0, FIndex f1, uint32_t* vs0, uint32_t* vs1) c
 		if ((vs1[i] = FindVertex(face1, face0[v])) != NO_ID) {
 			vs0[i] = v;
 			if (++i == 2)
-				return;
+				return true;
 		}
 	}
+	return false;
+}
+
+bool Mesh::GetEdgeVertices(FIndex f0, FIndex f1, VIndex* vs) const
+{
+	const Face& face0 = faces[f0];
+	const Face& face1 = faces[f1];
+	int i(0);
+	for (int v=0; v<3; ++v) {
+		if (FindVertex(face1, face0[v]) != NO_ID) {
+			vs[i] = face0[v];
+			if (++i == 2)
+				return true;
+		}
+	}
+	return false;
 }
 
 // get the edge orientation in the given face:
