@@ -102,7 +102,7 @@ public:
 	}
 	bool pyTextureMesh(unsigned nResolutionLevel=0, uint32_t nColEmpty=0x00FF7F27) {
 		return TextureMesh(nResolutionLevel, 640/*nMinResolution*/, 0/*minCommonCameras*/, 0.f/*fOutlierThreshold*/, 0.3f/*fRatioDataSmoothness*/,
-			true/*bGlobalSeamLeveling*/, true/*bLocalSeamLeveling*/, 0/*nTextureSizeMultiple*/, 3/*nRectPackingHeuristic*/, Pixel8U(nColEmpty));
+			true/*bGlobalSeamLeveling*/, true/*bLocalSeamLeveling*/, 0/*nTextureSizeMultiple*/, Pixel8U(nColEmpty));
 	}
 };
 

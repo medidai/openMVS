@@ -2605,11 +2605,6 @@ void UI::ShowTextureWorkflowWindow(Window& window) {
 		opts.textureSizeMultiple = (unsigned)MAXF(textureMultiple, 0);
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Texture dimensions will be multiples of this value (0 - power of two)");
-	int packingHeuristic = (int)opts.rectPackingHeuristic;
-	if (ImGui::InputInt("Packing Heuristic", &packingHeuristic))
-		opts.rectPackingHeuristic = (unsigned)MAXF(packingHeuristic, 0);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Algorithm for packing texture patches into atlas:\n- 0 = MaxRects BSSF (best)\n- 1 = MaxRects BL (fast)\n- 2 = Skyline BL\nHigher numbers are faster, but may be less efficient.");
 
 	float color[3] = {
 		((opts.emptyColor >> 16) & 0xFF) / 255.f,

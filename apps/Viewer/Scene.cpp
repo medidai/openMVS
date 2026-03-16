@@ -217,7 +217,7 @@ public:
 		// Texture mesh
 		return mvsScene.TextureMesh(options.resolutionLevel, options.minResolution, options.minCommonCameras,
 			options.outlierThreshold, options.ratioDataSmoothness, options.globalSeamLeveling,
-			options.localSeamLeveling, options.textureSizeMultiple, options.rectPackingHeuristic,
+			options.localSeamLeveling, options.textureSizeMultiple,
 			Pixel8U(options.emptyColor), options.sharpnessWeight, options.ignoreMaskLabel, options.maxTextureSize);
 	}
 	EVTWorkflowTextureMesh(Scene* _pScene) : EventWorkflow(_pScene) {}
