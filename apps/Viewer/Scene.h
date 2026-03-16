@@ -119,7 +119,6 @@ public:
 		bool globalSeamLeveling{true};
 		bool localSeamLeveling{true};
 		unsigned textureSizeMultiple{0};
-		unsigned rectPackingHeuristic{3};
 		uint32_t emptyColor{0x00FF7F27};
 		float sharpnessWeight{0.5f};
 		int ignoreMaskLabel{-1};
@@ -169,7 +168,7 @@ public:
 	std::atomic<bool> geometryModified;
 	double workflowStartTime;
 	SEACAVE::CriticalSection workflowMutex;
-	
+
 	// Workflow history for stats display
 	struct WorkflowHistoryEntry {
 		WorkflowType type;
@@ -182,7 +181,7 @@ public:
 	explicit Scene(ARCHIVE_TYPE _nArchiveType = ARCHIVE_MVS);
 	~Scene();
 
-	bool Initialize(const cv::Size& size, const String& windowName, 
+	bool Initialize(const cv::Size& size, const String& windowName,
 				   const String& fileName = String(), const String& geometryFileName = String());
 	void Run();
 
@@ -233,7 +232,7 @@ public:
 	const TextureMeshWorkflowOptions& GetTextureMeshWorkflowOptions() const { return textureOptions; }
 	const MVS::Scene& GetScene() const { return scene; }
 	MVS::Scene& GetScene() { return scene; }
-	const ImageArr& GetImages() const { return images; } 
+	const ImageArr& GetImages() const { return images; }
 	ImageArr& GetImages() { return images; }
 	Window& GetWindow() { return window; }
 	MVS::IIndex ImageIdxMVS2Viewer(MVS::IIndex idx) const;
