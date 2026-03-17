@@ -177,10 +177,7 @@ public:
 			decimate = 1.f;
 
 		// Clean mesh
-		mvsScene.mesh.Clean(1.f, options.removeSpurious, options.removeSpikes, options.closeHoles, options.smoothSteps, options.edgeLength, false);
-		mvsScene.mesh.Clean(decimate, 0.f, options.removeSpikes, options.closeHoles, 0u, 0.f, false);
-		mvsScene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true);
-
+		mvsScene.mesh.Clean(decimate, options.removeSpurious, options.removeSpikes, options.closeHoles, options.smoothSteps, options.edgeLength);
 		return true;
 	}
 	EVTWorkflowReconstructMesh(Scene* _pScene) : EventWorkflow(_pScene) {}
@@ -211,8 +208,7 @@ public:
 		float decimate = CLAMP(options.decimateMesh, 0.f, 1.f);
 		if (decimate <= 0.f)
 			decimate = 1.f;
-		mvsScene.mesh.Clean(decimate, 0.f, false, options.closeHoles, 0u, 0.f, false);
-		mvsScene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true);
+		mvsScene.mesh.Clean(decimate, 0.f, false, options.closeHoles, 0u, 0.f);
 
 		// Texture mesh
 		return mvsScene.TextureMesh(options.resolutionLevel, options.minResolution, options.minCommonCameras,

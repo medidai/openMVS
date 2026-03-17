@@ -6,12 +6,6 @@ if(CGAL_FOUND)
 	link_directories(${CGAL_LIBRARY_DIRS})
 endif()
 
-FIND_PACKAGE(VCG REQUIRED)
-if(VCG_FOUND)
-	include_directories(${VCG_INCLUDE_DIRS})
-	add_definitions(${VCG_DEFINITIONS})
-endif()
-
 set(CERES_LIBS "")
 if(OpenMVS_USE_CERES)
 	FIND_PACKAGE(Ceres)
