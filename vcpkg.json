@@ -28,7 +28,6 @@
     "nanoflann",
     "pkgconf",
     "tiff",
-    "vcglib",
     "zlib"
   ],
   "features": {

@@ -2377,14 +2377,13 @@ void MeshRefineCUDA::SubdivideMesh(uint32_t maxArea, float fDecimate, unsigned n
 	if (!bNoDecimation) {
 		if (fDecimate > 0.f) {
 			// decimate to the desired resolution
-			scene.mesh.Clean(fDecimate, 0.f, false, nCloseHoles, 0u, 0.f, false);
-			scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+			scene.mesh.Clean(fDecimate, 0.f, false, nCloseHoles, 0u, 0.f);
 
 			#ifdef MESHOPT_ENSUREEDGESIZE
 			// make sure there are no edges too small or too long
 			if (nEnsureEdgeSize > 0 && bNoSimplification) {
 				scene.mesh.EnsureEdgeSize();
-				scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+				scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f);
 			}
 			#endif
 
@@ -2404,14 +2403,13 @@ void MeshRefineCUDA::SubdivideMesh(uint32_t maxArea, float fDecimate, unsigned n
 				maxAreas.Empty();
 
 				// decimate to the auto detected resolution
-				scene.mesh.Clean(MAXF(0.1f, medianArea/maxAreaf), 0.f, false, nCloseHoles, 0u, 0.f, false);
-				scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+				scene.mesh.Clean(MAXF(0.1f, medianArea/maxAreaf), 0.f, false, nCloseHoles, 0u, 0.f);
 
 				#ifdef MESHOPT_ENSUREEDGESIZE
 				// make sure there are no edges too small or too long
 				if (nEnsureEdgeSize > 0 && bNoSimplification) {
 					scene.mesh.EnsureEdgeSize();
-					scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+					scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f);
 				}
 				#endif
 
@@ -2443,7 +2441,7 @@ void MeshRefineCUDA::SubdivideMesh(uint32_t maxArea, float fDecimate, unsigned n
 	#endif
 	{
 		scene.mesh.EnsureEdgeSize();
-		scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+		scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f);
 	}
 	#endif
 
@@ -2733,7 +2731,7 @@ void MeshRefineCUDA::ComputeSmoothnessGradient(uint32_t numVertices)
 		numVertices,
 		uint8_t(1)
 	));
-	#if 0		
+	#if 0
 	// debug view
 	Point3fArr _smoothGrad1(numVertices);
 	Point3fArr _smoothGrad2(numVertices);
@@ -2768,7 +2766,7 @@ void MeshRefineCUDA::CombineGradients(uint32_t numVertices)
 			elasticity
 		));
 	}
-	#if 0		
+	#if 0
 	// debug view
 	Point3fArr _photoGrad(numVertices);
 	photoGrad.GetData(_photoGrad);

@@ -92,9 +92,7 @@ public:
 	void pyCleanMesh(float fDecimate=1.f, float fRemoveSpurious=20.f, bool bRemoveSpikes=true, unsigned nCloseHoles=30, unsigned nSmoothMesh=2, float fEdgeLength=0.f, bool bCrop2ROI=false) {
 		if (bCrop2ROI && IsBounded())
 			mesh.RemoveFacesOutside(obb);
-		mesh.Clean(fDecimate, fRemoveSpurious, bRemoveSpikes, nCloseHoles, nSmoothMesh, fEdgeLength, false);
-		mesh.Clean(1.f, 0.f, bRemoveSpikes, nCloseHoles, 0u, 0.f, false); // extra cleaning trying to close more holes
-		mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true); // extra cleaning to remove non-manifold problems created by closing holes
+		mesh.Clean(fDecimate, fRemoveSpurious, bRemoveSpikes, nCloseHoles, nSmoothMesh, fEdgeLength);
 	}
 	bool pyRefineMesh(unsigned nResolutionLevel=0, unsigned nEnsureEdgeSize=1, unsigned nMaxFaceArea=32, unsigned nScales=2, float fScaleStep=0.5f, float fRegularityWeight=0.2f) {
 		return RefineMesh(nResolutionLevel, 640/*nMinResolution*/, 8/*nMaxViews*/, 0.f/*fDecimateMesh*/, 30/*nCloseHoles*/, nEnsureEdgeSize,
@@ -114,7 +112,7 @@ void SetWorkingFolder(const std::string& folder) {
 
 BOOST_PYTHON_MODULE(pyOpenMVS) {
 	using namespace boost::python;
-	
+
 	class_<Scene, boost::noncopyable, boost::shared_ptr<Scene>>("Scene", init<unsigned>(arg("max_threads")=0))
 		.def("load", &Scene::pyLoad, (arg("file_path"), arg("import")=true))
 		.def("save", &Scene::pySave, (arg("file_path"), arg("type")=static_cast<int>(ARCHIVE_DEFAULT)))
@@ -131,7 +129,7 @@ BOOST_PYTHON_MODULE(pyOpenMVS) {
 		.def("refine_mesh", &Scene::pyRefineMesh, (arg("resolution_level")=0, arg("ensure_edge_size")=1, arg("max_face_area")=32, arg("scales")=2, arg("scale_step")=0.5f, arg("regularity_weight")=0.2f))
 		.def("texture_mesh", &Scene::pyTextureMesh, (arg("resolution_level")=0, arg("empty_color")=0x00FF7F27))
 		.def("compute_leveled_volume", &Scene::ComputeLeveledVolume);
-	
+
 	def("set_working_folder", &SetWorkingFolder);
 } // BOOST_PYTHON_MODULE
 /*----------------------------------------------------------------*/

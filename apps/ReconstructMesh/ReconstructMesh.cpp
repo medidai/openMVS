@@ -238,7 +238,7 @@ void Application::Finalize()
 // <x-coord1> <y-coord1>
 // <x-coord2> <y-coord2>
 // ...
-// 
+//
 // for example:
 // N01.JPG 3
 // 3090 2680
@@ -327,7 +327,7 @@ bool Export3DProjections(Scene& scene, const String& inputFileName) {
 		if (intRay.pick.IsValid()) {
 			const Point3d ptHit(ray.GetPoint(intRay.pick.dist));
 			oStream.print("%.7f %.7f %.7f\n", ptHit.x, ptHit.y, ptHit.z);
-		} else 
+		} else
 			oStream.print("NA\n");
 	}
 	return true;
@@ -471,9 +471,7 @@ int main(int argc, LPCTSTR* argv)
 				numVertices-scene.mesh.vertices.size(), numFaces-scene.mesh.faces.size(), TD_TIMER_GET_FMT().c_str());
 		}
 		const float fDecimate(OPT::nTargetFaceNum ? static_cast<float>(OPT::nTargetFaceNum) / scene.mesh.faces.size() : OPT::fDecimateMesh);
-		scene.mesh.Clean(1.f, OPT::fRemoveSpurious, OPT::bRemoveSpikes, OPT::nCloseHoles, OPT::nSmoothMesh, OPT::fEdgeLength, false);
-		scene.mesh.Clean(fDecimate, 0.f, OPT::bRemoveSpikes, OPT::nCloseHoles, 0u, 0.f, false); // extra cleaning trying to close more holes
-		scene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true); // extra cleaning to remove non-manifold problems created by closing holes
+		scene.mesh.Clean(fDecimate, OPT::fRemoveSpurious, OPT::bRemoveSpikes, OPT::nCloseHoles, OPT::nSmoothMesh, OPT::fEdgeLength);
 		scene.obb = initialOBB;
 
 		// save the final mesh
