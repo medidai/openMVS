@@ -118,6 +118,11 @@ bool PipelineTest(bool verbose=false)
 	}
 	if (verbose)
 		scene.mesh.Save(MAKE_PATH("scene_dense_mesh_texture.ply"));
+	const Scene::ReconstructionQuality quality(scene.ComputeReconstructionQuality());
+	if (quality.score() < 45.f) {
+		VERBOSE("ERROR: TestDataset reconstruction quality too low (%.1f)!", quality.score());
+		return false;
+	}
 	VERBOSE("All pipeline stages passed (%s)", TD_TIMER_GET_FMT().c_str());
 	return true;
 }

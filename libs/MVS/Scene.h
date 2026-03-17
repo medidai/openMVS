@@ -136,7 +136,7 @@ public:
 	void InitTowerScene(const int towerMode);
 	size_t DrawCircle(PointCloud& pc,PointCloud::PointArr& outCircle, const Point3f& circleCenter, const float circleRadius, const unsigned nTargetPoints, const float fStartAngle, const float fAngleBetweenPoints);
 	PointCloud BuildTowerMesh(const PointCloud& origPointCloud, const Point2f& centerPoint, const float fRadius, const float fROIRadius, const float zMin, const float zMax, const float minCamZ, bool bFixRadius = false);
-	
+
 	// Dense reconstruction
 	bool DenseReconstruction(int nFusionMode=0, bool bCrop2ROI=true, float fBorderROI=0, float fSampleMeshNeighbors=0);
 	bool ComputeDepthMaps(DenseDepthMapData& data);
@@ -163,6 +163,21 @@ public:
 	bool TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsigned minCommonCameras=0, float fOutlierThreshold=0.f, float fRatioDataSmoothness=0.3f,
 		bool bGlobalSeamLeveling=true, bool bLocalSeamLeveling=true, unsigned nTextureSizeMultiple=0, Pixel8U colEmpty=Pixel8U(255,127,39),
 		float fSharpnessWeight=0.5f, int ignoreMaskLabel=-1, int maxTextureSize=0, const IIndexArr& views=IIndexArr());
+
+	// Reconstruction quality assessment
+	struct Score {
+		float completeness{0}; // fraction of image covered by mesh [0,1]
+		float ssim{0};         // SSIM in covered region [0,1]
+		float psnr{0};         // PSNR in dB (diagnostic)
+		float score() const { return 100.f * completeness * ssim; }
+	};
+	struct ImageScore : Score {
+		IIndex idxImage;
+	};
+	struct ReconstructionQuality : Score {
+		CLISTDEFIDX(ImageScore, IIndex) imageScores;
+	};
+	ReconstructionQuality ComputeReconstructionQuality(unsigned nMaxResolution = 0) const;
 
 	#ifdef _USE_BOOST
 	// implement BOOST serialization

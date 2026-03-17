@@ -4183,7 +4183,7 @@ void Mesh::Project(const Camera& camera, DepthMap& depthMap, Image8U3& image) co
 				xt  = mesh.faceTexcoords[idxFaceTex+0] * pbary[0];
 				xt += mesh.faceTexcoords[idxFaceTex+1] * pbary[1];
 				xt += mesh.faceTexcoords[idxFaceTex+2] * pbary[2];
-				const auto texIdx = mesh.faceTexindices[idxFaceTex / 3];
+				const auto texIdx = mesh.GetFaceTextureIndex(idxFaceTex / 3);
 				image(pt) = mesh.texturesDiffuse[texIdx].sampleSafe(xt);
 			}
 		}

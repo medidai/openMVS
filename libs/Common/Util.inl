@@ -1196,23 +1196,42 @@ inline REAL ComputeSNR(const TDMatrix<TYPE>& x0, const TDMatrix<TYPE>& x) {
 	const REAL x0Norm(norm(x0));
 	REAL ret(std::numeric_limits<REAL>::infinity());
 	if (ISZERO(x0Norm) && err > 0) ret = 0;
-	else if (err > 0)              ret = 20.0 * std::log10(x0Norm / err);
+	else if (err > 0)                 ret = 20.0 * std::log10(x0Norm / err);
 	return ret;
 } // ComputeSNR
 template<typename TYPE, int N>
 inline REAL ComputeSNR(const TMatrix<TYPE,N,1>& x0, const TMatrix<TYPE,N,1>& x) {
 	return ComputeSNR(TDMatrix<TYPE>(N,1,(TYPE*)x0.val), TDMatrix<TYPE>(N,1,(TYPE*)x.val));
 } // ComputeSNR
+// Compute the Peak Signal-to-Noise Ratio (PSNR) between two single-channel images;
+// optionally restrict computation to masked pixels;
+// returns PSNR in dB, where higher is better (ex: 30dB means that the signal is 1000 times stronger than the noise);
+// PSNR peak value subtlety: the implementation uses the dynamic max of both signals as peak (the original behavior),
+// rather than a hardcoded value. For 8-bit images converted to float, the max is typically 254–255 insteqad of 255,
+// so the difference is negligible (<0.1 dB);
+// the advantage is this single implementation works correctly for any value range — depth maps, HDR images, etc.
 template<typename TYPE>
-inline REAL ComputePSNR(const TDMatrix<TYPE>& x0, const TDMatrix<TYPE>& x) {
+inline REAL ComputePSNR(const TDMatrix<TYPE>& x0, const TDMatrix<TYPE>& x, cv::InputArray _mask = cv::noArray()) {
 	ASSERT(x0.area() == x.area());
-	const size_t N(x0.area());
-	const REAL err(normSq(TDMatrix<TYPE>(x0 - x)) / N);
+	const unsigned N((unsigned)x0.area());
+	const cv::Mat mask(_mask.getMat());
+	ASSERT(mask.empty() || (unsigned)mask.total() == N);
+	const uint8_t* pMask(mask.empty() ? nullptr : mask.ptr<uint8_t>());
+	REAL err(0);
 	TYPE max1(0), max2(0);
+	unsigned count(0);
 	for (unsigned i=0; i<N; ++i) {
+		if (pMask && !pMask[i])
+			continue;
+		const REAL diff(static_cast<REAL>(x0[i]) - static_cast<REAL>(x[i]));
+		err += diff * diff;
 		max1 = MAXF(max1, x0[i]);
 		max2 = MAXF(max2, x[i]);
+		++count;
 	}
+	if (count == 0)
+		return std::numeric_limits<REAL>::infinity();
+	err /= count;
 	const TYPE maxBoth(MAXF(max1, max2));
 	REAL ret(std::numeric_limits<REAL>::infinity());
 	if (ISZERO(maxBoth) && err > 0) ret = 0;
@@ -1220,9 +1239,47 @@ inline REAL ComputePSNR(const TDMatrix<TYPE>& x0, const TDMatrix<TYPE>& x) {
 	return ret;
 } // ComputePSNR
 template<typename TYPE, int N>
-inline REAL ComputePSNR(const TMatrix<TYPE,N,1>& x0, const TMatrix<TYPE,N,1>& x) {
-	return ComputePSNR(TDMatrix<TYPE>(N,1,(TYPE*)x0.val), TDMatrix<TYPE>(N,1,(TYPE*)x.val));
+inline REAL ComputePSNR(const TMatrix<TYPE,N,1>& x0, const TMatrix<TYPE,N,1>& x, cv::InputArray _mask = cv::noArray()) {
+	return ComputePSNR(TDMatrix<TYPE>(N,1,(TYPE*)x0.val), TDMatrix<TYPE>(N,1,(TYPE*)x.val), _mask);
 } // ComputePSNR
+// Compute the Structural Similarity Index (SSIM) between two single-channel float images;
+// optionally restrict computation to masked pixels;
+// returns SSIM in [0,1] where 1 means identical
+inline REAL ComputeSSIM(const Image32F& img1, const Image32F& img2, cv::InputArray mask = cv::noArray())
+{
+	ASSERT(img1.size() == img2.size());
+	// standard SSIM constants for [0,255] range
+	constexpr double C1 = 6.5025;   // (0.01*255)^2
+	constexpr double C2 = 58.5225;  // (0.03*255)^2
+	// compute local means using Gaussian blur (11x11, sigma=1.5)
+	cv::Mat mu1, mu2;
+	cv::GaussianBlur(img1, mu1, cv::Size(11, 11), 1.5);
+	cv::GaussianBlur(img2, mu2, cv::Size(11, 11), 1.5);
+	cv::Mat mu1_sq, mu2_sq, mu1_mu2;
+	cv::multiply(mu1, mu1, mu1_sq);
+	cv::multiply(mu2, mu2, mu2_sq);
+	cv::multiply(mu1, mu2, mu1_mu2);
+	// compute local variances and covariance
+	cv::Mat sigma1_sq, sigma2_sq, sigma12;
+	cv::Mat img1_sq, img2_sq, img1_img2;
+	cv::multiply(img1, img1, img1_sq);
+	cv::multiply(img2, img2, img2_sq);
+	cv::multiply(img1, img2, img1_img2);
+	cv::GaussianBlur(img1_sq, sigma1_sq, cv::Size(11, 11), 1.5);
+	cv::GaussianBlur(img2_sq, sigma2_sq, cv::Size(11, 11), 1.5);
+	cv::GaussianBlur(img1_img2, sigma12, cv::Size(11, 11), 1.5);
+	sigma1_sq -= mu1_sq;
+	sigma2_sq -= mu2_sq;
+	sigma12 -= mu1_mu2;
+	// SSIM formula: ((2*mu1*mu2 + C1)*(2*sigma12 + C2)) / ((mu1^2 + mu2^2 + C1)*(sigma1^2 + sigma2^2 + C2))
+	cv::Mat numerator, denominator, ssimMap;
+	numerator = (2 * mu1_mu2 + C1).mul(2 * sigma12 + C2);
+	denominator = (mu1_sq + mu2_sq + C1).mul(sigma1_sq + sigma2_sq + C2);
+	cv::divide(numerator, denominator, ssimMap);
+	// average over masked region (or full image if no mask)
+	const cv::Scalar mssim(cv::mean(ssimMap, mask));
+	return CLAMP((REAL)mssim.val[0], (REAL)0, (REAL)1);
+} // ComputeSSIM
 /*----------------------------------------------------------------*/
 
 
