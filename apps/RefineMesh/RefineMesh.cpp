@@ -108,7 +108,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 			), "verbosity level")
 		#endif
 		#ifdef _USE_CUDA
-		("cuda-device", boost::program_options::value(&SEACAVE::CUDA::desiredDeviceID)->default_value(-2), "CUDA device number to be used for mesh refinement (-2 - CPU processing, -1 - best GPU, >=0 - device index)")
+		("cuda-device", boost::program_options::value<std::string>(&SEACAVE::CUDA::desiredDeviceIDs)->default_value(""), "CUDA device(s) for mesh refinement (comma-separated IDs, -1 for best GPU, empty for CPU)")
 		#endif
 		;
 
@@ -124,7 +124,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("decimate", boost::program_options::value(&OPT::fDecimateMesh)->default_value(0.f), "decimation factor in range [0..1] to be applied to the input surface before refinement (0 - auto, 1 - disabled)")
 		("close-holes", boost::program_options::value(&OPT::nCloseHoles)->default_value(30), "try to close small holes in the input surface (0 - disabled)")
 		("ensure-edge-size", boost::program_options::value(&OPT::nEnsureEdgeSize)->default_value(1), "ensure edge size and improve vertex valence of the input surface (0 - disabled, 1 - auto, 2 - force)")
-		("max-face-area", boost::program_options::value(&OPT::nMaxFaceArea)->default_value(32), "maximum face area projected in any pair of images that is not subdivided (0 - disabled)")
+		("max-face-area", boost::program_options::value(&OPT::nMaxFaceArea)->default_value(16), "maximum face area projected in any pair of images that is not subdivided (0 - disabled)")
 		("scales", boost::program_options::value(&OPT::nScales)->default_value(2), "how many iterations to run mesh optimization on multi-scale images")
 		("scale-step", boost::program_options::value(&OPT::fScaleStep)->default_value(0.5f), "image scale factor used at each mesh optimization step")
 		("alternate-pair", boost::program_options::value(&OPT::nAlternatePair)->default_value(0), "refine mesh using an image pair alternatively as reference (0 - both, 1 - alternate, 2 - only left, 3 - only right)")
@@ -229,12 +229,12 @@ int main(int argc, LPCTSTR* argv)
 	}
 	TD_TIMER_START();
 	#ifdef _USE_CUDA
-	if (SEACAVE::CUDA::desiredDeviceID < -1 ||
+	if (SEACAVE::CUDA::desiredDeviceIDs.empty() ||
 		!scene.RefineMeshCUDA(OPT::nResolutionLevel, OPT::nMinResolution, OPT::nMaxViews,
 							  OPT::fDecimateMesh, OPT::nCloseHoles, OPT::nEnsureEdgeSize,
 							  OPT::nMaxFaceArea,
 							  OPT::nScales, OPT::fScaleStep,
-							  OPT::nAlternatePair>10 ? OPT::nAlternatePair%10 : 0,
+							  OPT::nAlternatePair,
 							  OPT::fRegularityWeight,
 							  OPT::fRatioRigidityElasticity,
 							  OPT::fGradientStep))

@@ -2340,9 +2340,13 @@ void UI::ShowDensifyWorkflowWindow(Window& window) {
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Percentage to expand (positive) or shrink (negative) the ROI border.\nUseful to include context or tighten the bounds.");
 	#ifdef _USE_CUDA
-	ImGui::SliderInt("CUDA Device ID", &SEACAVE::CUDA::desiredDeviceID, -2, 8);
+	static char cudaDeviceBuf[64] = {};
+	if (cudaDeviceBuf[0] == '\0')
+		strncpy(cudaDeviceBuf, SEACAVE::CUDA::desiredDeviceIDs.c_str(), sizeof(cudaDeviceBuf)-1);
+	if (ImGui::InputText("CUDA Device(s)", cudaDeviceBuf, sizeof(cudaDeviceBuf)))
+		SEACAVE::CUDA::desiredDeviceIDs = cudaDeviceBuf;
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("CUDA device number to be used for depth-map estimation\n(-2 - CPU processing, -1 - best GPU, >=0 - device index)");
+		ImGui::SetTooltip("CUDA device(s) for depth-map estimation\n(comma-separated IDs, -1 for best GPU, empty for CPU)");
 	#endif
 
 	ImGui::Separator();

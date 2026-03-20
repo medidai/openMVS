@@ -82,7 +82,7 @@ bool PipelineTest(bool verbose=false)
 	TD_TIMER_START();
 	#if 0 && defined(_USE_CUDA)
 	// force CPU for testing even if CUDA is available
-	SEACAVE::CUDA::desiredDeviceID = -2;
+	SEACAVE::CUDA::desiredDeviceIDs = "";
 	#endif
 	Scene scene;
 	if (!scene.Load(MAKE_PATH("scene.mvs"))) {

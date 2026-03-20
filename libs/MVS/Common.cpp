@@ -34,7 +34,6 @@
 // Common.obj will contain the pre-compiled type information
 
 #include "Common.h"
-#include "Mesh.h"
 
 void MVS::Initialize(LPCTSTR appname, unsigned nMaxThreads, int nProcessPriority) {
 	SEACAVE::Initialize(appname, nMaxThreads, nProcessPriority);
@@ -42,10 +41,5 @@ void MVS::Initialize(LPCTSTR appname, unsigned nMaxThreads, int nProcessPriority
 
 void MVS::Finalize() {
 	SEACAVE::Finalize();
-
-	#ifdef _USE_CUDA
-	// release static CUDA kernels before CUDA context is destroyed
-	Mesh::kernelComputeFaceNormal.Release();
-	#endif
 }
 /*----------------------------------------------------------------*/
