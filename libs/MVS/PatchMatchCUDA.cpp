@@ -52,11 +52,11 @@ namespace MVS {
 
 namespace CUDA {
 
-PatchMatch::PatchMatch(int device)
+PatchMatch::PatchMatch()
 {
 	// initialize CUDA device if needed
 	if (SEACAVE::CUDA::devices.IsEmpty())
-		SEACAVE::CUDA::initDevice(device);
+		SEACAVE::CUDA::initDevices(SEACAVE::CUDA::desiredDeviceIDs);
 }
 
 PatchMatch::~PatchMatch()

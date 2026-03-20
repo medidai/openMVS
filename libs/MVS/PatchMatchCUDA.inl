@@ -67,7 +67,7 @@ public:
 	};
 
 public:
-	PatchMatch(int device=0);
+	PatchMatch();
 	~PatchMatch();
 
 	void Init(bool bGeomConsistency);

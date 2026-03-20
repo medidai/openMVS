@@ -144,17 +144,7 @@ public:
 
 	Image8U3Arr texturesDiffuse; // textures containing the diffuse color (optional)
 
-	#ifdef _USE_CUDA
-	static SEACAVE::CUDA::KernelRT kernelComputeFaceNormal;
-	#endif
-
 public:
-	#ifdef _USE_CUDA
-	inline Mesh() {
-		InitKernels(SEACAVE::CUDA::desiredDeviceID);
-	}
-	#endif
-
 	void Release();
 	void ReleaseExtra();
 	void ReleaseComputable();
@@ -271,10 +261,6 @@ protected:
 	bool SavePLY(const String& fileName, const cList<String>& comments=cList<String>(), bool bBinary=true, bool bTexLossless=true) const;
 	bool SaveOBJ(const String& fileName) const;
 	bool SaveGLTF(const String& fileName, bool bBinary=true) const;
-
-	#ifdef _USE_CUDA
-	static bool InitKernels(int device=-1);
-	#endif
 
 	#ifdef _USE_BOOST
 	// implement BOOST serialization
