@@ -103,23 +103,23 @@ inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, int k, int fixedAxi
 	// loop over the points to find the mean point
 	// location and to build the covariance matrix;
 	// note that we only have
-	// to build terms for the upper triangular 
+	// to build terms for the upper triangular
 	// portion since the matrix is symmetric
 	POINT mu(POINT::Zero());
 	TYPE cxx=0, cxy=0, cxz=0, cyy=0, cyz=0, czz=0;
 	for (size_t i=0; i<n; ++i) {
 		const POINT& p = pts[i];
 		mu += p;
-		cxx += p(0)*p(0); 
-		cxy += p(0)*p(1); 
+		cxx += p(0)*p(0);
+		cxy += p(0)*p(1);
 		cxz += p(0)*p(2);
 		cyy += p(1)*p(1);
 		cyz += p(1)*p(2);
 		czz += p(2)*p(2);
 	}
 	const TYPE invN(TYPE(1)/TYPE(n));
-	cxx = (cxx - mu(0)*mu(0)*invN)*invN; 
-	cxy = (cxy - mu(0)*mu(1)*invN)*invN; 
+	cxx = (cxx - mu(0)*mu(0)*invN)*invN;
+	cxy = (cxy - mu(0)*mu(1)*invN)*invN;
 	cxz = (cxz - mu(0)*mu(2)*invN)*invN;
 	cyy = (cyy - mu(1)*mu(1)*invN)*invN;
 	cyz = (cyz - mu(1)*mu(2)*invN)*invN;
@@ -137,7 +137,7 @@ inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, int k, int fixedAxi
 // builds an OBB from triangles specified as an array of
 // points with integer indices into the point array. Forms
 // the covariance matrix for the triangles, then uses the
-// method build_from_covariance_matrix method to fit 
+// method build_from_covariance_matrix method to fit
 // the box.  ALL points will be fit in the box, regardless
 // of whether they are indexed by a triangle or not.
 template <typename TYPE, int DIMS>
@@ -170,7 +170,7 @@ inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, const TRIANGLE* tri
 		czz += (TYPE(9)*mui(2)*mui(2) + p(2)*p(2) + q(2)*q(2) + r(2)*r(2))*Ai12;
 	}
 
-	// divide out the Am fraction from the average position and 
+	// divide out the Am fraction from the average position and
 	// covariance terms
 	mu /= Am;
 	cxx /= Am; cxy /= Am; cxz /= Am; cyy /= Am; cyz /= Am; czz /= Am;
@@ -267,7 +267,7 @@ inline void TOBB<TYPE,DIMS>::SetBounds(const POINT* pts, size_t n)
 	for (size_t i=1; i<n; ++i)
 		aabb.Insert(m_rot * pts[i]);
 
-	// set the center of the OBB to be the average of the 
+	// set the center of the OBB to be the average of the
 	// minimum and maximum, and the extents be half of the
 	// difference between the minimum and maximum
 	m_pos = m_rot.transpose() * aabb.GetCenter();
@@ -289,8 +289,8 @@ inline void TOBB<TYPE,DIMS>::BuildAdd(const POINT& p)
 	// store mean in m_pos
 	m_pos += p;
 	// store covariance params in m_rot
-	m_rot(0,0) += p(0)*p(0); 
-	m_rot(0,1) += p(0)*p(1); 
+	m_rot(0,0) += p(0)*p(0);
+	m_rot(0,1) += p(0)*p(1);
 	m_rot(0,2) += p(0)*p(2);
 	m_rot(1,0) += p(1)*p(1);
 	m_rot(1,1) += p(1)*p(2);
@@ -302,8 +302,8 @@ template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::BuildEnd()
 {
 	const TYPE invN(TYPE(1)/TYPE(*((size_t*)m_ext.data())));
-	const TYPE cxx = (m_rot(0,0) - m_pos(0)*m_pos(0)*invN)*invN; 
-	const TYPE cxy = (m_rot(0,1) - m_pos(0)*m_pos(1)*invN)*invN; 
+	const TYPE cxx = (m_rot(0,0) - m_pos(0)*m_pos(0)*invN)*invN;
+	const TYPE cxy = (m_rot(0,1) - m_pos(0)*m_pos(1)*invN)*invN;
 	const TYPE cxz = (m_rot(0,2) - m_pos(0)*m_pos(2)*invN)*invN;
 	const TYPE cyy = (m_rot(1,0) - m_pos(1)*m_pos(1)*invN)*invN;
 	const TYPE cyz = (m_rot(1,1) - m_pos(1)*m_pos(2)*invN)*invN;
@@ -356,7 +356,7 @@ inline void TOBB<TYPE,DIMS>::Transform(const MATRIX& m)
 	Eigen::Transform<Type, DIMS, Eigen::Affine> transform(m);
 	MATRIX rotation, scaling;
 	transform.computeRotationScaling(&rotation, &scaling);
-	m_rot = rotation * m_rot;
+	m_rot = m_rot * rotation.transpose();
 	m_pos = m * m_pos;
 	m_ext = scaling * m_ext;
 } // Transform
