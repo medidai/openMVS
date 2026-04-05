@@ -928,12 +928,15 @@ void Renderer::UploadSelection(const Window& window) {
 			if (!selectedImage.IsValid())
 				continue;
 			std::array<Point3f, 4> worldCorners = ComputeCameraFrustumCorners(selectedImage, depth);
+			// Reserve space for lines: 4 (center to corners) + 4 (corner rectangle) = 8 lines × 2 vertices × 3 coordinates = 48 floats
 			selectionVertices.reserve(selectionVertices.size() + 48);
+			// Lines from camera center to each corner (4 lines)
 			const Point3f center = selectedImage.camera.C;
 			for (int j = 0; j < 4; ++j) {
 				selectionVertices.insert(selectionVertices.end(), {center.x, center.y, center.z});
 				selectionVertices.insert(selectionVertices.end(), {worldCorners[j].x, worldCorners[j].y, worldCorners[j].z});
 			}
+			// Rectangle connecting the four corners (4 lines)
 			for (int j = 0; j < 4; ++j) {
 				const Point3f& corner1 = worldCorners[j];
 				const Point3f& corner2 = worldCorners[(j + 1) % 4];

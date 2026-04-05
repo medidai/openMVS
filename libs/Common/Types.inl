@@ -228,95 +228,6 @@ Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5&
 #define CV_WRAP_SAME_PROPERTY_S(type, name, internal_obj) CV_WRAP_PROPERTY_S(type, name, name, internal_obj)
 #endif
 
-//! copy every second source image element to the destination image
-inline void downsample2x(InputArray _src, OutputArray _dst)
-{
-	Mat src(_src.getMat());
-	#if 1
-	_dst.create((src.rows+1)/2, (src.cols+1)/2, src.type());
-	#else
-	if (_dst.empty()) {
-		// create a new matrix
-		_dst.create(src.rows/2, src.cols/2, src.type());
-	} else {
-		// overwrite elements in the existing matrix
-		ASSERT(src.rows > 0 && (unsigned)(src.rows-_dst.size().height*2) <= 1);
-		ASSERT(src.cols > 0 && (unsigned)(src.cols-_dst.size().width*2) <= 1);
-		ASSERT(src.type() == _dst.type());
-	}
-	#endif
-	Mat dst(_dst.getMat());
-	ASSERT(src.elemSize() == dst.elemSize());
-	switch (src.elemSize()) {
-	case 1:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				dst.at<uint8_t>(i,j) = src.at<uint8_t>(2*i,2*j);
-		break;
-	case 2:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				dst.at<uint16_t>(i,j) = src.at<uint16_t>(2*i,2*j);
-		break;
-	case 4:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				dst.at<float>(i,j) = src.at<float>(2*i,2*j);
-		break;
-	case 8:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				dst.at<double>(i,j) = src.at<double>(2*i,2*j);
-		break;
-	default:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				memcpy(dst.ptr(i,j), src.ptr(2*i,2*j), src.elemSize());
-	}
-}
-//! copy elements of source image to the 2 x position in the destination image
-inline void upsample2x(InputArray _src, OutputArray _dst)
-{
-	Mat src(_src.getMat());
-	if (_dst.empty()) {
-		// create a new matrix
-		_dst.create(src.rows*2, src.cols*2, src.type());
-	} else {
-		// overwrite only new elements in the existing matrix
-		ASSERT(src.rows > 0 && src.rows*2-1 <= _dst.size().height);
-		ASSERT(src.cols > 0 && src.cols*2-1 <= _dst.size().width);
-		ASSERT(src.type() == _dst.type());
-	}
-	Mat dst(_dst.getMat());
-	ASSERT(src.elemSize() == dst.elemSize());
-	switch (src.elemSize()) {
-	case 1:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				dst.at<uint8_t>(2*i,2*j) = src.at<uint8_t>(i,j);
-		break;
-	case 2:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				dst.at<uint16_t>(2*i,2*j) = src.at<uint16_t>(i,j);
-		break;
-	case 4:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				dst.at<float>(2*i,2*j) = src.at<float>(i,j);
-		break;
-	case 8:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				dst.at<double>(2*i,2*j) = src.at<double>(i,j);
-		break;
-	default:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				memcpy(dst.ptr(2*i,2*j), src.ptr(i,j), src.elemSize());
-	}
-}
-
 } // namespace cv
 
 
@@ -1606,6 +1517,33 @@ DEFINE_GENERIC_CVDATATYPE(SEACAVE::Image32F4, uint8_t)
 namespace SEACAVE {
 
 namespace CONVERT {
+
+// convert HSV to RGB color
+static Pixel32F HSV2RGB(const Pixel32F& hsv) {
+	// asserts inputs are in range: h in [0,360), s in [0,1], v in [0,1]
+	float hue = hsv.r, saturation = hsv.g, value = hsv.b;
+	ASSERT((hue >= 0.f && hue < 360.f) && (saturation >= 0.f && saturation <= 1.f) && (value >= 0.f && value <= 1.f));
+
+	float c = value * saturation; // chroma
+	float x = c * (1 - std::fabs(std::fmod(hue / 60.f, 2.f) - 1));
+	float m = value - c;
+
+	Pixel32F rgb;
+	if (hue < 60) {
+		rgb.r = c; rgb.g = x; rgb.b = 0;
+	} else if (hue < 120) {
+		rgb.r = x; rgb.g = c; rgb.b = 0;
+	} else if (hue < 180) {
+		rgb.r = 0; rgb.g = c; rgb.b = x;
+	} else if (hue < 240) {
+		rgb.r = 0; rgb.g = x; rgb.b = c;
+	} else if (hue < 300) {
+		rgb.r = x; rgb.g = 0; rgb.b = c;
+	} else {
+		rgb.r = c; rgb.g = 0; rgb.b = x;
+	}
+	return rgb + m;
+}
 
 // convert sRGB to/from linear value
 // (see http://en.wikipedia.org/wiki/SRGB)

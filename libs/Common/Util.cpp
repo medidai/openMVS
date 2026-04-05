@@ -233,8 +233,8 @@ String Util::GetOSInfo()
 		VER_SET_CONDITION(dwlConditionMask, VER_MAJORVERSION, VER_GREATER_EQUAL);
 		VER_SET_CONDITION(dwlConditionMask, VER_MINORVERSION, VER_GREATER_EQUAL);
 		VER_SET_CONDITION(dwlConditionMask, VER_BUILDNUMBER, VER_GREATER_EQUAL);
-		return VerifyVersionInfoW(&osvi, 
-			VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER, 
+		return VerifyVersionInfoW(&osvi,
+			VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER,
 			dwlConditionMask) != FALSE;
 	};
 	if (IsWindows11OrGreater())
@@ -343,14 +343,109 @@ String Util::GetOSInfo()
 
 	return os;
 
-	#else // _MSC_VER
+	#elif defined(__APPLE__) // _MSC_VER
 
+	// macOS: Get product version name and kernel version
+	String osName(_T("macOS"));
+
+	// Get product version (e.g., "26.2")
+	char productVersion[256] = {0};
+	size_t len = sizeof(productVersion) - 1;
+	if (sysctlbyname("kern.osproductversion", productVersion, &len, NULL, 0) == 0 && len > 0) {
+		osName += _T(" ") + String(productVersion);
+		// Map major version to marketing name (e.g., 14 -> Sonoma, 15 -> Sequoia, 26 -> Tahoe)
+		// Starting with 2025, Apple uses year-based versioning (26 = 2025, 27 = 2026, 28 = 2027, etc.)
+		const char* marketingName = NULL;
+		switch (std::atoi(productVersion)) {
+			case 10: case 11: case 12: case 13: marketingName = NULL; break;
+			case 14: marketingName = "Sonoma"; break;
+			case 15: marketingName = "Sequoia"; break;
+			case 26: marketingName = "Tahoe"; break;
+			default: marketingName = NULL;  // future versions not yet named
+		}
+		if (marketingName)
+			osName += _T(" (") + String(marketingName) + _T(")");
+	}
+
+	// Get architecture
+	char machine[256] = {0};
+	len = sizeof(machine) - 1;
+	if (sysctlbyname("hw.machine", machine, &len, NULL, 0) == 0 && len > 0)
+		osName += _T(" (") + String(machine) + _T(")");
+	return osName;
+
+	#else // __APPLE__
+
+	// Linux: Get distribution name and kernel version
+	String distroName;
+	String distroVersion;
+
+	// Try to read /etc/os-release (systemd standard, used by most distributions)
+	std::ifstream osRelease("/etc/os-release");
+	if (osRelease.is_open()) {
+		std::string line;
+		while (std::getline(osRelease, line) && (distroName.empty() || distroVersion.empty())) {
+			if (line.find("PRETTY_NAME=") == 0) {
+				// Extract value between quotes: PRETTY_NAME="Ubuntu 24.04 LTS"
+				size_t start = line.find('"');
+				size_t end = line.rfind('"');
+				if (start != std::string::npos && end != std::string::npos && start < end) {
+					distroName = line.substr(start + 1, end - start - 1);
+					distroVersion.clear(); // version is already included in PRETTY_NAME
+					break; // PRETTY_NAME is the most user-friendly, so we can stop here
+				}
+			} else if (line.find("NAME=") == 0 && distroName.empty()) {
+				size_t start = line.find('"');
+				size_t end = line.rfind('"');
+				if (start != std::string::npos && end != std::string::npos && start < end)
+					distroName = line.substr(start + 1, end - start - 1);
+			} else if (line.find("VERSION_ID=") == 0 && distroVersion.empty()) {
+				size_t start = line.find('"');
+				size_t end = line.rfind('"');
+				if (start != std::string::npos && end != std::string::npos && start < end)
+					distroVersion = line.substr(start + 1, end - start - 1);
+			}
+		}
+		// Combine name and version if PRETTY_NAME wasn't found
+		if (!distroName.empty() && !distroVersion.empty())
+			distroName += _T(" ") + distroVersion;
+	}
+
+	// Fallback: try /etc/lsb-release (Ubuntu and derivatives)
+	if (distroName.empty()) {
+		std::ifstream lsbRelease("/etc/lsb-release");
+		if (lsbRelease.is_open()) {
+			std::string line;
+			while (std::getline(lsbRelease, line)) {
+				if (line.find("DISTRIB_DESCRIPTION=") == 0) {
+					size_t start = line.find('"');
+					size_t end = line.rfind('"');
+					if (start != std::string::npos && end != std::string::npos && start < end)
+						distroName = line.substr(start + 1, end - start - 1);
+					else
+						distroName = line.substr(20);  // remove "DISTRIB_DESCRIPTION="
+				}
+				if (line.find("DISTRIB_RELEASE=") == 0)
+					distroVersion = line.substr(16);  // remove "DISTRIB_RELEASE="
+			}
+		}
+	}
+
+	// Get kernel information
 	utsname n;
 	if (uname(&n) != 0)
-		return "linux (unknown version)";
-	return String(n.sysname) + " " + String(n.release) + " (" + String(n.machine) + ")";
+		return (distroName.empty() ? String(_T("Linux (unknown)")) : distroName);
 
-	#endif // _MSC_VER
+	// Build final string
+	String osInfo;
+	if (!distroName.empty())
+		osInfo = distroName + _T(" Kernel ") + String(n.release);
+	else
+		osInfo = String(n.sysname) + _T(" ") + String(n.release);
+	osInfo += _T(" (") + String(n.machine) + _T(")");
+	return osInfo;
+
+	#endif // _MSC_VER __APPLE__
 }
 
 String Util::GetDiskInfo(const String& path)
@@ -595,16 +690,19 @@ bool OSSupportsAVX()
 // print details about the current build and PC
 void Util::LogBuild()
 {
-	LOG(_T("OpenMVS %s v" OpenMVS_VERSION)
-		#ifndef _RELEASE
-		_T(" (debug)")
-		#endif
-		,
+	LOG(_T("OpenMVS ")
 		#ifdef _ENVIRONMENT64
 		_T("x64")
 		#else
 		_T("x32")
 		#endif
+		_T(" v" OpenMVS_VERSION)
+		#ifndef _RELEASE
+		_T(" (debug)")
+		#endif
+		_T("%s") OpenMVS_GIT_COMMIT _T("%s"),
+		OpenMVS_GIT_COMMIT[0] ? _T(" (") : _T(""),
+		OpenMVS_GIT_COMMIT[0] ? (OpenMVS_GIT_MODIFIED ? _T("*)") : _T(")")) : _T("")
 	);
 	#if TD_VERBOSE == TD_VERBOSE_OFF
 	LOG(_T("Build date: ") __DATE__);

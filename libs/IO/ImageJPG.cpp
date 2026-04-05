@@ -63,7 +63,7 @@ fill_input_buffer(j_decompress_ptr cinfo)
 	JpegSource* source = (JpegSource*)cinfo->src;
 	const size_t size = source->pStream->read(source->buffer, JPG_BUFFER_SIZE);
 	if (size == STREAM_ERROR || size == 0)
-	return FALSE;
+		return FALSE;
 	source->pub.next_input_byte = source->buffer;
 	source->pub.bytes_in_buffer = size;
 	return TRUE;
@@ -183,10 +183,9 @@ bool CImageJPG::ReadHeader()
 
 bool CImageJPG::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
-	JpegState* state = (JpegState*)m_state;
-
-	if (state && m_width && m_height)
+	if (m_state && m_width && m_height)
 	{
+		JpegState* state = (JpegState*)m_state;
 		jpeg_decompress_struct* cinfo = &state->cinfo;
 		JpegErrorMgr* jerr = &state->jerr;
 

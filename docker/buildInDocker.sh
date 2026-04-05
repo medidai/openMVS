@@ -82,9 +82,6 @@ cd cgal_build &&\
 # Python
 DEBIAN_FRONTEND=noninteractive apt-get -yq install python3-dev
 
-# VCGLib
-git clone https://github.com/cdcseacave/VCG.git vcglib
-
 # Build from stable openMVS release or the latest commit from the develop branch
 if [[ "$MASTER" == "1" ]]; then
     git clone https://github.com/cdcseacave/openMVS.git --branch master
@@ -94,12 +91,12 @@ fi
 
 mkdir openMVS_build
 cd openMVS_build &&\
-    cmake . ../openMVS -DCMAKE_BUILD_TYPE=Release -DVCG_ROOT=/vcglib $OPENMVS_BUILD_ARG
+    cmake . ../openMVS -DCMAKE_BUILD_TYPE=Release $OPENMVS_BUILD_ARG
 
 # Install OpenMVS library
 make -j4 &&\
     make install &&\
-    cd .. && rm -rf openMVS_build vcglib
+    cd .. && rm -rf openMVS_build
 
 # Set permissions such that the output files can be accessed by the current user (optional)
 echo "Setting permissions for user $USER_ID:$GROUP_ID"

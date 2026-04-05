@@ -84,16 +84,19 @@ Window::~Window() {
 bool Window::Initialize(const cv::Size& size, const String& windowTitle, Scene& scene) {
 	title = windowTitle;
 
+	#ifdef __APPLE__
+	// Swizzle NSApplication's finishLaunching and install Apple Event handler
+	// BEFORE glfwInit() — this ensures our application:openURLs: delegate
+	// method is injected into GLFW's delegate before finishLaunching processes
+	// the queued file-open event during cold start.
+	OpenMVS_InstallFileHandler();
+	#endif
+
 	// Initialize GLFW
 	if (!glfwInit()) {
 		DEBUG("Failed to initialize GLFW");
 		return false;
 	}
-
-	#ifdef __APPLE__
-	// Install macOS file open handler after GLFW initializes
-	OpenMVS_InstallFileHandler();
-	#endif
 
 	// Set GLFW window hints for OpenGL 3.3 Core Profile
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -452,11 +455,10 @@ void Window::SetTitle(const String& newTitle) {
 
 void Window::SetVisible(bool visible) {
 	if (window) {
-		if (visible) {
+		if (visible)
 			glfwShowWindow(window);
-		} else {
+		else
 			glfwHideWindow(window);
-		}
 	}
 }
 

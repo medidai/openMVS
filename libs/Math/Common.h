@@ -25,6 +25,7 @@
 #endif
 
 #include "LMFit/lmmin.h"
+#include "DisjointSet.h"
 #include "RobustNorms.h"
 #include "SimilarityTransform.h"
 

@@ -1,0 +1,157 @@
+# MVS Library
+
+Core multi-view stereo reconstruction engine. Implements the complete pipeline from sparse point clouds to textured meshes: dense depth estimation, surface reconstruction, mesh refinement, and texture mapping. This is the largest and most important library in OpenMVS.
+
+## Central Data Structure: Scene (`Scene.h`)
+
+```cpp
+class Scene {
+    PlatformArr platforms;        // Camera rigs with trajectories
+    ImageArr images;              // All images/views
+    PointCloud pointcloud;        // Sparse or dense 3D points
+    Mesh mesh;                    // Reconstructed surface
+    OBB3f obb;                    // Region of interest
+    Matrix4x4 transform;         // Coordinate system transform
+    unsigned nCalibratedImages;   // Count of valid images
+    unsigned nMaxThreads;         // Thread limit
+};
+```
+
+All data flows through Scene. Applications load a scene, process it, and save it back.
+
+## Key Classes
+
+### Image (`Image.h`)
+```cpp
+class Image {
+    uint32_t platformID, cameraID, poseID;  // Platform attachment
+    String name, maskName;                   // File paths
+    Camera camera;                           // Pose + intrinsics
+    uint32_t width, height;
+    Image8U3 image;                          // Pixels (lazy-loaded)
+    ViewScoreArr neighbors;                  // Scored neighbor views
+    float scale, avgDepth;
+};
+```
+
+### Camera (`Camera.h`)
+Two-tier system:
+- **CameraIntern**: K (3x3 intrinsic), R (3x3 rotation world-to-camera), C (3x1 camera center in world)
+- **Camera** extends CameraIntern: Adds cached P (3x4 projection matrix)
+- Convention: `P = K[R|t]` where `t = -RC`. R maps world->camera. Pixel center at (0,0).
+
+### Platform (`Platform.h`)
+Camera rig with multiple mounted cameras and a trajectory of poses. Each image references a platform + camera + pose index.
+
+### PointCloud (`PointCloud.h`)
+```cpp
+class PointCloud {
+    PointArr points;            // 3D positions
+    PointViewArr pointViews;    // Which images see each point
+    PointWeightArr pointWeights;// Per-view weights
+    NormalArr normals;          // Surface normals (optional)
+    ColorArr colors;            // RGB colors (optional)
+};
+```
+Includes octree spatial acceleration. Methods: `GetAABB()`, `EstimateNormals()`.
+
+### Mesh (`Mesh.h`)
+```cpp
+class Mesh {
+    VertexArr vertices;              // 3D positions
+    FaceArr faces;                   // Triangle indices
+    NormalArr vertexNormals, faceNormals;
+    VertexVerticesArr vertexVertices; // Adjacency
+    VertexFacesArr vertexFaces;      // Incident faces
+    FaceFacesArr faceFaces;          // Face adjacency
+    TexCoordArr faceTexcoords;       // UV coordinates
+    Image8U3Arr texturesDiffuse;     // Texture atlases
+};
+```
+Key method:
+- `Clean(fDecimate, fSpurious, bRemoveSpikes, nCloseHoles, nSmoothMesh, fEdgeLength, bLastClean)`: CGAL-based mesh cleaning — decimation, spurious component removal, spike removal, hole closing, smoothing, and edge-length enforcement.
+
+### DepthData (`DepthMap.h`)
+Per-image depth estimation data:
+```cpp
+struct DepthData {
+    struct ViewData { Camera camera; Image32F image; DepthMap depthMap; };
+    ViewDataArr images;       // Reference + neighbor views
+    DepthMap depthMap;         // Estimated depth
+    NormalMap normalMap;       // Surface normals
+    ConfidenceMap confMap;     // Confidence scores
+    float dMin, dMax;         // Depth range
+};
+```
+
+## Pipeline Stages
+
+### 1. Scene Loading
+```cpp
+Scene::Load()                     // Load .mvs, .ply, or interface formats
+Scene::SelectNeighborViews()      // Geometric scoring of view pairs
+```
+
+### 2. Dense Depth Estimation (`SceneDensify.cpp`, 98KB)
+```cpp
+Scene::DenseReconstruction(nFusionMode, ...)
+  -> SelectViews() -> InitViews() -> EstimateDepthMap() -> FuseDepthMaps()
+```
+- **PatchMatch stereo**: Random init + iterative propagation + sub-pixel refinement
+- **Semi-Global Matching** (`SemiGlobalMatcher.h`): Optional SGM refinement pass
+- **Confidence filtering**: Multi-view consistency checks
+- **DMapCache** (`DMapCache.h`): LRU disk cache for large-scale processing
+- **PatchMatchCUDA** (`PatchMatchCUDA.h`): GPU-accelerated depth estimation
+
+### 3. Mesh Reconstruction (`SceneReconstruct.cpp`, 43KB)
+```cpp
+Scene::ReconstructMesh(distInsert, bUseFreeSpaceSupport, ...)
+```
+Uses CGAL Poisson reconstruction or Delaunay-based method. Integrates free-space support for occlusion handling.
+
+### 4. Mesh Refinement (`SceneRefine.cpp`, 49KB; `SceneRefineCUDA.cpp`, 89KB)
+```cpp
+Scene::RefineMesh(nResolutionLevel, ...)     // CPU
+Scene::RefineMeshCUDA(...)                    // GPU
+```
+Multi-resolution loop: subdivide -> project to images -> deform vertices using image gradients -> regularize -> close holes -> decimate.
+
+Key params: `nResolutionLevel`, `fDecimateMesh`, `nCloseHoles`, `fRegularityWeight`, `fGradientStep`.
+
+### 5. Texture Mapping (`SceneTexture.cpp`, 82KB)
+```cpp
+Scene::TextureMesh(nResolutionLevel, ...)
+```
+Project faces to images -> compute blending weights -> spatial patch grouping -> atlas packing (`AtlasPacker`, skyline-based bin packing with rotation) -> global seam leveling -> local seam blending.
+
+### 6. Reconstruction Quality Assessment (`SceneQuality.cpp`)
+```cpp
+Scene::ComputeReconstructionQuality(nMaxResolution)
+```
+Renders the textured mesh from each camera viewpoint and compares against the original photograph. Returns a `ReconstructionQuality` struct containing:
+- `Score`: `completeness` (fraction of image covered by mesh [0,1]), `ssim` (SSIM in covered region [0,1]), `psnr` (PSNR in dB), `score()` (composite 0–100: `100 * completeness * ssim`)
+- `ImageScore`: Per-image score with `idxImage`
+- `ReconstructionQuality`: Aggregate score + array of `ImageScore`
+
+## File Format Support
+- **Native**: `.mvs` (Boost serialization)
+- **Point clouds**: `.ply` (binary/ASCII), `.gltf`
+- **Meshes**: `.ply`, `.obj` (with MTL), `.gltf`
+- **Interface**: COLMAP, OpenMVG via `Interface.h`
+
+## GPU/CUDA Components
+- `PatchMatchCUDA.h/cpp/inl` - GPU-parallel depth estimation
+- `SceneRefineCUDA.cpp` - GPU mesh refinement with CUDA kernels
+- `CUDA/Camera.h`, `CUDA/Maths.h` - GPU utility types
+- GPU selection via `desiredDeviceID`, compute capabilities 5.0+
+
+## Performance Optimizations
+- **Parallelization**: OpenMP + `BS::light_thread_pool`
+- **Memory**: Reference counting, DMapCache disk caching, configurable resolution levels
+- **Spatial**: Octree acceleration for mesh/point queries
+- **Multi-resolution**: Coarse-to-fine pyramid processing
+
+## Build & Dependencies
+- **Required**: Common, Math, IO, CGAL, OpenCV, Eigen3, Boost
+- **Optional**: Ceres Solver, CUDA Toolkit, Python (bindings)
+- **Precompiled header**: `Common.h`

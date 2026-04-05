@@ -295,6 +295,7 @@ std::string PrintMessageToString(Args&&... args) {
 #include "Timer.h"
 #include "CriticalSection.h"
 #include "Semaphore.h"
+#include "RunningAverage.h"
 #include "Util.h"
 #include "File.h"
 #include "MemFile.h"
@@ -690,6 +691,8 @@ public:
 	inline TMatrix<TYPE,n,1> RightNullVector(int flags = 0) const;
 	inline TMatrix<TYPE,m,1> LeftNullVector(int flags = 0) const;
 
+	// set byte value to all memory size of this matrix
+	inline void memset(uint8_t v) { ::memset(val, v, sizeof(TYPE) * m * n); }
 	// compute the memory size of this matrix (in bytes)
 	inline size_t memory_size() const { return sizeof(TMatrix) + sizeof(TYPE) * m * n; }
 
@@ -1597,7 +1600,7 @@ struct TAccumulator {
 	unsigned count;
 
 	inline TAccumulator();
-	inline TAccumulator(const Type& v, const WeightType& w) : value(v), weight(w), count(1) {}
+	inline TAccumulator(const Type& v, const WeightType& w) : value(v*w), weight(w), count(1) {}
 	inline bool IsEmpty() const { ASSERT((weight > 0 && count > 0) || (weight <= 0 && count == 0)); return weight <= 0; }
 	// adds the given weighted value to the internal value
 	inline void Add(const Type& v, const WeightType& w) {
@@ -1778,6 +1781,7 @@ template<typename TYPE> inline String cvMat2String(const TPoint3<TYPE>& pt, LPCS
 #include "Ray.h"
 #include "Line.h"
 #include "Octree.h"
+#include "OctreeLOD.h"
 #include "UtilCUDA.h"
 
 #endif // __SEACAVE_TYPES_H__

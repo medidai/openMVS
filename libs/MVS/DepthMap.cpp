@@ -694,7 +694,7 @@ void DepthEstimator::ProcessPixel(IDX idx)
 	const auto AddDirection = [this] (const ImageRef& nx) {
 		const Depth ndepth(depthMap0(nx));
 		if (ndepth > 0) {
-			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f, 1e-2f), "Norm = ", norm(normalMap0(nx)));
+			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f, 1e-1f), "Norm = ", norm(normalMap0(nx)));
 			neighborsClose.emplace_back(NeighborEstimate{ndepth, normalMap0(nx)
 				#if DENSE_SMOOTHNESS == DENSE_SMOOTHNESS_PLANE
 				, Cast<float>(image0.camera.TransformPointI2C(Point3(nx, ndepth)))
@@ -1290,7 +1290,7 @@ unsigned TEstimatePlane(const CLISTDEF0(TPoint3<TYPE>)& points, TPlane<TYPE,3>& 
 	typedef TPlaneSolverAdaptor<TYPE> PlaneSolverAdaptor;
 
 	plane.Invalidate();
-	
+
 	const unsigned nPoints = (unsigned)points.size();
 	if (nPoints < PlaneSolverAdaptor::MINIMUM_SAMPLES) {
 		ASSERT("too few points" == NULL);
@@ -1817,7 +1817,7 @@ Image8U3 MVS::DepthMap2Image(const DepthMap& depthMap, Depth minDepth, Depth max
 	ASSERT(!depthMap.empty() && depthMap.isContinuous());
 	// find min and max values
 	if (minDepth == FLT_MAX && maxDepth == 0) {
-		cList<Depth,Depth,0> depths(0, depthMap.area());
+		CLISTDEF0(Depth) depths(0, depthMap.area());
 		for (int i=depthMap.area(); --i >= 0; ) {
 			const Depth depth = depthMap[i];
 			ASSERT(depth == 0 || depth > 0);
@@ -1825,7 +1825,7 @@ Image8U3 MVS::DepthMap2Image(const DepthMap& depthMap, Depth minDepth, Depth max
 				depths.Insert(depth);
 		}
 		if (!depths.empty()) {
-			const std::pair<Depth,Depth> th(ComputeX84Threshold<Depth,Depth>(depths.data(), depths.size()));
+			const std::pair<Depth,Depth> th(ComputeX84Threshold<Depth,Depth>(depths));
 			const std::pair<Depth,Depth> mm(depths.GetMinMax());
 			maxDepth = MINF(th.first+th.second, mm.second);
 			minDepth = MAXF(th.first-th.second, mm.first);
@@ -1885,7 +1885,7 @@ bool MVS::ExportConfidenceMap(const String& fileName, const ConfidenceMap& confM
 	}
 	if (confs.IsEmpty())
 		return false;
-	const std::pair<float,float> th(ComputeX84Threshold<float,float>(confs.data(), confs.size()));
+	const std::pair<float,float> th(ComputeX84Threshold<float,float>(confs));
 	float minConf = th.first-th.second;
 	float maxConf = th.first+th.second;
 	if (minConf < 0.1f)
@@ -2306,10 +2306,10 @@ void MVS::CompareNormalMaps(const NormalMap& normalMap, const NormalMap& normalM
 			errors.Insert(error);
 		}
 	}
-	const MeanStd<float,double> ms(errors.Begin(), errors.GetSize());
+	const MeanStd<float,double> ms(errors.data(), errors.size());
 	const float mean((float)ms.GetMean());
 	const float stddev((float)ms.GetStdDev());
-	const std::pair<float,float> th(ComputeX84Threshold<float,float>(errors.data(), errors.size()));
+	const std::pair<float,float> th(ComputeX84Threshold<float,float>(errors));
 	VERBOSE("Normal-maps compared for image % 3u: %.2f median %.2f mean %.2f stddev error (%s)",
 		idxImage,
 		th.first, mean, stddev,

@@ -1,0 +1,196 @@
+/*
+ * SceneCluster.h
+ *
+ * Copyright (c) 2014-2025 SEACAVE
+ */
+
+#ifndef _SFM_SCENECLUSTER_H_
+#define _SFM_SCENECLUSTER_H_
+
+
+// I N C L U D E S /////////////////////////////////////////////////
+
+#include "Camera.h"
+
+
+// D E F I N E S ///////////////////////////////////////////////////
+
+
+// S T R U C T S ///////////////////////////////////////////////////
+
+namespace SFM {
+
+// forward declarations to avoid circular includes
+class SFM_API Scene;
+
+/*
+ * Hierarchical SfM — Scene Partitioning (Split Phase)
+ * ====================================================
+ *
+ * When the number of images in a scene exceeds a manageable threshold, the
+ * reconstruction problem becomes both computationally expensive and numerically
+ * fragile: large bundle adjustment problems converge slowly and are more prone
+ * to local minima. Hierarchical SfM addresses this by splitting the scene into
+ * smaller, overlapping sub-scenes that can be reconstructed independently and
+ * later merged into a single global scene.
+ *
+ * This file implements the SPLIT phase. The MERGE phase is in GlobalAlignment.h.
+ *
+ * ── Pipeline overview (split) ──────────────────────────────────────────────
+ *
+ * 1. BUILD COVISIBILITY GRAPH
+ *    Construct a weighted undirected graph where each node is an image and each
+ *    edge weight encodes the number of geometrically verified feature matches
+ *    between two images (from image pairs). This graph captures the visual
+ *    overlap structure of the dataset.
+ *
+ * 2. AGGREGATIVE CLUSTERING
+ *    Partition the graph using bottom-up (agglomerative) clustering:
+ *    - Start with each image as its own cluster.
+ *    - Repeatedly merge the two clusters connected by the highest-weight edge,
+ *      updating edge weights between the merged cluster and its neighbors.
+ *    - Stop when every cluster has ≤ maxViewsPerCluster images.
+ *    This greedy approach produces clusters that respect the covisibility
+ *    structure: images that see many of the same features end up together,
+ *    ensuring each sub-scene has strong internal connectivity.
+ *
+ * 3. CLUSTER REFINEMENT
+ *    Post-process the clusters to improve quality:
+ *    a) Merge small clusters: clusters below minViewsPerCluster are absorbed
+ *       into their most-connected neighbor (up to maxOverCapacity slack).
+ *    b) Local search: iteratively move or swap boundary images between clusters
+ *       to improve a modularity + balance objective.
+ *    c) Split disconnected: if a cluster has disconnected components in the
+ *       covisibility graph, split it into separate clusters.
+ *    d) Rescue orphans: small clusters that remain after splitting are absorbed
+ *       into neighbors.
+ *
+ * 4. EXTRACT SUB-SCENES
+ *    For each cluster, create an independent Scene object:
+ *    - Copy camera definitions (with local camera IDs).
+ *    - Copy images (with local image IDs), MOVING keypoints and descriptors
+ *      from the global scene to the sub-scene to save memory.
+ *    - MOVE image pairs whose both images belong to this cluster into the
+ *      sub-scene (remapping image IDs to local indices).
+ *    - Image pairs that cross cluster boundaries (one image in this cluster,
+ *      the other in a different cluster) are LEFT in the global scene. These
+ *      cross-sub-scene pairs are used later by GlobalAlignment to establish
+ *      connections between independently reconstructed sub-scenes.
+ *
+ *    The output is:
+ *    - A vector of sub-scenes with local IDs [0, N), each self-contained with
+ *      its own cameras, images (with keypoints), and intra-cluster pairs.
+ *    - A parallel vector of localToGlobal mappings: localToGlobal[sceneIdx][localImgID] = globalImgID.
+ *    - The global scene retains its image array (now with empty keypoints for
+ *      assigned images) and only the cross-sub-scene pairs.
+ *
+ * ── Memory protocol ────────────────────────────────────────────────────────
+ *
+ * The split/merge protocol is designed to minimize peak memory:
+ *
+ *   Global scene (before split):
+ *     images[]     → keypoints, descriptors populated
+ *     pairs[]      → all image pairs with matches
+ *
+ *   Global scene (after split):
+ *     images[]     → keypoints/descriptors MOVED OUT (empty for clustered images)
+ *     pairs[]      → only cross-sub-scene pairs remain
+ *
+ *   Sub-scenes (after split):
+ *     images[]     → keypoints/descriptors MOVED IN from global
+ *     pairs[]      → only intra-cluster pairs (moved from global)
+ *
+ * During independent reconstruction of each sub-scene (BuildTracks →
+ * StarInitializer → Resection → BundleAdjustment), only that sub-scene's
+ * data is in memory. After reconstruction, GlobalAlignment::MergeSingleScene
+ * moves everything back to the global scene.
+ */
+
+/**
+ * @brief Configuration for scene clustering
+ */
+struct SFM_API ClusterConfig
+{
+	unsigned maxViewsPerCluster{200};  // maximum images per cluster (0 = disable clustering)
+	unsigned minViewsPerCluster{10};   // minimum images per cluster to keep (smaller clusters merged/reassigned)
+	unsigned maxOverCapacity{20};      // maximum extra images a cluster can take over maxViewsPerCluster when absorbing orphans
+	unsigned minCommonTracks{25};      // minimum tracks to connect views
+	float minPairWeight{3.f};          // minimum composite weight for pair edge
+	bool refineWeakEdges{true};        // post-process to reassign views with weak connectivity
+	float edgeWeightPercentile{0.9f};  // percentile threshold for high-weight edges in connected components (0-1)
+};
+
+/**
+ * @brief Scene partitioning using aggregative graph clustering
+ *
+ * See the top-level comment in this file for the full hierarchical SfM
+ * split-phase architecture and memory protocol.
+ */
+class SFM_API SceneCluster
+{
+public:
+	/**
+	 * @brief Constructor - initializes clustering with scene and config
+	 * @param scene Input scene with all images
+	 * @param config Clustering configuration
+	 */
+	SceneCluster(Scene& scene, const ClusterConfig& config);
+
+	/**
+	 * @brief Split scene into sub-scenes using graph partitioning
+	 * @param outLocalToGlobal Optional output vector of ID mappings (parallel to returned scenes)
+	 * @return Vector of sub-scenes with local IDs [0, N)
+	 */
+	std::vector<Scene> SplitScene(std::vector<IIndexArr>* outLocalToGlobal = NULL);
+
+	/**
+	 * @brief Export cluster GPS positions to PLY file with unique colors per cluster
+	 * @param subScenes Vector of scene clusters
+	 * @param fileName Output PLY file path
+	 * @return True if successful, false otherwise
+	 */
+	static bool ExportClusterPositions(
+		const std::vector<Scene>& subScenes,
+		const String& fileName);
+
+private:
+	// Build METIS connectivity graph in CSR format
+	void BuildConnectivityGraph();
+
+	// Extract sub-scene from cluster assignment
+	Scene ExtractSubScene(
+		const IIndexArr& viewIndices,
+		const IIndexArr& globalToLocal,
+		unsigned nThreadsPerCluster);
+
+	// Aggregative clustering (greedy max-weight)
+	std::vector<Scene> SplitSceneAggregativeClustering(std::vector<IIndexArr>* outLocalToGlobal);
+
+	// Helper: Merge small clusters with neighbors
+	void MergeSmallClusters(std::vector<IIndexArr>& clusters);
+
+	// Helper: Refine clusters using local search (move/swap nodes for modularity + balance)
+	void RefineClustersLocalSearch(std::vector<IIndexArr>& clusters);
+
+	// Helper: Split disconnected components within clusters
+	void RefineClustersSplitDisconnected(std::vector<IIndexArr>& clusters);
+
+	// Helper: Rescue small orphaned clusters
+	void RefineClustersRescueOrphans(std::vector<IIndexArr>& clusters);
+
+	// Helper: Create sub-scenes and logging/export from clusters
+	std::vector<Scene> BuildSubScenesFromClusters(
+		std::vector<IIndexArr>& clusters,
+		std::vector<IIndexArr>* outLocalToGlobal);
+
+private:
+	Scene& scene;                  // Reference to input scene
+	const ClusterConfig& config;   // Clustering configuration
+	std::vector<int> xadj;         // CSR graph: adjacency start indices
+	std::vector<int> adjncy;       // CSR graph: adjacency list
+	std::vector<int> adjwgt;       // CSR graph: edge weights
+};
+
+} // namespace SFM
+
+#endif // _SFM_SCENECLUSTER_H_
