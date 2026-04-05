@@ -59,6 +59,7 @@ private:
 	bool showCameraInfoDialog;
 	bool showSelectionDialog;
 	bool showSavePromptDialog;
+	bool useTrackBasedNeighbors;
 	bool showEstimateROIWorkflow;
 	bool showDensifyWorkflow;
 	bool showReconstructWorkflow;

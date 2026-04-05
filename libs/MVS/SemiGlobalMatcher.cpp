@@ -779,7 +779,10 @@ void SemiGlobalMatcher::Fuse(const Scene& scene, IIndex idxImage, IIndex numNeig
 			CMatrix poseC;
 			ComputeRelativePose(rightImage.camera.R, rightImage.camera.C, leftImage.camera.R, leftImage.camera.C, poseR, poseC);
 			Matrix4x4 P(Matrix4x4::IDENTITY);
-			AssembleProjectionMatrix(leftImage.camera.K, poseR, poseC, reinterpret_cast<Matrix3x4&>(P));
+			#pragma GCC diagnostic push
+			#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+			AssembleProjectionMatrix(leftImage.camera.K, poseR, poseC, reinterpret_cast<PMatrix&>(P));
+			#pragma GCC diagnostic pop
 			Matrix4x4 invK(Matrix4x4::IDENTITY);
 			cv::Mat(rightImage.camera.GetInvK()).copyTo(cv::Mat(4,4,cv::DataType<Matrix4x4::Type>::type,invK.val)(cv::Rect(0,0,3,3)));
 			Q = P*invK*Q;
@@ -1228,7 +1231,7 @@ void SemiGlobalMatcher::Match(const ViewData& leftImage, const ViewData& rightIm
 				}
 			}
 			for (int i=0; i<buffersize; ++i) {
-				LineData& line = linesBuffer[i]; 
+				LineData& line = linesBuffer[i];
 				memset(line.L, 0, sizeof(AccumCost)*maxNumDisp);
 				line.R.minDisp = line.R.maxDisp = 0;
 			}
@@ -2023,7 +2026,7 @@ bool SemiGlobalMatcher::ProjectDisparity2DepthMap(const DisparityMap& disparityM
 				depthMap(r,c) = Depth(0);
 				continue;
 			}
-			ValueAccumulator acc(Vec4f::ZERO, 0.f);
+			ValueAccumulator acc;
 			for (int i=0; i<4; ++i) {
 				const DepthData& depthData = depthDatas[i];
 				const Depth depth(depthData.depthMap(r,c));
@@ -2204,7 +2207,7 @@ Image8U3 SemiGlobalMatcher::DisparityMap2Image(const DisparityMap& disparityMap,
 				disparities.emplace_back(disparity);
 		}
 		if (!disparities.empty()) {
-			const std::pair<float,float> th(ComputeX84Threshold<Disparity,float>(disparities.data(), disparities.size(), 5.2f));
+			const std::pair<float,float> th(ComputeX84Threshold<Disparity,float>(disparities));
 			minDisparity = (Disparity)ROUND2INT(th.first-th.second);
 			maxDisparity = (Disparity)ROUND2INT(th.first+th.second);
 		}

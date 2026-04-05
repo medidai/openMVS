@@ -67,6 +67,7 @@ UI::UI()
 	, showCameraInfoDialog(false)
 	, showSelectionDialog(false)
 	, showSavePromptDialog(false)
+	, useTrackBasedNeighbors(false)
 	, showEstimateROIWorkflow(false)
 	, showDensifyWorkflow(false)
 	, showReconstructWorkflow(false)
@@ -1438,7 +1439,27 @@ void UI::ShowCameraInfoDialog(Window& window) {
 			ImGui::Separator();
 
 			// Neighbors information
-			ImGui::Text("Neighbor Images: %u", imageData.neighbors.size());
+			ImGui::Text("Neighbor Mode:");
+			bool neighborModeChanged = false;
+			if (ImGui::RadioButton("Densification", !useTrackBasedNeighbors)) {
+				useTrackBasedNeighbors = false;
+				neighborModeChanged = true;
+			}
+			ImGui::SameLine();
+			if (ImGui::RadioButton("Track-based", useTrackBasedNeighbors)) {
+				useTrackBasedNeighbors = true;
+				neighborModeChanged = true;
+			}
+			if (neighborModeChanged && window.selectedNeighborCamera != NO_ID) {
+				window.selectedNeighborCamera = NO_ID;
+				window.RequestRedraw();
+			}
+
+			// Get neighbors (size only - we'll access elements individually due to different types)
+			const size_t neighborCount = useTrackBasedNeighbors
+				? scene.GetTrackBasedNeighbors()[selectedCameraIdx].size()
+				: imageData.neighbors.size();
+			ImGui::Text("Neighbor Images: %zu", neighborCount);
 			ImGui::Text("Selected Neighbor Index: %s", window.selectedNeighborCamera == NO_ID ? "NA" : std::to_string(window.selectedNeighborCamera).c_str());
 			ImGui::Text("Selected Neighbor Angle: %s",
 				window.selectedNeighborCamera == NO_ID ? "NA" : String::FormatString("%.2f", R2D(ACOS(ComputeAngle(
@@ -1462,20 +1483,26 @@ void UI::ShowCameraInfoDialog(Window& window) {
 				ImGui::Text("  Rotation (ZYX): %.1f°, %.1f°, %.1f°",
 					R2D(eulerAngles.x), R2D(eulerAngles.y), R2D(eulerAngles.z));
 			}
-			if (!imageData.neighbors.empty()) {
-				// Create a scrollable region for the neighbors list
-				ImGui::BeginChild("NeighborsScrollRegion", ImVec2(0, 220), true, ImGuiWindowFlags_HorizontalScrollbar);
+			if (neighborCount > 0) {
 				// Table headers
-				if (ImGui::BeginTable("NeighborsTable", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_HighlightHoveredColumn)) {
+				constexpr int columnCount = 6;
+				if (ImGui::BeginTable("NeighborsTable", columnCount, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_HighlightHoveredColumn)) {
 					ImGui::TableSetupColumn("Index/ID", ImGuiTableColumnFlags_WidthFixed, 45.f);
-					ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed, 50.f);
+					if (useTrackBasedNeighbors)
+						ImGui::TableSetupColumn("Scale", ImGuiTableColumnFlags_WidthFixed, 50.f);
+					else
+						ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed, 50.f);
 					ImGui::TableSetupColumn("Angle", ImGuiTableColumnFlags_WidthFixed, 33.f);
 					ImGui::TableSetupColumn("Area", ImGuiTableColumnFlags_WidthFixed, 24.f);
-					ImGui::TableSetupColumn("Points", ImGuiTableColumnFlags_WidthFixed, 39.f);
+					ImGui::TableSetupColumn(useTrackBasedNeighbors ? "Tracks" : "Points", ImGuiTableColumnFlags_WidthFixed, 39.f);
 					ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
 					ImGui::TableHeadersRow();
 					// Show neighbors in table format
-					for (const auto& neighbor : imageData.neighbors) {
+					for (size_t i = 0; i < neighborCount; ++i) {
+						// Get neighbor ViewScore (handle different types)
+						const MVS::ViewScore& neighbor = useTrackBasedNeighbors
+							? scene.GetTrackBasedNeighbors()[selectedCameraIdx][i].score
+							: imageData.neighbors[i];
 						const MVS::Image& neighborImage = mvs_scene.images[neighbor.ID];
 						ImGui::TableNextRow();
 						ImGui::TableSetColumnIndex(0);
@@ -1486,7 +1513,17 @@ void UI::ShowCameraInfoDialog(Window& window) {
 						// Handle row click
 						if (rowClicked) {
 							// Deselect if already selected, or select it otherwise
-							window.selectedNeighborCamera = (window.selectedNeighborCamera == neighbor.ID) ? NO_ID : scene.ImageIdxMVS2Viewer(neighbor.ID);
+							const bool wasSelected = (window.selectedNeighborCamera == neighbor.ID);
+							window.selectedNeighborCamera = wasSelected ? NO_ID : scene.ImageIdxMVS2Viewer(neighbor.ID);
+							// Highlight shared points if using track-based neighbors and a neighbor is selected
+							if (useTrackBasedNeighbors && !wasSelected && !mvs_scene.pointcloud.IsEmpty()) {
+								// Get the shared points for this neighbor
+								const auto& sharedPoints = scene.GetTrackBasedNeighbors()[selectedCameraIdx][i].sharedPoints;
+								window.GetSelectionController().setSelectedPoints(sharedPoints, mvs_scene.pointcloud.points.size());
+							} else if (wasSelected) {
+								// Clear selection when deselecting
+								window.GetSelectionController().clearSelection();
+							}
 							window.GetRenderer().UploadSelection(window);
 							window.RequestRedraw();
 						}
@@ -1497,6 +1534,9 @@ void UI::ShowCameraInfoDialog(Window& window) {
 							const MVS::IIndex selectionIdx = scene.ImageIdxMVS2Viewer(neighbor.ID);
 							window.SetSelectionId(selectionIdx);
 							window.selectedNeighborCamera = NO_ID;
+							// Clear point selection when switching camera
+							if (useTrackBasedNeighbors)
+								window.GetSelectionController().clearSelection();
 							window.GetCamera().SetCameraViewMode(selectionIdx);
 							window.GetRenderer().UploadSelection(window);
 							ImGui::SetWindowFocus(nullptr); // Defocus dialog window
@@ -1504,8 +1544,13 @@ void UI::ShowCameraInfoDialog(Window& window) {
 						}
 						// Fill in the other columns with data
 						ImGui::TableSetColumnIndex(1);
-						ImGui::Text("%.2f", neighbor.score);
-						ImGui::TableSetColumnIndex(2);
+						if (useTrackBasedNeighbors) {
+							ImGui::Text("%.2f", neighbor.scale);
+							ImGui::TableSetColumnIndex(2);
+						} else {
+							ImGui::Text("%.2f", neighbor.score);
+							ImGui::TableSetColumnIndex(2);
+						}
 						ImGui::Text("%.2f", FR2D(neighbor.angle));
 						ImGui::TableSetColumnIndex(3);
 						ImGui::Text("%d", ROUND2INT(neighbor.area*100));
@@ -1516,12 +1561,13 @@ void UI::ShowCameraInfoDialog(Window& window) {
 					}
 					ImGui::EndTable();
 				}
-				ImGui::EndChild();
 			}
 		} else {
-			// No camera selected - clear neighbor selection as well
+			// No camera selected - clear neighbor selection and point highlights
 			if (window.selectedNeighborCamera != NO_ID) {
 				window.selectedNeighborCamera = NO_ID;
+				window.GetSelectionController().clearSelection();
+				window.GetRenderer().UploadSelection(window);
 				window.RequestRedraw();
 			}
 			ImGui::Text("No camera/image selected");
@@ -2863,8 +2909,8 @@ bool UI::ShowOpenFileDialog(String& filename, String& geometryFilename) {
 	// Use portable-file-dialogs for cross-platform file dialog
 	try {
 		auto dialog = pfd::open_file(
-			"Open Scene File",                          // title
-			WORKING_FOLDER_FULL,                        // initial path (absolute)
+			"Open Scene File",                   // title
+			WORKING_FOLDER_FULL,          // initial path (absolute)
 			{
 				"OpenMVS Scene Files", "*.mvs",
 				"OpenMVS Depth Map Files", "*.dmap",
@@ -2873,8 +2919,8 @@ bool UI::ShowOpenFileDialog(String& filename, String& geometryFilename) {
 				"GLB Mesh / Point Cloud Files", "*.glb",
 				"OBJ Mesh Files", "*.obj",
 				"All Files", "*"
-			},                                          // filters
-			pfd::opt::multiselect                       // options
+			},                                         // filters
+			pfd::opt::multiselect             // options
 		);
 
 		// Get the result
@@ -2897,8 +2943,8 @@ bool UI::ShowSaveFileDialog(String& filename) {
 	// Use portable-file-dialogs for cross-platform save dialog
 	try {
 		auto dialog = pfd::save_file(
-			"Save Scene File",                          // title
-			WORKING_FOLDER_FULL,                        // initial directory (like open dialog)
+			"Save Scene File",                  // title
+			WORKING_FOLDER_FULL,         // initial directory (like open dialog)
 			{
 				"OpenMVS Scene Files", "*.mvs",
 				"PLY Mesh / Point Cloud Files", "*.ply",
@@ -2906,8 +2952,8 @@ bool UI::ShowSaveFileDialog(String& filename) {
 				"GLB Mesh / Point Cloud Files", "*.glb",
 				"OBJ Mesh Files", "*.obj",
 				"All Files", "*"
-			},                                          // filters
-			pfd::opt::none                              // options
+			},                                        // filters
+			pfd::opt::none                   // options
 		);
 
 		// Get the result - save_file returns a string directly, not a vector
@@ -2925,15 +2971,15 @@ bool UI::ShowSaveFileDialog(String& filename) {
 bool UI::ShowSaveImageDialog(String& filename) {
 	try {
 		auto dialog = pfd::save_file(
-			"Save Screenshot",                          // title
-			WORKING_FOLDER_FULL,                        // initial directory (like open dialog)
+			"Save Screenshot",                 // title
+			WORKING_FOLDER_FULL,        // initial directory (like open dialog)
 			{
 				"PNG Image", "*.png",
 				"JPEG Image", "*.jpg",
 				"JPEGXL Image", "*.jxl",
 				"All Files", "*"
-			},
-			pfd::opt::none
+			},                                        // filters
+			pfd::opt::none                   // options
 		);
 
 		auto result = dialog.result();

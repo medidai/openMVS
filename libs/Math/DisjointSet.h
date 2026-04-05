@@ -38,8 +38,14 @@ protected:
 public:
 	// Initialize with each element in its own set and rank 0.
 	DisjointSet(size_t n) : parent(n), rank(n, 0) {
-		for (size_t i = 0; i < n; ++i)
-			parent[i] = static_cast<Type>(i);
+		std::iota(parent.begin(), parent.end(), static_cast<Type>(0));
+	}
+
+	DisjointSet& Reset(size_t n) {
+		parent.resize(n);
+		rank.assign(n, 0);
+		std::iota(parent.begin(), parent.end(), static_cast<Type>(0));
+		return *this;
 	}
 
 	// Find representative with path compression.
@@ -54,14 +60,13 @@ public:
 		const Type px = Find(x);
 		const Type py = Find(y);
 		if (px == py) return;
-
 		if (rank[px] < rank[py]) {
 			parent[px] = py;
 		} else if (rank[px] > rank[py]) {
 			parent[py] = px;
 		} else {
 			parent[py] = px;
-			rank[px]++;
+			++rank[px];
 		}
 	}
 
@@ -76,21 +81,54 @@ public:
 		Type py = Find(y);
 		if (px == py)
 			return true;
-
 		// Decide destination/source roots using rank heuristic
 		Type dst = px;
 		Type src = py;
 		if (rank[dst] < rank[src])
 			std::swap(dst, src);
-
 		// Callback performs guard and merge; veto if false
 		if (!guardMerge(dst, src))
 			return false;
-
 		parent[src] = dst;
 		if (rank[dst] == rank[src])
 			++rank[dst];
 		return true;
+	}
+
+	// Compress all paths to point directly to their root representative.
+	// Call this before using const query methods for accurate results.
+	DisjointSet& CompressAllPaths() {
+		FOREACH(i, parent)
+			Find(static_cast<Type>(i));
+		return *this;
+	}
+
+	// Get all connected components and their sizes.
+	// Returns map of root element -> component size
+	// Note: Call CompressAllPaths() first to make sure all paths are compressed and parent pointers are accurate.
+	std::unordered_map<Type, unsigned> GetComponentSizes() const {
+		std::unordered_map<Type, unsigned> componentSizes;
+		for (const Type root : parent)
+			componentSizes[root]++;
+		return componentSizes;
+	}
+
+	// Get connected components as a vector of component IDs.
+	// Returns the number of components and fills the provided vector where result[i] is the component ID for node i.
+	// Component IDs are sequential integers starting from 0.
+	// Note: Call CompressAllPaths() first to make sure all paths are compressed and parent pointers are accurate.
+	unsigned GetComponents(std::vector<Type>& components) const {
+		components.resize(parent.size());
+		std::unordered_map<Type, Type> rootToComponentId;
+		Type nextComponentId = 0;
+		FOREACH(i, parent) {
+			const Type root = parent[i];
+			auto ret = rootToComponentId.emplace(root, nextComponentId);
+			if (ret.second)
+				++nextComponentId;
+			components[i] = ret.first->second;
+		}
+		return rootToComponentId.size();
 	}
 };
 /*----------------------------------------------------------------*/

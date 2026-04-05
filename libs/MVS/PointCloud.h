@@ -116,6 +116,7 @@ public:
 	bool Save(const String& fileName, bool bViews=false, bool bLegacyTypes=false, bool bBinary=true) const;
 	bool SavePLY(const String& fileName, bool bViews=false, bool bLegacyTypes=false, bool bBinary=true) const;
 	bool SaveGLTF(const String& fileName, bool bBinary) const;
+	bool SavePotree(const String& dirName) const;
 	bool SaveNViews(const String& fileName, uint32_t minViews, bool bLegacyTypes=false, bool bBinary=true) const;
 	bool SaveWithScale(const String& fileName, const ImageArr& images, float scaleMult, bool bLegacyTypes=false, bool bBinary=true) const;
 

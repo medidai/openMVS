@@ -429,10 +429,6 @@ public:
 						   const Vec& v1,
 						   const Vec& v2);
 
-	/** @brief Set from rotation axis * angle (modified Rodrigues vector)
-		@author evers */
-	void SetFromAxisAngle(const Vec& w);
-
 	/* @brief Set rotation matrix from an orthogonal basis given in world
 	   coordinate system (WCS)
 

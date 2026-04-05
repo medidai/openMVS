@@ -22,13 +22,9 @@
 #endif
 
 // cList index type
-#ifdef _SUPPORT_CPP11
-#define ARR2IDX(arr) typename std::remove_reference<decltype(arr)>::type::size_type
-#define SIZE2IDX(arr) typename std::remove_const<typename std::remove_reference<decltype(arr)>::type>::type
-#else
-#define ARR2IDX(arr) IDX
-#define SIZE2IDX(arr) IDX
-#endif
+#define ARRTYPE(arr) std::remove_const_t<std::remove_reference_t<decltype(arr)>>
+#define ARR2IDX(arr) typename ARRTYPE(arr)::size_type
+#define ARR2VAL(arr) typename ARRTYPE(arr)::value_type
 
 // cList iterator by index
 #ifndef FOREACH
@@ -47,10 +43,10 @@
 
 // raw data array iterator by index
 #ifndef FOREACHRAW
-#define FOREACHRAW(var, sz) for (SIZE2IDX(sz) var=0, var##Size=(sz); var<var##Size; ++var)
+#define FOREACHRAW(var, sz) for (ARRTYPE(sz) var=0, var##Size=(sz); var<var##Size; ++var)
 #endif
 #ifndef RFOREACHRAW
-#define RFOREACHRAW(var, sz) for (SIZE2IDX(sz) var=sz; var-->0; )
+#define RFOREACHRAW(var, sz) for (ARRTYPE(sz) var=sz; var-->0; )
 #endif
 // raw data array iterator by pointer
 #ifndef FOREACHRAWPTR
@@ -66,7 +62,7 @@
 #endif
 // constructs a cList reference to a given std::_vector
 #ifndef CLISTREFVECTOR
-#define CLISTREFVECTOR(CLIST, var, vec) uint8_t _ArrData##var[sizeof(CLIST)]; new(_ArrData##var) CLIST(vec.size(), const_cast<CLIST::Type*>(&vec[0])); const CLIST& var(*reinterpret_cast<const CLIST*>(_ArrData##var))
+#define CLISTREFVECTOR(CLIST, var, vec) uint8_t _ArrData##var[sizeof(CLIST)]; new(_ArrData##var) CLIST(vec.size(), reinterpret_cast<CLIST::value_type*>(const_cast<ARR2VAL(vec)*>(&vec[0]))); const CLIST& var(*reinterpret_cast<const CLIST*>(_ArrData##var))
 #endif
 
 #define CLISTDEFSCALAR(TYPE) SEACAVE::cList< TYPE, TYPE, 0 >
@@ -278,6 +274,10 @@ public:
 		_size = newSize;
 		return *this;
 	}
+	inline cList&	operator+=(const cList& rList)
+	{
+		return Join(rList);
+	}
 
 	template <typename Functor>
 	inline cList&	JoinFunctor(IDX nSize, const Functor& functor) {
@@ -302,6 +302,21 @@ public:
 		_size = newSize;
 		rList._size = 0;
 		return *this;
+	}
+	inline cList&	operator+=(cList&& rList)
+	{
+		return JoinRemove(rList);
+	}
+
+	inline cList	operator+(const cList& rList) const
+	{
+		cList sum(*this);
+		return sum.Join(rList);
+	}
+	inline cList	operator+(cList&& rList) const
+	{
+		cList sum(*this);
+		return sum.Join(std::move(rList));
 	}
 
 	// Swap the elements of the two lists.

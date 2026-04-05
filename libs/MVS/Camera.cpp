@@ -204,7 +204,7 @@ Point3 MVS::ComputeCamerasFocusPoint(const CameraArr& cameras, const Point3* pIn
 namespace MVS {
 
 namespace RECTIFY {
-	
+
 // compute the ROIs for the two images based on the corresponding points
 void GetImagePairROI(const Point3fArr& points1, const Point3fArr& points2, const Matrix3x3& K1, const Matrix3x3& K2, const Matrix3x3& R1, const Matrix3x3& R2, const Matrix3x3& invK1, const Matrix3x3& invK2, AABB2f& roi1h, AABB2f& roi2h)
 {
@@ -261,7 +261,7 @@ REAL Camera::StereoRectify(const cv::Size& size1, const Camera& camera1, const c
 
 	// compute the average rotation between the first and the second camera
 	const Point3 r(poseR.GetRotationAxisAngle());
-	reinterpret_cast<RMatrix&>(R2).SetFromAxisAngle(r*REAL(-0.5));
+	reinterpret_cast<RMatrix&>(R2).SetRotationAxisAngle(r*REAL(-0.5));
 	R1 = R2.t();
 
 	// compute the translation, such that it coincides with the X-axis

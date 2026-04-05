@@ -43,11 +43,41 @@
 
 namespace SEACAVE {
 
+// 7-DOF similarity transform (scale, rotation, translation)
+struct MATH_API Transform
+{
+	RMatrix R;  // rotation matrix (3x3)
+	Point3 t;   // translation
+	REAL scale; // uniform scale
+
+	Transform() : R(RMatrix::IDENTITY), t(Point3::ZERO), scale(REAL(1)) {}
+
+	// Generate a random transform with random rotation, translation, and scale
+	static Transform Random(std::mt19937& rng, REAL maxRotationAngleDeg = 15, REAL maxTranslation = 1.0, REAL minScalePercent = 0.3);
+
+	// Invert this transform
+	Transform Invert() const;
+
+	// Compose with another transform (T_res = this * T_other)
+	Transform operator*(const Transform& other) const;
+
+	// Transform a point
+	Point3 operator*(const Point3& p) const;
+
+	// Convert to/from Eigen transform
+	Eigen::Affine3d ToEigen() const;
+	Transform& FromEigen(const Eigen::Affine3d& T);
+};
+/*----------------------------------------------------------------*/
+
 // compute the similarity transform that best aligns the given two sets of corresponding 3D points
 MATH_API Matrix4x4 SimilarityTransform(const Point3Arr& points, const Point3Arr& pointsRef);
 
 // decompose similarity transform into rotation, translation and scale
 MATH_API void DecomposeSimilarityTransform(const Matrix4x4& transform, Matrix3x3& R, Point3& t, REAL& s);
+
+// Estimate similarity transform from 3D point correspondences
+MATH_API Transform EstimateSimilarityTransform(const Point3Arr& srcPoints, const Point3Arr& dstPoints);
 /*----------------------------------------------------------------*/
 
 // estimate the rotation that best maps srcRots to dstRots (dstR = srcR * alignR) in a

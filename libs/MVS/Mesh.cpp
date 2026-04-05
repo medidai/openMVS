@@ -721,19 +721,22 @@ typedef SurfaceMesh::Halfedge_index                            halfedge_descript
 namespace PMP = CGAL::Polygon_mesh_processing;
 namespace SMS = CGAL::Surface_mesh_simplification;
 
-static void ImportMesh(SurfaceMesh& sm, const Mesh::VertexArr& vertices, const Mesh::FaceArr& faces) {
+// import/export mesh from/to CGAL surface mesh (source mesh is released after import)
+static void ImportMesh(SurfaceMesh& sm, Mesh& mesh) {
+	mesh.ReleaseExtra();
 	// add vertices
-	std::vector<vertex_descriptor> vmap(vertices.size());
-	FOREACH(i, vertices) {
-		const Mesh::Vertex& v = vertices[i];
+	std::vector<vertex_descriptor> vmap(mesh.vertices.size());
+	FOREACH(i, mesh.vertices) {
+		const Mesh::Vertex& v = mesh.vertices[i];
 		vmap[i] = sm.add_vertex(Point_3(v.x, v.y, v.z));
 	}
+	mesh.vertices.Release();
 	// add faces (skip non-manifold faces)
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	int nSkipped(0);
 	#endif
-	FOREACH(i, faces) {
-		const Mesh::Face& f = faces[i];
+	FOREACH(i, mesh.faces) {
+		const Mesh::Face& f = mesh.faces[i];
 		const face_descriptor fd = sm.add_face(vmap[f[0]], vmap[f[1]], vmap[f[2]]);
 		if (fd == SurfaceMesh::null_face()) {
 			#if TD_VERBOSE != TD_VERBOSE_OFF
@@ -745,6 +748,7 @@ static void ImportMesh(SurfaceMesh& sm, const Mesh::VertexArr& vertices, const M
 	if (nSkipped > 0)
 		DEBUG_EXTRA("warning: skipped %d non-manifold faces during import", nSkipped);
 	#endif
+	mesh.faces.Release();
 	// fix non-manifold vertices by duplication
 	PMP::duplicate_non_manifold_vertices(sm);
 	// remove degenerate faces
@@ -752,26 +756,25 @@ static void ImportMesh(SurfaceMesh& sm, const Mesh::VertexArr& vertices, const M
 	sm.collect_garbage();
 	DEBUG_ULTIMATE("Mesh imported: %u vertices, %u faces", (unsigned)sm.number_of_vertices(), (unsigned)sm.number_of_faces());
 }
-
-static void ExportMesh(SurfaceMesh& sm, Mesh::VertexArr& vertices, Mesh::FaceArr& faces) {
+static void ExportMesh(SurfaceMesh& sm, Mesh& mesh) {
 	sm.collect_garbage();
 	// build vertex index map (vertex descriptors are contiguous after collect_garbage)
 	auto vIdxMap = sm.add_property_map<vertex_descriptor, Mesh::VIndex>("v:export_idx", 0).first;
-	vertices.Resize((Mesh::VIndex)sm.number_of_vertices());
+	mesh.vertices.Resize((Mesh::VIndex)sm.number_of_vertices());
 	Mesh::VIndex idx(0);
 	for (vertex_descriptor vd : sm.vertices()) {
 		const Point_3& pt = sm.point(vd);
-		Mesh::Vertex& v = vertices[idx];
+		Mesh::Vertex& v = mesh.vertices[idx];
 		v.x = (float)pt.x();
 		v.y = (float)pt.y();
 		v.z = (float)pt.z();
 		vIdxMap[vd] = idx++;
 	}
 	// extract faces
-	faces.Resize((Mesh::FIndex)sm.number_of_faces());
+	mesh.faces.Resize((Mesh::FIndex)sm.number_of_faces());
 	Mesh::FIndex fIdx(0);
 	for (face_descriptor fd : sm.faces()) {
-		Mesh::Face& f = faces[fIdx++];
+		Mesh::Face& f = mesh.faces[fIdx++];
 		halfedge_descriptor hd = sm.halfedge(fd);
 		for (int i = 0; i < 3; ++i) {
 			f[i] = vIdxMap[sm.target(hd)];
@@ -791,8 +794,7 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 	TD_TIMER_STARTD();
 	// import mesh and fix manifoldness (once)
 	CLEAN::SurfaceMesh sm;
-	CLEAN::ImportMesh(sm, vertices, faces);
-	Release();
+	CLEAN::ImportMesh(sm, *this);
 
 	// remove spurious components
 	if (fSpurious > 0) {
@@ -942,6 +944,23 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 		DEBUG_ULTIMATE("Mesh decimated: %d -> %d faces", OriginalFaceNum, (int)sm.number_of_faces());
 	}
 
+	// decimate mesh
+	if (fDecimate < 1) {
+		ASSERT(fDecimate > 0);
+		const int OriginalFaceNum((int)sm.number_of_faces());
+		const int TargetFaceNum(ROUND2INT(fDecimate * OriginalFaceNum));
+		Util::Progress progress(_T("Decimated faces"), OriginalFaceNum - TargetFaceNum);
+		typedef CLEAN::SMS::GarlandHeckbert_triangle_policies<CLEAN::SurfaceMesh, CLEAN::K> GH_policies;
+		GH_policies gh_policies(sm);
+		CLEAN::SMS::Face_count_stop_predicate<CLEAN::SurfaceMesh> stop(TargetFaceNum);
+		CLEAN::SMS::edge_collapse(sm, stop,
+			CGAL::parameters::get_cost(gh_policies.get_cost())
+			                 .get_placement(gh_policies.get_placement()));
+		sm.collect_garbage();
+		progress.close();
+		DEBUG_ULTIMATE("Mesh decimated: %d -> %d faces", OriginalFaceNum, (int)sm.number_of_faces());
+	}
+
 	// close holes
 	if (nCloseHoles > 0) {
 		std::vector<CLEAN::halfedge_descriptor> borderCycles;
@@ -1010,7 +1029,7 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 	}
 
 	// export mesh
-	CLEAN::ExportMesh(sm, vertices, faces);
+	CLEAN::ExportMesh(sm, *this);
 	DEBUG("Cleaned mesh: %u vertices, %u faces (%s)", vertices.size(), faces.size(), TD_TIMER_GET_FMT().c_str());
 } // Clean
 /*----------------------------------------------------------------*/
@@ -1856,14 +1875,11 @@ bool Mesh::Save(const VertexArr& vertices, const String& fileName, bool bBinary)
 }
 /*----------------------------------------------------------------*/
 
-
-
 void Mesh::EnsureEdgeSize(float epsilonMin, float epsilonMax, float collapseRatio, float degenerate_angle_deg, int mode, int max_iters)
 {
 	TD_TIMER_STARTD();
 	CLEAN::SurfaceMesh sm;
-	CLEAN::ImportMesh(sm, vertices, faces);
-	Release();
+	CLEAN::ImportMesh(sm, *this);
 
 	// compute mean edge length for negative parameter interpretation
 	double totalEdgeLen(0);
@@ -1889,7 +1905,7 @@ void Mesh::EnsureEdgeSize(float epsilonMin, float epsilonMax, float collapseRati
 		sm.faces(), targetEdge, sm,
 		CGAL::parameters::number_of_iterations(max_iters > 0 ? MINF(max_iters, 10) : 3));
 
-	CLEAN::ExportMesh(sm, vertices, faces);
+	CLEAN::ExportMesh(sm, *this);
 	DEBUG("Ensured edge size [%g, %g] (target %g, mean was %g) (%s)",
 		targetMin, targetMax, targetEdge, meanEdge, TD_TIMER_GET_FMT().c_str());
 }

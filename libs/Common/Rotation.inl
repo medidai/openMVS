@@ -762,18 +762,6 @@ void TRMatrixBase<TYPE>::SetFromRowVectors(const Vec& v0, const Vec& v1, const V
 
 
 template <typename TYPE>
-void TRMatrixBase<TYPE>::SetFromAxisAngle(const Vec& w)
-{
-	#if 0
-	const TYPE dAngle(norm(w));
-	Set(w*INVERT(dAngle), dAngle);
-	#else
-	SetRotationAxisAngle(w);
-	#endif
-}
-
-
-template <typename TYPE>
 void TRMatrixBase<TYPE>::GetQuaternion(Quat& quat) const
 {
 	ASSERT(Check(R_CONSTRAINT_ACCURACY));

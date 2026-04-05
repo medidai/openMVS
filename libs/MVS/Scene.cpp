@@ -272,7 +272,7 @@ bool Scene::SaveInterface(const String& fileName, int version) const
 		image.cameraID = imageData.cameraID;
 		image.ID = imageData.ID;
 		if (imageData.IsValid() && imageData.HasResolution()) {
-			Interface::Platform& platform = obj.platforms[image.platformID];;
+			Interface::Platform& platform = obj.platforms[image.platformID];
 			if (!platform.cameras[image.cameraID].HasResolution())
 				platform.SetFullK(image.cameraID, imageData.camera.K, imageData.width, imageData.height);
 		}
@@ -1113,12 +1113,12 @@ bool Scene::EstimateSparseSurface(unsigned kNeighbors, float sizeScale, float no
 	// Skip points with zero half-size or too large half-size
 	const auto EstimateMaxHalfSize = [](const std::vector<float>& halfSizes) -> float {
 		// Create a copy of halfSizes excluding zero values
-		std::vector<float> nonZeroHalfSizes;
+		FloatArr nonZeroHalfSizes;
 		nonZeroHalfSizes.reserve(halfSizes.size());
 		for (float h : halfSizes)
 			if (h > 0)
 				nonZeroHalfSizes.push_back(h);
-		const std::pair<float,float> th(ComputeX84Threshold(nonZeroHalfSizes.data(), nonZeroHalfSizes.size(), 7.f));
+		const std::pair<float,float> th(ComputeX84Threshold<float,float>(nonZeroHalfSizes, 7.f));
 		return th.first+th.second;
 	};
 	const float maxHalfSize = EstimateMaxHalfSize(halfSizes);
@@ -1343,9 +1343,11 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 				if (views.FindFirst(IDB) == PointCloud::ViewArr::NO_INDEX)
 					continue;
 				const PointCloud::Point& point = pointcloud.points[idx];
-				Point2f& ptA = projs.emplace_back(imageData.camera.ProjectPointP(point));
 				Point2f ptB = imageDataB.camera.ProjectPointP(point);
-				if (!imageData.camera.IsInside(ptA, boundsA) || !imageDataB.camera.IsInside(ptB, boundsB))
+				if (!imageDataB.camera.IsInside(ptB, boundsB))
+					continue;
+				Point2f& ptA = projs.emplace_back(imageData.camera.ProjectPointP(point));
+				if (!imageData.camera.IsInside(ptA, boundsA))
 					projs.RemoveLast();
 			}
 			ASSERT(projs.size() <= score.points);

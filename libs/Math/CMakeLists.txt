@@ -1,3 +1,19 @@
+# Find required packages are inherited from parent CMakeLists.txt
+
+# Additional Math-specific packages (all available via vcpkg)
+FIND_PACKAGE(SuiteSparse_config QUIET)
+FIND_PACKAGE(CHOLMOD QUIET)  # Required by SuiteSparse_config but explicitly needed for linking
+
+# Check which Math features are available
+SET(MATH_EXTRA_LIBS "")
+IF(SuiteSparse_config_FOUND AND CHOLMOD_FOUND)
+	MESSAGE(STATUS "SuiteSparse found via CMake config")
+	ADD_DEFINITIONS(-D_USE_SUITESPARSE)
+	LIST(APPEND MATH_EXTRA_LIBS SuiteSparse::CHOLMOD SuiteSparse::SuiteSparseConfig)
+ELSE()
+	MESSAGE(STATUS "Can't find SuiteSparse. Continuing without it.")
+ENDIF()
+
 INCLUDE_DIRECTORIES(".")
 
 # List sources files
@@ -24,7 +40,7 @@ IF(CMAKE_VERSION VERSION_GREATER_EQUAL 3.16.0)
 endif()
 
 # Link its dependencies
-TARGET_LINK_LIBRARIES(Math PUBLIC Common)
+TARGET_LINK_LIBRARIES(Math PUBLIC Common ${MATH_EXTRA_LIBS})
 
 # Install
 INSTALL(FILES ${LIBRARY_FILES_H} DESTINATION "${INSTALL_INCLUDE_DIR}/Math")

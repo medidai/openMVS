@@ -227,7 +227,7 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 		}
 		#if TD_VERBOSE != TD_VERBOSE_OFF
 		// print selected views
-		if (g_nVerbosityLevel > 2) {
+		if (VERBOSITY_LEVEL > 2) {
 			String msg;
 			for (IIndex i=1; i<depthData.images.size(); ++i)
 				msg += String::FormatString(" %3u(%.2fscl)", depthData.images[i].GetID(), depthData.images[i].scale);
@@ -366,7 +366,7 @@ bool DepthMapsData::InitDepthMap(DepthData& depthData)
 
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	// save rough depth map as image
-	if (g_nVerbosityLevel > 4) {
+	if (VERBOSITY_LEVEL > 4) {
 		ExportDepthMap(ComposeDepthFilePath(image.GetID(), "init.png"), depthData.depthMap);
 		ExportNormalMap(ComposeDepthFilePath(image.GetID(), "init.normal.png"), depthData.normalMap);
 		ExportPointCloud(ComposeDepthFilePath(image.GetID(), "init.ply"), *depthData.images.First().pImageData, depthData.depthMap, depthData.normalMap);
@@ -530,7 +530,7 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 		threads.resize(nMaxThreads-1); // current thread is also used
 	volatile Thread::safe_t idxPixel;
 
-	// Multi-Resolution : 
+	// Multi-Resolution :
 	DepthData& fullResDepthData(arrDepthData[idxImage]);
 	const unsigned totalScaleNumber(nGeometricIter < 0 ? OPTDENSE::nSubResolutionLevels : 0u);
 	DepthMap lowResDepthMap;
@@ -610,7 +610,7 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 			estimators.clear();
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			// save rough depth map as image
-			if (g_nVerbosityLevel > 4 && nGeometricIter < 0) {
+			if (VERBOSITY_LEVEL > 4 && nGeometricIter < 0) {
 				ExportDepthMap(ComposeDepthFilePath(image.GetID(), "rough.png"), depthData.depthMap);
 				ExportNormalMap(ComposeDepthFilePath(image.GetID(), "rough.normal.png"), depthData.normalMap);
 				ExportPointCloud(ComposeDepthFilePath(image.GetID(), "rough.ply"), *depthData.images.First().pImageData, depthData.depthMap, depthData.normalMap);
@@ -643,7 +643,7 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 			estimators.clear();
 			#if 1 && TD_VERBOSE != TD_VERBOSE_OFF
 			// save intermediate depth map as image
-			if (g_nVerbosityLevel > 4) {
+			if (VERBOSITY_LEVEL > 4) {
 				String path(ComposeDepthFilePath(image.GetID(), "iter")+String::ToString(iter));
 				if (nGeometricIter >= 0)
 					path += String::FormatString(".geo%d", nGeometricIter);
@@ -837,7 +837,7 @@ bool DepthMapsData::GapInterpolation(DepthData& depthData)
 					const Depth avg((depthFirst+depth)*0.5f);
 					do {
 						depthMap(v,u_curr) = avg;
-					} while (++u_curr<u);						
+					} while (++u_curr<u);
 					#else
 					// interpolate values
 					const Depth diff((depth-depthFirst)/(count+1));
@@ -847,7 +847,7 @@ bool DepthMapsData::GapInterpolation(DepthData& depthData)
 						do {
 							depthMap(v,u_curr) = (d+=diff);
 							if (!confMap.empty()) confMap(v,u_curr) = c;
-						} while (++u_curr<u);						
+						} while (++u_curr<u);
 					} else {
 						Point2f dir1, dir2;
 						Normal2Dir(normalMap(v,u_first), dir1);
@@ -858,7 +858,7 @@ bool DepthMapsData::GapInterpolation(DepthData& depthData)
 							dir1 += dirDiff;
 							Dir2Normal(dir1, normalMap(v,u_curr));
 							if (!confMap.empty()) confMap(v,u_curr) = c;
-						} while (++u_curr<u);						
+						} while (++u_curr<u);
 					}
 					#endif
 				}
@@ -903,7 +903,7 @@ bool DepthMapsData::GapInterpolation(DepthData& depthData)
 					const Depth avg((depthFirst+depth)*0.5f);
 					do {
 						depthMap(v_curr,u) = avg;
-					} while (++v_curr<v);						
+					} while (++v_curr<v);
 					#else
 					// interpolate values
 					const Depth diff((depth-depthFirst)/(count+1));
@@ -913,7 +913,7 @@ bool DepthMapsData::GapInterpolation(DepthData& depthData)
 						do {
 							depthMap(v_curr,u) = (d+=diff);
 							if (!confMap.empty()) confMap(v_curr,u) = c;
-						} while (++v_curr<v);						
+						} while (++v_curr<v);
 					} else {
 						Point2f dir1, dir2;
 						Normal2Dir(normalMap(v_first,u), dir1);
@@ -924,7 +924,7 @@ bool DepthMapsData::GapInterpolation(DepthData& depthData)
 							dir1 += dirDiff;
 							Dir2Normal(dir1, normalMap(v_curr,u));
 							if (!confMap.empty()) confMap(v_curr,u) = c;
-						} while (++v_curr<v);						
+						} while (++v_curr<v);
 					}
 					#endif
 				}
@@ -1089,7 +1089,7 @@ bool DepthMapsData::AdjustConfidence(DepthData& depthDataRef, const IIndexArr& i
 			}
 		}
 		#if TD_VERBOSE != TD_VERBOSE_OFF
-		if (g_nVerbosityLevel > 3)
+		if (VERBOSITY_LEVEL > 3)
 			ExportDepthMap(MAKE_PATH(String::FormatString("depthRender%04u.%04u.png", depthDataRef.GetView().GetID(), idxView)), depthMap);
 		#endif
 	}
@@ -1580,7 +1580,7 @@ void DepthMapsData::FuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, b
 	GET_LOGCONSOLE().Play();
 	progress.close();
 	arrDepthIdx.Release();
-	cacheDMaps.ClearCache();	
+	cacheDMaps.ClearCache();
 
 	DEBUG_EXTRA("Depth-maps fused and filtered: %u depth-maps, %u depths, %u points (%d%%%%), %.2f hits in %.2f cached (%s)",
 		numDMapsFused, nDepths, pointcloud.points.size(), ROUND2INT((100.f*pointcloud.points.size())/nDepths),
@@ -1930,7 +1930,7 @@ bool Scene::DenseReconstruction(int nFusionMode, bool bCrop2ROI, float fBorderRO
 		data.depthMaps.DenseFuseDepthMaps(pointcloud, OPTDENSE::nEstimateColors == 2, OPTDENSE::nEstimateNormals == 2);
 	}
 	#if TD_VERBOSE != TD_VERBOSE_OFF
-	if (g_nVerbosityLevel > 2) {
+	if (VERBOSITY_LEVEL > 2) {
 		// print number of points with 3+ views
 		size_t nPoints1m(0), nPoints2(0), nPoints3p(0);
 		FOREACHPTR(pViews, pointcloud.pointViews) {
@@ -1988,7 +1988,7 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 		SampleMeshWithVisibility(static_cast<REAL>(data.fSampleMeshNeighbors));
 		mesh.Release();
 	}
-	
+
 	// if no geometry available, estimate neighbor views based on image pairs baseline
 	if (IsEmpty() && !ImagesHaveNeighbors()) {
 		VERBOSE("warning: empty point-cloud, rough neighbor views selection based on image pairs baseline");
@@ -2302,7 +2302,7 @@ void Scene::DenseReconstructionEstimate(void* pData)
 			DepthData& depthData(data.depthMaps.arrDepthData[idx]);
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			// save depth map as image
-			if (g_nVerbosityLevel > 3)
+			if (VERBOSITY_LEVEL > 3)
 				ExportDepthMap(ComposeDepthFilePath(depthData.GetView().GetID(), "raw.png"), depthData.depthMap);
 			#endif
 			// apply filters
@@ -2328,11 +2328,11 @@ void Scene::DenseReconstructionEstimate(void* pData)
 			DepthData& depthData(data.depthMaps.arrDepthData[idx]);
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			// save depth map as image
-			if (g_nVerbosityLevel > 2) {
+			if (VERBOSITY_LEVEL > 2) {
 				ExportDepthMap(ComposeDepthFilePath(depthData.GetView().GetID(), "png"), depthData.depthMap);
 				ExportConfidenceMap(ComposeDepthFilePath(depthData.GetView().GetID(), "conf.png"), depthData.confMap);
 				ExportPointCloud(ComposeDepthFilePath(depthData.GetView().GetID(), "ply"), *depthData.images.First().pImageData, depthData.depthMap, depthData.normalMap);
-				if (g_nVerbosityLevel > 4) {
+				if (VERBOSITY_LEVEL > 4) {
 					ExportNormalMap(ComposeDepthFilePath(depthData.GetView().GetID(), "normal.png"), depthData.normalMap);
 					depthData.confMap.Save(ComposeDepthFilePath(depthData.GetView().GetID(), "conf.pfm"));
 				}
@@ -2449,7 +2449,7 @@ void Scene::DenseReconstructionFilter(void* pData)
 			}
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			// save depth map as image
-			if (g_nVerbosityLevel > 2) {
+			if (VERBOSITY_LEVEL > 2) {
 				DepthMap depthMap(depthData.depthMap.clone());
 				NormalMap normalMap(depthData.normalMap.clone());
 				FilterDepthMap(depthMap, normalMap, depthData.confMap);
@@ -2573,7 +2573,7 @@ void Scene::PointCloudFilter(int thRemove)
 	progress.close();
 
 	#if TD_VERBOSE != TD_VERBOSE_OFF
-	if (g_nVerbosityLevel > 2) {
+	if (VERBOSITY_LEVEL > 2) {
 		// print visibility stats
 		UnsignedArr counts(0, 64);
 		for (int views: visibility) {

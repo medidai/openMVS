@@ -6,10 +6,20 @@
   "dependencies": [
     "boost-math",
     "boost-iostreams",
+    "boost-graph",
+    "boost-math",
     "boost-program-options",
     "boost-serialization",
     "boost-system",
     "boost-throw-exception",
+    {
+      "name": "ceres",
+      "features": [
+          "lapack",
+          "schur",
+          "suitesparse"
+      ]
+    },
     {
       "name": "cgal",
       "default-features": false
@@ -21,13 +31,17 @@
       "name": "opencv",
       "features": [
         "eigen",
+        "ffmpeg",
         "jpegxl",
         "openexr"
       ]
     },
     "nanoflann",
     "pkgconf",
+    "poselib",
     "tiff",
+    "tinyexif",
+    "tinynpy",
     "zlib"
   ],
   "features": {
@@ -46,10 +60,35 @@
         "portable-file-dialogs"
       ]
     },
+    "siftgpu": {
+      "description": "SiftGPU support in OpenMVS",
+      "dependencies": [
+        "siftgpu",
+        {
+          "name": "siftgpu",
+          "features": [
+            "egl"
+          ],
+          "platform": "!windows & !osx"
+        }
+      ]
+    },
     "cuda": {
       "description": "CUDA support for OpenMVS",
       "dependencies": [
-        "cuda"
+        "cuda",
+        {
+          "name": "ceres",
+          "features": [
+            "cuda"
+          ]
+        },
+        {
+          "name": "siftgpu",
+          "features": [
+            "cuda"
+          ]
+        }
       ]
     },
     "python": {

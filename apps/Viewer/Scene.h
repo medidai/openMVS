@@ -138,6 +138,14 @@ public:
 	Window window;
 	ImageArr images; // scene photos (only valid)
 
+	// Track-based neighbor information with shared point indices
+	struct ViewScoreWithPoints {
+		MVS::ViewScore score;
+		MVS::PointCloud::IndexArr sharedPoints; // indices of shared points in the pointcloud
+	};
+	typedef CLISTDEFIDX(ViewScoreWithPoints,uint32_t) ViewScoreWithPointsArr;
+	CLISTDEFIDX(ViewScoreWithPointsArr,uint32_t) trackBasedNeighbors; // per-viewer image neighbors from shared tracks
+
 	EstimateROIWorkflowOptions estimateROIOptions;
 	DensifyWorkflowOptions densifyOptions;
 	ReconstructMeshWorkflowOptions reconstructOptions;
@@ -219,6 +227,9 @@ public:
 	void SetROIFromSelection(bool aabb = false);
 	MVS::Scene CropToPoints(const MVS::PointCloud::IndexArr& selectedPointIndices, unsigned minPoints = 20) const;
 
+	// Accessors
+	const CLISTDEFIDX(ViewScoreWithPointsArr,uint32_t)& GetTrackBasedNeighbors() const { return trackBasedNeighbors; }
+
 	// Getters
 	EstimateROIWorkflowOptions& GetEstimateROIWorkflowOptions() { return estimateROIOptions; }
 	const EstimateROIWorkflowOptions& GetEstimateROIWorkflowOptions() const { return estimateROIOptions; }
@@ -246,6 +257,7 @@ public:
 private:
 	void CropToBounds();
 	void TogleSceneBox();
+	void PrecomputeTrackBasedNeighbors();
 
 	// Workflow finalization (called from main thread after workflow completes)
 	void FinalizeWorkflow(bool success);

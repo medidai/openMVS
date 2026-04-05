@@ -206,7 +206,7 @@ PointCloud::Box PointCloud::GetPercentileAABB(float minPercentile, float maxPerc
 			y.push_back(X.y);
 			z.push_back(X.z);
 		}
-	}	
+	}
 	if (x.empty())
 		return Box(true);
 	// compute percentile indices
@@ -540,7 +540,7 @@ bool PointCloud::LoadGLTF(const String& fileName, bool bBinary)
 				const uint8_t* pData = buffer.data.data() + gltfBufferView.byteOffset + gltfAccessor.byteOffset;
 				const size_t oldSize = colors.size();
 				colors.resize(points.size());
-				
+
 				const int stride = gltfAccessor.ByteStride(gltfBufferView);
 				if (gltfAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
 					if (gltfAccessor.type == TINYGLTF_TYPE_VEC3) {
@@ -588,7 +588,7 @@ bool PointCloud::LoadGLTF(const String& fileName, bool bBinary)
 				const uint8_t* pData = buffer.data.data() + gltfBufferView.byteOffset + gltfAccessor.byteOffset;
 				const size_t oldSize = normals.size();
 				normals.resize(points.size());
-				
+
 				const int stride = gltfAccessor.ByteStride(gltfBufferView);
 				if (gltfAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT) {
 					if (stride == sizeof(Normal)) {
@@ -616,7 +616,9 @@ bool PointCloud::Save(const String& fileName, bool bViews, bool bLegacyTypes, bo
 
 	const String ext(Util::getFileExt(fileName).ToLower());
 	bool ret;
-	if (ext == _T(".gltf") || ext == _T(".glb"))
+	if (ext == _T(".potree") || ext.empty())
+		ret = SavePotree(fileName);
+	else if (ext == _T(".gltf") || ext == _T(".glb"))
 		ret = SaveGLTF(fileName, ext == _T(".glb"));
 	else
 		ret = SavePLY(fileName, bViews, bLegacyTypes, bBinary);
@@ -786,6 +788,218 @@ bool PointCloud::SaveGLTF(const String& fileName, bool bBinary) const
 	tinygltf::TinyGLTF gltf;
 	return gltf.WriteGltfSceneToFile(&gltfModel, fileName, false, false, !bBinary, bBinary);
 }
+
+// save the dense point-cloud as Potree 2.0 format
+// outputs 3 files in the given directory: metadata.json, hierarchy.bin, octree.bin
+bool PointCloud::SavePotree(const String& dirName) const
+{
+	if (IsEmpty())
+		return false;
+	TD_TIMER_STARTD();
+
+	// ensure output directory exists (append separator if needed)
+	String outputDir(dirName);
+	if (!outputDir.empty() && outputDir.back() != PATH_SEPARATOR)
+		outputDir += PATH_SEPARATOR;
+	Util::ensureFolder(outputDir);
+
+	// compute bounding box and make it cubic (Potree requirement)
+	const Box aabb(GetAABB());
+	const Eigen::Vector3d center(aabb.GetCenter().cast<double>());
+	const Eigen::Vector3d aabbSize(aabb.GetSize().cast<double>());
+	const double halfSize = aabbSize.maxCoeff() / 2.0;
+	const Eigen::Vector3f cubeMin((float)(center.x() - halfSize), (float)(center.y() - halfSize), (float)(center.z() - halfSize));
+	const Eigen::Vector3f cubeMax((float)(center.x() + halfSize), (float)(center.y() + halfSize), (float)(center.z() + halfSize));
+	const AABB3f cubeAABB(cubeMin, cubeMax);
+	const double cubeSize = halfSize * 2.0;
+
+	// build LOD octree using grid-based subsampling
+	typedef TOctreeLOD<PointArr, Point::Type, 3> OctreeLOD;
+	OctreeLOD lodOctree;
+	lodOctree.Insert(points, cubeAABB, GridSubsample<PointArr, Point::Type, 3>(128));
+	DEBUG_EXTRA("Point-cloud Potree: LOD octree built with %zu nodes, depth %u",
+		lodOctree.GetTotalNodes(), lodOctree.GetMaxDepth());
+
+	// compute encoding parameters
+	const double offsetX = cubeAABB.ptMin.x(), offsetY = cubeAABB.ptMin.y(), offsetZ = cubeAABB.ptMin.z();
+	const double scale = cubeSize > 0 ? cubeSize / double(INT32_MAX) : 1.0;
+	const double invScale = 1.0 / scale;
+	const bool hasColors = !colors.empty();
+	const bool hasNormals = !normals.empty();
+
+	// compute per-point byte size
+	const size_t bytesPerPointPosition = 3 * sizeof(int32_t); // 12 bytes
+	const size_t bytesPerPointColor = hasColors ? 4 * sizeof(uint8_t) : 0; // 4 bytes (RGBA)
+	const size_t bytesPerPointNormal = hasNormals ? 3 * sizeof(float) : 0; // 12 bytes
+	const size_t bytesPerPoint = bytesPerPointPosition + bytesPerPointColor + bytesPerPointNormal;
+
+	// write octree.bin and collect hierarchy records via BFS traversal
+	struct NodeRecord {
+		uint8_t type;
+		uint8_t childMask;
+		uint32_t numPoints;
+		uint64_t byteOffset;
+		uint64_t byteSize;
+	};
+	std::vector<NodeRecord> records;
+	records.reserve(lodOctree.GetTotalNodes());
+
+	const String octreeFile(outputDir + _T("octree.bin"));
+	{
+		File file(octreeFile, File::WRITE, File::CREATE | File::TRUNCATE);
+		if (!file.isOpen()) {
+			DEBUG("error: cannot create Potree octree file '%s'", octreeFile.c_str());
+			return false;
+		}
+
+		// BFS traversal — write point data per node and record offsets
+		const auto& lodIndices = lodOctree.GetIndexArr();
+		uint64_t currentOffset = 0;
+		lodOctree.TraverseBFS([&](const OctreeLOD::Node& node, const auto& /*center*/, auto /*radius*/) {
+			NodeRecord rec;
+			rec.type = node.IsLeaf() ? uint8_t(1) : uint8_t(0);
+			rec.childMask = node.childMask;
+			rec.numPoints = node.GetNumItems();
+			rec.byteOffset = currentOffset;
+			rec.byteSize = (uint64_t)node.GetNumItems() * bytesPerPoint;
+
+			if (node.GetNumItems() > 0) {
+				// write positions as int32
+				for (IDX i = node.GetFirstItemIdx(); i < node.GetLastItemIdx(); ++i) {
+					const Point& pt = points[lodIndices[i]];
+					const int32_t encoded[3] = {
+						(int32_t)ROUND2INT(((double)pt.x - offsetX) * invScale),
+						(int32_t)ROUND2INT(((double)pt.y - offsetY) * invScale),
+						(int32_t)ROUND2INT(((double)pt.z - offsetZ) * invScale)
+					};
+					file.write(encoded, sizeof(encoded));
+				}
+				// write colors as RGBA (BGR→RGB swizzle)
+				if (hasColors) {
+					for (IDX i = node.GetFirstItemIdx(); i < node.GetLastItemIdx(); ++i) {
+						const Color& c = colors[lodIndices[i]];
+						const uint8_t rgba[4] = {c[2], c[1], c[0], 255};
+						file.write(rgba, sizeof(rgba));
+					}
+				}
+				// write normals as float32
+				if (hasNormals) {
+					for (IDX i = node.GetFirstItemIdx(); i < node.GetLastItemIdx(); ++i) {
+						const Normal& n = normals[lodIndices[i]];
+						const float nf[3] = {n.x, n.y, n.z};
+						file.write(nf, sizeof(nf));
+					}
+				}
+			}
+
+			currentOffset += rec.byteSize;
+			records.push_back(rec);
+		});
+	}
+
+	// write hierarchy.bin — 22 bytes per node, BFS order (same order as records)
+	const String hierarchyFile(outputDir + _T("hierarchy.bin"));
+	{
+		File file(hierarchyFile, File::WRITE, File::CREATE | File::TRUNCATE);
+		if (!file.isOpen()) {
+			DEBUG("error: cannot create Potree hierarchy file '%s'", hierarchyFile.c_str());
+			return false;
+		}
+		for (const NodeRecord& rec : records) {
+			file.write(&rec.type, 1);
+			file.write(&rec.childMask, 1);
+			file.write(&rec.numPoints, 4);
+			file.write(&rec.byteOffset, 8);
+			file.write(&rec.byteSize, 8);
+		}
+	}
+
+	// write metadata.json
+	const String metadataFile(outputDir + _T("metadata.json"));
+	{
+		using json = nlohmann::json;
+		json metadata;
+		metadata["version"] = "2.0";
+		metadata["name"] = "pointcloud";
+		metadata["description"] = "";
+		metadata["points"] = points.size();
+		metadata["projection"] = "";
+
+		// bounding box
+		metadata["boundingBox"]["min"] = {(double)cubeAABB.ptMin.x(), (double)cubeAABB.ptMin.y(), (double)cubeAABB.ptMin.z()};
+		metadata["boundingBox"]["max"] = {(double)cubeAABB.ptMax.x(), (double)cubeAABB.ptMax.y(), (double)cubeAABB.ptMax.z()};
+
+		// encoding
+		metadata["offset"] = {offsetX, offsetY, offsetZ};
+		metadata["scale"] = {scale, scale, scale};
+		metadata["spacing"] = (double)lodOctree.GetSpacing();
+
+		// hierarchy
+		metadata["hierarchy"]["firstChunkSize"] = records.size();
+		metadata["hierarchy"]["stepSize"] = 4;
+		metadata["hierarchy"]["depth"] = lodOctree.GetMaxDepth();
+
+		// encoding: position range for int32
+		const double maxEncoded = cubeSize * invScale;
+		const json posMin = {0, 0, 0};
+		const json posMax = {maxEncoded, maxEncoded, maxEncoded};
+
+		// attributes
+		json attributes = json::array();
+		{
+			// position (int32 x 3)
+			json attr;
+			attr["name"] = "position";
+			attr["description"] = "";
+			attr["size"] = 12;
+			attr["numElements"] = 3;
+			attr["elementSize"] = 4;
+			attr["type"] = "int32";
+			attr["min"] = posMin;
+			attr["max"] = posMax;
+			attributes.push_back(std::move(attr));
+		}
+		if (hasColors) {
+			// rgba (uint8 x 4)
+			json attr;
+			attr["name"] = "rgba";
+			attr["description"] = "";
+			attr["size"] = 4;
+			attr["numElements"] = 4;
+			attr["elementSize"] = 1;
+			attr["type"] = "uint8";
+			attr["min"] = {0, 0, 0, 0};
+			attr["max"] = {255, 255, 255, 255};
+			attributes.push_back(std::move(attr));
+		}
+		if (hasNormals) {
+			// normal (float32 x 3)
+			json attr;
+			attr["name"] = "NORMAL";
+			attr["description"] = "";
+			attr["size"] = 12;
+			attr["numElements"] = 3;
+			attr["elementSize"] = 4;
+			attr["type"] = "float";
+			attr["min"] = {-1.0, -1.0, -1.0};
+			attr["max"] = {1.0, 1.0, 1.0};
+			attributes.push_back(std::move(attr));
+		}
+		metadata["attributes"] = std::move(attributes);
+
+		// write JSON file
+		std::ofstream ofs(metadataFile);
+		if (!ofs.is_open()) {
+			DEBUG("error: cannot create Potree metadata file '%s'", metadataFile.c_str());
+			return false;
+		}
+		ofs << metadata.dump(2);
+	}
+
+	DEBUG_EXTRA("Point-cloud Potree '%s' saved: %u points, %zu nodes, depth %u (%s)",
+		dirName.c_str(), points.size(), records.size(), lodOctree.GetMaxDepth(), TD_TIMER_GET_FMT().c_str());
+	return true;
+} // SavePotree
 
 // save the dense point-cloud having >=N views as PLY file
 bool PointCloud::SaveNViews(const String& fileName, uint32_t minViews, bool bLegacyTypes, bool bBinary) const

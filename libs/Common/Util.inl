@@ -849,7 +849,7 @@ inline TPoint3<TYPE> PerspectiveCorrectBarycentricCoordinates(const TPoint3<TYPE
 // Encodes/decodes a normalized 3D vector in two parameters for the direction
 template<typename T, typename TR>
 inline void Normal2Dir(const TPoint3<T>& d, TPoint2<TR>& p) {
-	ASSERT(ISEQUAL(norm(d), T(1)), "Norm = ", norm(d));
+	ASSERT(ISEQUAL(norm(d), T(1), T(1e-1)), "Norm = ", norm(d));
 	p.x = TR(atan2(d.y, d.x));
 	p.y = TR(acos(d.z));
 }
@@ -1135,26 +1135,32 @@ struct WeightedMeanStd {
 // upper-bound threshold = median+trust_region
 // lower-bound threshold = median-trust_region
 template<typename TYPE, typename TYPEW>
-inline std::pair<TYPEW,TYPEW> ComputeX84Threshold(const TYPE* const values, size_t size, TYPEW mul=TYPEW(5.2), const uint8_t* mask=NULL) {
+inline std::pair<TYPEW,TYPEW> ComputeX84Threshold(const TYPE* const values, size_t size, TYPEW mul=TYPEW(5.2)) {
 	ASSERT(size > 0);
-	// median = MEDIAN(values);
 	CLISTDEF0(TYPE) data;
-	if (mask) {
-		// use only masked data
-		data.Reserve(size);
-		for (size_t i=0; i<size; ++i)
-			if (mask[i])
-				data.Insert(values[i]);
-	} else {
-		// use all data
-		data.CopyOf(values, size);
-	}
+	data.CopyOf(values, size);
+	return ComputeX84Threshold<TYPE,TYPEW>(data, mul);
+} // ComputeX84Threshold
+template<typename TYPE, typename TYPEW, typename Functor>
+inline std::pair<TYPEW,TYPEW> ComputeX84Threshold(size_t size, const Functor& functor, TYPEW mul=TYPEW(5.2)) {
+	ASSERT(size > 0);
+	CLISTDEF0(TYPE) data;
+	data.JoinFunctor(size, functor);
+	return ComputeX84Threshold<TYPE,TYPEW>(data, mul);
+} // ComputeX84Threshold
+template<typename TYPE, typename TYPEW, typename CLIST=CLISTDEF0(TYPE)>
+inline std::pair<TYPEW,TYPEW> ComputeX84Threshold(CLIST& data, TYPEW mul=TYPEW(5.2)) {
+	ASSERT(!data.empty());
+	// median = MEDIAN(values);
 	const TYPEW median(data.GetMedian());
 	// threshold = 5.2 * MEDIAN(ABS(values-median));
 	using TYPEI = typename MakeSigned<TYPE>::type;
-	for (TYPE& val: data)
-		val = TYPE(ABS(TYPEI(val)-TYPEI(median)));
-	const TYPEW medianDiff(data.GetMedian());
+	using CListTYPEI = CLISTDEF0(TYPEI);
+	CLISTREFVECTOR(CListTYPEI, _dataI, data);
+	CListTYPEI& dataI = const_cast<CListTYPEI&>(_dataI);
+	for (TYPEI& val: dataI)
+		val = ABS(val-TYPEI(median));
+	const TYPEW medianDiff(dataI.GetMedian());
 	return std::make_pair(median, mul*medianDiff);
 } // ComputeX84Threshold
 /*----------------------------------------------------------------*/

@@ -37,6 +37,11 @@ using namespace VIEWER;
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+// uncomment to enable multi-threading based on OpenMP
+#ifdef _USE_OPENMP
+#define VIEWER_USE_OPENMP
+#endif
+
 #define IMAGE_MAX_RESOLUTION 1024
 
 
@@ -261,6 +266,7 @@ Scene::~Scene() {
 void Scene::Reset()
 {
 	window.Reset();
+	trackBasedNeighbors.Release();
 	images.Release();
 	scene.Release();
 	sceneName.clear();
@@ -443,6 +449,9 @@ bool Scene::Open(const String& fileName, String geometryFileName) {
 		bounds = imageBounds;
 		sceneCenter = imageBounds.GetCenter();
 	}
+
+	// Precompute neighbors based on shared tracks
+	PrecomputeTrackBasedNeighbors();
 
 	// fit camera to scene
 	if (!bounds.IsEmpty()) {
@@ -661,6 +670,109 @@ MVS::IIndex Scene::ImageIdxMVS2Viewer(MVS::IIndex idx) const {
 		if (images[i].idx == idx)
 			return i;
 	return NO_ID;
+}
+
+void Scene::PrecomputeTrackBasedNeighbors() {
+	trackBasedNeighbors.clear();
+	trackBasedNeighbors.resize(images.size());
+	if (!scene.IsValid() || !scene.pointcloud.IsValid() || images.empty())
+		return;
+
+	const MVS::PointCloud& pointcloud = scene.pointcloud;
+
+	struct TrackNeighborStats {
+		uint32_t points = 0;
+		float scaleSum = 0.f;
+		float angleSum = 0.f;
+		uint32_t sumCount = 0;
+		MVS::PointCloud::IndexArr sharedPoints;
+	};
+
+	#ifdef VIEWER_USE_OPENMP
+	#pragma omp parallel for schedule(dynamic)
+	for (int_t refViewerIdx = 0; refViewerIdx < (int_t)images.size(); ++refViewerIdx) {
+	#else
+	FOREACH(refViewerIdx, images) {
+	#endif
+		const MVS::IIndex refMVS = images[refViewerIdx].idx;
+		if (refMVS == NO_ID)
+			continue;
+		const MVS::Image& refImage = scene.images[refMVS];
+		if (!refImage.IsValid())
+			continue;
+
+		std::vector<TrackNeighborStats> stats(scene.images.size());
+		FOREACH(p, pointcloud.points) {
+			const MVS::PointCloud::ViewArr& views = pointcloud.pointViews[p];
+			if (views.FindFirst(refMVS) == MVS::PointCloud::ViewArr::NO_INDEX)
+				continue;
+			const MVS::PointCloud::Point& point = pointcloud.points[p];
+			const float refDepth = (float)refImage.camera.PointDepth(point);
+			if (refDepth <= 0)
+				continue;
+			const Point3f V1 = refImage.camera.C - Cast<REAL>(point);
+			const float footprint1 = refImage.camera.GetFootprintImage(refDepth);
+			for (const MVS::PointCloud::View& view : views) {
+				if (view == refMVS)
+					continue;
+				TrackNeighborStats& stat = stats[view];
+				++stat.points;
+				stat.sharedPoints.emplace_back(p);
+				const MVS::Image& otherImage = scene.images[view];
+				const float otherDepth = (float)otherImage.camera.PointDepth(point);
+				if (otherDepth <= 0)
+					continue;
+				const Point3f V2(otherImage.camera.C - Cast<REAL>(point));
+				stat.angleSum += ACOS(ComputeAngle(V1.ptr(), V2.ptr()));
+				++stat.sumCount;
+				// Compute scale ratio (footprint1 / footprint2)
+				const float footprint2 = otherImage.camera.GetFootprintImage(otherDepth);
+				stat.scaleSum += footprint1 / footprint2;
+			}
+		}
+
+		ViewScoreWithPointsArr& neighbors = trackBasedNeighbors[refViewerIdx];
+		Point2fArr projs(0, 256);
+		const Point2f boundsA(refImage.GetSize());
+		FOREACH(view, scene.images) {
+			const TrackNeighborStats& stat = stats[view];
+			if (stat.points == 0)
+				continue;
+			const MVS::Image& otherImage = scene.images[view];
+			if (!otherImage.IsValid())
+				continue;
+
+			float area = 0.f;
+			if (!stat.sharedPoints.empty()) {
+				const Point2f boundsB(otherImage.GetSize());
+				projs.Empty();
+				for (const auto pointIdx : stat.sharedPoints) {
+					const MVS::PointCloud::Point& point = pointcloud.points[pointIdx];
+					Point2f ptB = otherImage.camera.ProjectPointP(point);
+					if (!otherImage.camera.IsInside(ptB, boundsB))
+						continue;
+					Point2f& ptA = projs.emplace_back(refImage.camera.ProjectPointP(point));
+					if (!refImage.camera.IsInside(ptA, boundsA))
+						projs.RemoveLast();
+				}
+				if (!projs.empty())
+					area = ComputeCoveredArea<float,2,16,false>((const float*)projs.data(), projs.size(), boundsA.ptr());
+			}
+
+			ViewScoreWithPoints& neighbor = neighbors.AddEmpty();
+			neighbor.score.ID = (uint32_t)view;
+			neighbor.score.points = stat.points;
+			neighbor.score.scale = stat.sumCount > 0 ? stat.scaleSum / stat.sumCount : 1.f;
+			neighbor.score.angle = stat.sumCount > 0 ? stat.angleSum / stat.sumCount : 0.f;
+			neighbor.score.area = area;
+			neighbor.score.score = (float)stat.points*MAXF(area,0.01f);
+			neighbor.sharedPoints = stat.sharedPoints; // Store shared point indices
+		}
+
+		neighbors.Sort([](const ViewScoreWithPoints& a, const ViewScoreWithPoints& b) {
+			return a.score.points > b.score.points;
+		});
+	}
 }
 
 void Scene::CropToBounds()

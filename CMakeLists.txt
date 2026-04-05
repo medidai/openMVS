@@ -34,6 +34,7 @@ OPTION(OpenMVS_USE_BREAKPAD "Enable BreakPad library" ON)
 OPTION(OpenMVS_USE_PYTHON "Enable Python library bindings" ON)
 OPTION(OpenMVS_USE_CERES "Enable CERES optimization library" OFF)
 OPTION(OpenMVS_USE_CUDA "Enable CUDA library" ON)
+OPTION(OpenMVS_USE_SIFTGPU "Enable SIFTGPU library" ON)
 OPTION(OpenMVS_USE_OPENCV_JPEGXL_WRITE "Enable OpenCV JPEG XL write-quality params (requires OpenCV >= 4.12)" ON)
 OPTION(OpenMVS_USE_FAST_FLOAT2INT "Use an optimized code to convert real numbers to int" OFF)
 OPTION(OpenMVS_USE_FAST_INVSQRT "Use an optimized code to compute the inverse square root (slower in fact on modern compilers)" OFF)
@@ -56,11 +57,16 @@ IF(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
 		SET(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}" CACHE STRING "")
 	ENDIF()
 ENDIF()
+# Add local ports to overlay
+SET(VCPKG_OVERLAY_PORTS "${CMAKE_SOURCE_DIR}/ports")
 IF(OpenMVS_BUILD_TOOLS AND OpenMVS_BUILD_VIEWER)
 	LIST(APPEND VCPKG_MANIFEST_FEATURES "viewer")
 ENDIF()
 IF(OpenMVS_USE_CUDA)
 	LIST(APPEND VCPKG_MANIFEST_FEATURES "cuda")
+ENDIF()
+IF(OpenMVS_USE_SIFTGPU)
+	LIST(APPEND VCPKG_MANIFEST_FEATURES "siftgpu")
 ENDIF()
 IF(OpenMVS_USE_PYTHON)
 	LIST(APPEND VCPKG_MANIFEST_FEATURES "python")
@@ -160,6 +166,7 @@ if(OpenMVS_USE_CUDA)
 		if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 			SET(CMAKE_CUDA_ARCHITECTURES "native")
 		endif()
+		SET(CMAKE_CUDA_FLAGS_INIT "${CMAKE_CUDA_FLAGS_INIT} -allow-unsupported-compiler")
 		ENABLE_LANGUAGE(CUDA)
 		SET(CUDA_FOUND TRUE)
 		SET(CMAKE_CUDA_STANDARD 17)
@@ -300,8 +307,9 @@ if (OpenMVS_ENABLE_TESTS)
 	# enable testing functionality
 	ENABLE_TESTING()
 	# define tests
-	ADD_TEST(NAME UnitTests COMMAND $<TARGET_FILE:Tests> "0")
-	ADD_TEST(NAME PipelineTest COMMAND $<TARGET_FILE:Tests> "1")
+	ADD_TEST(NAME CommonUnitTests COMMAND $<TARGET_FILE:Tests> "0")
+	ADD_TEST(NAME SFMPipelineTest COMMAND $<TARGET_FILE:Tests> "1")
+	ADD_TEST(NAME MVSPipelineTest COMMAND $<TARGET_FILE:Tests> "2")
 endif()
 
 # Export the package for use from the build-tree
@@ -312,6 +320,34 @@ EXPORT(PACKAGE OpenMVS)
 INSTALL(EXPORT OpenMVSTargets
 	NAMESPACE OpenMVS::
 	DESTINATION "${INSTALL_CMAKE_DIR}")
+
+# Detect git commit hash and modified status at configure time
+FIND_PACKAGE(Git QUIET)
+SET(OpenMVS_GIT_COMMIT "")
+SET(OpenMVS_GIT_MODIFIED 0)
+IF(Git_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+	# Get short commit hash
+	EXECUTE_PROCESS(
+		COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+		OUTPUT_VARIABLE OpenMVS_GIT_COMMIT
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+		ERROR_QUIET
+	)
+	# Check for uncommitted changes
+	EXECUTE_PROCESS(
+		COMMAND ${GIT_EXECUTABLE} diff-index --quiet HEAD
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+		RESULT_VARIABLE OpenMVS_GIT_RESULT
+		ERROR_QUIET
+	)
+	SET(OpenMVS_GIT_SUFFIX "")
+	IF(NOT OpenMVS_GIT_RESULT EQUAL 0)
+		SET(OpenMVS_GIT_MODIFIED 1)
+		SET(OpenMVS_GIT_SUFFIX "*")
+	ENDIF()
+	MESSAGE(STATUS "OpenMVS git info: ${OpenMVS_GIT_COMMIT}${OpenMVS_GIT_SUFFIX}")
+ENDIF()
 
 # Install configuration file
 CONFIGURE_FILE("${CMAKE_CURRENT_SOURCE_DIR}/build/Templates/ConfigLocal.h.in" "${CMAKE_BINARY_DIR}/ConfigLocal.h")

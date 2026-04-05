@@ -3,6 +3,10 @@
 #define OpenMVS_MINOR_VERSION ${OpenMVS_MINOR_VERSION}
 #define OpenMVS_PATCH_VERSION ${OpenMVS_PATCH_VERSION}
 
+// Git commit information
+#define OpenMVS_GIT_COMMIT "${OpenMVS_GIT_COMMIT}"
+#define OpenMVS_GIT_MODIFIED ${OpenMVS_GIT_MODIFIED}
+
 // OpenMVS compiled as static or dynamic libs
 #cmakedefine BUILD_SHARED_LIBS
 

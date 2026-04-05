@@ -48,7 +48,7 @@ namespace SEACAVE {
 
 namespace CUDA {
 
-inline void checkCudaCall(const cudaError_t error) {
+FORCEINLINE void checkCudaCall(const cudaError_t error) {
 	if (error == cudaSuccess)
 		return;
 	VERBOSE("CUDA error at %s:%d: %s (code %d)", __FILE__, __LINE__, cudaGetErrorString(error), error);

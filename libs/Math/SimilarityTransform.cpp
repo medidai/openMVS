@@ -38,6 +38,74 @@
 
 // S T R U C T S ///////////////////////////////////////////////////
 
+Transform Transform::Invert() const
+{
+	Transform inv;
+	inv.scale = REAL(1) / scale;
+	inv.R = R.t();
+	inv.t = -(inv.scale) * (inv.R * t);
+	return inv;
+}
+
+Transform Transform::operator*(const Transform& other) const
+{
+	Transform res;
+	res.scale = scale * other.scale;
+	res.R = R * other.R;
+	res.t = scale * (R * other.t) + t;
+	return res;
+}
+
+Point3 Transform::operator*(const Point3& p) const
+{
+	return scale * (R * p) + t;
+}
+
+Transform Transform::Random(std::mt19937& rng, REAL maxRotationAngleDeg, REAL maxTranslation, REAL minScalePercent)
+{
+	Transform T;
+	// Generate random rotation using axis-angle representation
+	std::uniform_real_distribution<REAL> angleDist(-maxRotationAngleDeg, maxRotationAngleDeg);
+	std::uniform_real_distribution<REAL> axisDist(-1.0, 1.0);
+	Point3 axis(axisDist(rng), axisDist(rng), axisDist(rng));
+	const REAL axisNorm = norm(axis);
+	if (!ISZERO(axisNorm)) {
+		axis *= D2R(angleDist(rng)) / axisNorm;
+		T.R.SetRotationAxisAngle(axis);
+	} else {
+		T.R = RMatrix::IDENTITY;
+	}
+	// Generate random translation
+	std::uniform_real_distribution<REAL> transDist(-maxTranslation, maxTranslation);
+	T.t = Point3(transDist(rng), transDist(rng), transDist(rng));
+	// Generate random scale
+	std::uniform_real_distribution<REAL> scaleDist(REAL(1)-minScalePercent, REAL(1)+minScalePercent);
+	T.scale = scaleDist(rng);
+	return T;
+}
+
+Eigen::Affine3d Transform::ToEigen() const
+{
+	Eigen::Affine3d T;
+	T.linear() = static_cast<double>(scale) * static_cast<Matrix3x3::CEMatMap>(R);
+	T.translation() = static_cast<Point3::CEVecMap>(t);
+	return T;
+}
+
+Transform& Transform::FromEigen(const Eigen::Affine3d& T)
+{
+	Eigen::Matrix3d linear = T.linear();
+	scale = linear.col(0).norm();
+	if (scale > 1e-9)
+		R = linear / scale;
+	else
+		R = Matrix3x3::IDENTITY;
+	t = T.translation();
+	return *this;
+}
+/*----------------------------------------------------------------*/
+
+
 // compute the similarity transform that best aligns the given two sets of corresponding 3D points
 Matrix4x4 SEACAVE::SimilarityTransform(const Point3Arr& points, const Point3Arr& pointsRef)
 {
@@ -62,6 +130,16 @@ void SEACAVE::DecomposeSimilarityTransform(const Matrix4x4& transform, Matrix3x3
 	t = T.translation();
 	s = scaling.diagonal().mean();
 } // DecomposeSimilarityTransform
+
+Transform SEACAVE::EstimateSimilarityTransform(const Point3Arr& srcPoints, const Point3Arr& dstPoints)
+{
+	// Use Umeyama's algorithm for closed-form solution (with scaling)
+	const Matrix4x4 T = SimilarityTransform(srcPoints, dstPoints);
+	// Decompose Scale/Rotation/Translation
+	Transform transform;
+	DecomposeSimilarityTransform(T, transform.R, transform.t, transform.scale);
+	return transform;
+} // EstimateSimilarityTransform
 /*----------------------------------------------------------------*/
 
 
