@@ -944,23 +944,6 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 		DEBUG_ULTIMATE("Mesh decimated: %d -> %d faces", OriginalFaceNum, (int)sm.number_of_faces());
 	}
 
-	// decimate mesh
-	if (fDecimate < 1) {
-		ASSERT(fDecimate > 0);
-		const int OriginalFaceNum((int)sm.number_of_faces());
-		const int TargetFaceNum(ROUND2INT(fDecimate * OriginalFaceNum));
-		Util::Progress progress(_T("Decimated faces"), OriginalFaceNum - TargetFaceNum);
-		typedef CLEAN::SMS::GarlandHeckbert_triangle_policies<CLEAN::SurfaceMesh, CLEAN::K> GH_policies;
-		GH_policies gh_policies(sm);
-		CLEAN::SMS::Face_count_stop_predicate<CLEAN::SurfaceMesh> stop(TargetFaceNum);
-		CLEAN::SMS::edge_collapse(sm, stop,
-			CGAL::parameters::get_cost(gh_policies.get_cost())
-			                 .get_placement(gh_policies.get_placement()));
-		sm.collect_garbage();
-		progress.close();
-		DEBUG_ULTIMATE("Mesh decimated: %d -> %d faces", OriginalFaceNum, (int)sm.number_of_faces());
-	}
-
 	// close holes
 	if (nCloseHoles > 0) {
 		std::vector<CLEAN::halfedge_descriptor> borderCycles;
