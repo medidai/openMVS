@@ -1509,7 +1509,7 @@ void UI::ShowCameraInfoDialog(Window& window) {
 						// Highlight and make the entire row clickable by using Selectable
 						const bool isSelected(window.selectedNeighborCamera == neighbor.ID);
 						String rowLabel = String::FormatString("%u/%u##neighbor_%u", neighbor.ID, neighborImage.ID, neighbor.ID);
-						bool rowClicked = ImGui::Selectable(rowLabel.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap);
+						bool rowClicked = ImGui::Selectable(rowLabel.c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
 						// Handle row click
 						if (rowClicked) {
 							// Deselect if already selected, or select it otherwise
