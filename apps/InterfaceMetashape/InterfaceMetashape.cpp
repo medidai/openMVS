@@ -29,8 +29,8 @@
  *      containing it.
  */
 
-#include "../../libs/IO/TinyXML2.h"
 #include "../../libs/MVS/Common.h"
+#include "../../libs/IO/TinyXML2.h"
 #include "../../libs/MVS/Scene.h"
 #include <boost/program_options.hpp>
 

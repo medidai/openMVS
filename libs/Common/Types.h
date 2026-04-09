@@ -437,16 +437,16 @@ template <typename... Args> std::string PrintMessageToString(Args &&...args) {
 // I N C L U D E S /////////////////////////////////////////////////
 
 #include "AutoPtr.h"
+#include "List.h"
+#include "Strings.h"
 #include "CriticalSection.h"
 #include "File.h"
 #include "Hash.h"
 #include "LinkLib.h"
-#include "List.h"
 #include "MemFile.h"
 #include "Queue.h"
 #include "Semaphore.h"
 #include "SharedPtr.h"
-#include "Strings.h"
 #include "Thread.h"
 #include "Timer.h"
 #include "Util.h"
@@ -3422,16 +3422,16 @@ protected:
 #endif // _USE_EIGEN
 
 #include "../Math/LMFit/lmmin.h"
-#include "AABB.h"
-#include "Line.h"
-#include "OBB.h"
-#include "Octree.h"
-#include "Plane.h"
-#include "Ray.h"
-#include "Rotation.h"
-#include "Sphere.h"
 #include "Types.inl"
 #include "Util.inl"
+#include "AABB.h"
+#include "OBB.h"
+#include "Sphere.h"
+#include "Plane.h"
+#include "Ray.h"
+#include "Line.h"
+#include "Octree.h"
+#include "Rotation.h"
 #include "UtilCUDA.h"
 
 #endif // __SEACAVE_TYPES_H__

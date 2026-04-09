@@ -72,6 +72,9 @@ ENDIF()
 #   ${OpenMVS_BINARY_DIR}.
 PROJECT(OpenMVS LANGUAGES CXX)
 
+# For clangd / IDE: emit build/compile_commands.json (used automatically when present).
+SET(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 SET(OpenMVS_MAJOR_VERSION 2)
 SET(OpenMVS_MINOR_VERSION 3)
 SET(OpenMVS_PATCH_VERSION 0)

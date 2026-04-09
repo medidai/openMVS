@@ -1,0 +1,14 @@
+# Fallback flags for clangd when build/compile_commands.json is missing.
+# (Do not use .clangd CompileFlags.Add alone for -I paths: clangd merges those
+# into a fallback with cwd = the header's directory, which breaks -Iclangd-include.)
+# Edit the -isystem lines if OpenCV/Eigen live outside Homebrew on your machine.
+-xc++
+-std=c++17
+-Iclangd-include
+-isystem
+/opt/homebrew/include/opencv4
+-isystem
+/opt/homebrew/include/eigen3
+-isystem
+/opt/homebrew/include
+-I.
