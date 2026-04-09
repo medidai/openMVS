@@ -8,7 +8,6 @@
 #ifndef __MATH_COMMON_H__
 #define __MATH_COMMON_H__
 
-
 // I N C L U D E S /////////////////////////////////////////////////
 
 #if defined(Math_EXPORTS) && !defined(Common_EXPORTS)
@@ -27,9 +26,7 @@
 #include "LMFit/lmmin.h"
 #include "RobustNorms.h"
 
-
 // D E F I N E S ///////////////////////////////////////////////////
-
 
 // P R O T O T Y P E S /////////////////////////////////////////////
 

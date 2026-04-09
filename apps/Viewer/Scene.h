@@ -32,77 +32,78 @@
 #ifndef _VIEWER_SCENE_H_
 #define _VIEWER_SCENE_H_
 
-
 // I N C L U D E S /////////////////////////////////////////////////
 
 #include "Window.h"
 
-
 // D E F I N E S ///////////////////////////////////////////////////
-
 
 // S T R U C T S ///////////////////////////////////////////////////
 
 namespace VIEWER {
 
-class Scene
-{
+class Scene {
 public:
-	typedef MVS::PointCloud::Octree OctreePoints;
-	typedef MVS::Mesh::Octree OctreeMesh;
-
-public:
-	ARCHIVE_TYPE nArchiveType;
-	String name;
-
-	String sceneName;
-	String geometryName;
-	bool geometryMesh;
-	MVS::Scene scene;
-	Window window;
-	ImageArr images; // scene photos
-	ImageArr textures; // mesh textures
-
-	OctreePoints octPoints;
-	OctreeMesh octMesh;
-	Point3fArr obbPoints;
-
-	GLuint listPointCloud;
-	CLISTDEF0IDX(GLuint,MVS::Mesh::TexIndex) listMeshes;
-
-	// multi-threading
-	static SEACAVE::EventQueue events; // internal events queue (processed by the working threads)
-	static SEACAVE::Thread thread; // worker thread
+  typedef MVS::PointCloud::Octree OctreePoints;
+  typedef MVS::Mesh::Octree OctreeMesh;
 
 public:
-	explicit Scene(ARCHIVE_TYPE _nArchiveType = ARCHIVE_MVS);
-	~Scene();
+  ARCHIVE_TYPE nArchiveType;
+  String name;
 
-	void Empty();
-	void Release();
-	void ReleasePointCloud();
-	void ReleaseMesh();
-	inline bool IsValid() const { return window.IsValid(); }
-	inline bool IsOpen() const { return IsValid() && !scene.IsEmpty(); }
-	inline bool IsOctreeValid() const { return !octPoints.IsEmpty() || !octMesh.IsEmpty(); }
+  String sceneName;
+  String geometryName;
+  bool geometryMesh;
+  MVS::Scene scene;
+  Window window;
+  ImageArr images;   // scene photos
+  ImageArr textures; // mesh textures
 
-	bool Init(const cv::Size&, LPCTSTR windowName, LPCTSTR fileName=NULL, LPCTSTR geometryFileName=NULL);
-	bool Open(LPCTSTR fileName, LPCTSTR geometryFileName=NULL);
-	bool Save(LPCTSTR fileName=NULL, bool bRescaleImages=false);
-	bool Export(LPCTSTR fileName, LPCTSTR exportType=NULL) const;
-	void CompilePointCloud();
-	void CompileMesh();
-	void CompileBounds();
-	void CropToBounds();
+  OctreePoints octPoints;
+  OctreeMesh octMesh;
+  Point3fArr obbPoints;
 
-	void Draw();
-	void Loop();
+  GLuint listPointCloud;
+  CLISTDEF0IDX(GLuint, MVS::Mesh::TexIndex) listMeshes;
 
-	void Center();
-	void TogleSceneBox();
-	void CastRay(const Ray3&, int);
+  // multi-threading
+  static SEACAVE::EventQueue
+      events; // internal events queue (processed by the working threads)
+  static SEACAVE::Thread thread; // worker thread
+
+public:
+  explicit Scene(ARCHIVE_TYPE _nArchiveType = ARCHIVE_MVS);
+  ~Scene();
+
+  void Empty();
+  void Release();
+  void ReleasePointCloud();
+  void ReleaseMesh();
+  inline bool IsValid() const { return window.IsValid(); }
+  inline bool IsOpen() const { return IsValid() && !scene.IsEmpty(); }
+  inline bool IsOctreeValid() const {
+    return !octPoints.IsEmpty() || !octMesh.IsEmpty();
+  }
+
+  bool Init(const cv::Size &, LPCTSTR windowName, LPCTSTR fileName = NULL,
+            LPCTSTR geometryFileName = NULL);
+  bool Open(LPCTSTR fileName, LPCTSTR geometryFileName = NULL);
+  bool Save(LPCTSTR fileName = NULL, bool bRescaleImages = false);
+  bool Export(LPCTSTR fileName, LPCTSTR exportType = NULL) const;
+  void CompilePointCloud();
+  void CompileMesh();
+  void CompileBounds();
+  void CropToBounds();
+
+  void Draw();
+  void Loop();
+
+  void Center();
+  void TogleSceneBox();
+  void CastRay(const Ray3 &, int);
+
 protected:
-	static void* ThreadWorker(void*);
+  static void *ThreadWorker(void *);
 };
 /*----------------------------------------------------------------*/
 

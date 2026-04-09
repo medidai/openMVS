@@ -8,7 +8,6 @@
 #ifndef __IO_COMMON_H__
 #define __IO_COMMON_H__
 
-
 // I N C L U D E S /////////////////////////////////////////////////
 
 #if defined(IO_EXPORTS) && !defined(Common_EXPORTS)
@@ -24,20 +23,20 @@
 #define IO_TPL GENERAL_TPL
 #endif
 
-#define _IMAGE_BMP		// add BMP support
-#define _IMAGE_TGA		// add TGA support
-#define _IMAGE_DDS		// add DDS support
+#define _IMAGE_BMP // add BMP support
+#define _IMAGE_TGA // add TGA support
+#define _IMAGE_DDS // add DDS support
 #ifdef _USE_PNG
-#define _IMAGE_PNG		// add PNG support
+#define _IMAGE_PNG // add PNG support
 #endif
 #ifdef _USE_JPG
-#define _IMAGE_JPG		// add JPG support
+#define _IMAGE_JPG // add JPG support
 #endif
 #ifdef _USE_JXL
-#define _IMAGE_JXL		// add JpegXL support
+#define _IMAGE_JXL // add JpegXL support
 #endif
 #ifdef _USE_TIFF
-#define _IMAGE_TIFF		// add TIFF support
+#define _IMAGE_TIFF // add TIFF support
 #endif
 
 #include "ImageSCI.h"
@@ -62,8 +61,8 @@
 #ifdef _IMAGE_JXL
 #include "ImageJXL.h"
 #endif
-#include "PLY.h"
 #include "OBJ.h"
+#include "PLY.h"
 /*----------------------------------------------------------------*/
 
 #endif // __IO_COMMON_H__

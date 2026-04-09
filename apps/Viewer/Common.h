@@ -32,7 +32,6 @@
 #ifndef _VIEWER_COMMON_H_
 #define _VIEWER_COMMON_H_
 
-
 // I N C L U D E S /////////////////////////////////////////////////
 
 #include "../../libs/MVS/Common.h"
@@ -40,12 +39,10 @@
 
 #define GLAD_GL_IMPLEMENTATION
 #include <glad/glad.h>
-#define GLFW_INCLUDE_NONE 
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
-
 // D E F I N E S ///////////////////////////////////////////////////
-
 
 // P R O T O T Y P E S /////////////////////////////////////////////
 
@@ -60,12 +57,9 @@ namespace VIEWER {
 //   0  0 -1  0      z      -z
 //   0  0  0  1      1       1
 static const Eigen::Matrix4d gs_convert = [] {
-	Eigen::Matrix4d tmp; tmp <<
-		1,  0,  0,  0,
-		0, -1,  0,  0,
-		0,  0, -1,  0,
-		0,  0,  0,  1;
-	return tmp;
+  Eigen::Matrix4d tmp;
+  tmp << 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1;
+  return tmp;
 }();
 
 /// given rotation matrix R and translation vector t,
@@ -76,24 +70,24 @@ static const Eigen::Matrix4d gs_convert = [] {
 /// [ 0.0 0.0 0.0 1.0 ]
 //
 // World to Local
-inline Eigen::Matrix4d TransW2L(const Eigen::Matrix3d& R, const Eigen::Vector3d& t)
-{
-	Eigen::Matrix4d m(Eigen::Matrix4d::Identity());
-	m.block(0,0,3,3) = R;
-	m.block(0,3,3,1) = t;
-	return m;
+inline Eigen::Matrix4d TransW2L(const Eigen::Matrix3d &R,
+                                const Eigen::Vector3d &t) {
+  Eigen::Matrix4d m(Eigen::Matrix4d::Identity());
+  m.block(0, 0, 3, 3) = R;
+  m.block(0, 3, 3, 1) = t;
+  return m;
 }
 // Local to World
 // same as above, but with the inverse of the two
-inline Eigen::Matrix4d TransL2W(const Eigen::Matrix3d& R, const Eigen::Vector3d& t)
-{
-	Eigen::Matrix4d m(Eigen::Matrix4d::Identity());
-	m.block(0,0,3,3) = R.transpose();
-	m.block(0,3,3,1) = -t;
-	return m;
+inline Eigen::Matrix4d TransL2W(const Eigen::Matrix3d &R,
+                                const Eigen::Vector3d &t) {
+  Eigen::Matrix4d m(Eigen::Matrix4d::Identity());
+  m.block(0, 0, 3, 3) = R.transpose();
+  m.block(0, 3, 3, 1) = -t;
+  return m;
 }
 /*----------------------------------------------------------------*/
 
-} // namespace MVS
+} // namespace VIEWER
 
 #endif // _VIEWER_COMMON_H_

@@ -8,34 +8,30 @@
 #ifndef __SEACAVE_IMAGEJXL_H__
 #define __SEACAVE_IMAGEJXL_H__
 
-
 // D E F I N E S ///////////////////////////////////////////////////
-
 
 // I N C L U D E S /////////////////////////////////////////////////
 
 #include "Image.h"
 
-
 namespace SEACAVE {
 
 // S T R U C T S ///////////////////////////////////////////////////
 
-class IO_API CImageJXL : public CImage
-{
+class IO_API CImageJXL : public CImage {
 public:
-	CImageJXL();
-	virtual ~CImageJXL();
+  CImageJXL();
+  virtual ~CImageJXL();
 
-	void		Close();
+  void Close();
 
-	HRESULT		ReadHeader();
-	HRESULT		ReadData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
-	HRESULT		WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
-	HRESULT		WriteData(void*, PIXELFORMAT, Size nStride, Size lineWidth);
+  HRESULT ReadHeader();
+  HRESULT ReadData(void *, PIXELFORMAT, Size nStride, Size lineWidth);
+  HRESULT WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
+  HRESULT WriteData(void *, PIXELFORMAT, Size nStride, Size lineWidth);
 
 protected:
-	void*		m_state; // placeholder for JpegXL decoder/encoder state
+  void *m_state; // placeholder for JpegXL decoder/encoder state
 }; // class CImageJXL
 /*----------------------------------------------------------------*/
 

@@ -226,7 +226,7 @@ if(OpenMVS_USE_PYTHON)
 	endif()
 endif()
 
-FIND_PACKAGE(Boost REQUIRED COMPONENTS iostreams program_options system serialization OPTIONAL_COMPONENTS ${Boost_EXTRA_COMPONENTS})
+FIND_PACKAGE(Boost REQUIRED COMPONENTS iostreams program_options serialization OPTIONAL_COMPONENTS system ${Boost_EXTRA_COMPONENTS})
 if(Boost_FOUND)
 	LIST(APPEND OpenMVS_EXTRA_INCLUDES ${Boost_INCLUDE_DIRS})
 	ADD_DEFINITIONS(${Boost_DEFINITIONS})

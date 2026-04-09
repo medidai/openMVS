@@ -8,24 +8,21 @@
 #ifndef __SEACAVE_IMAGESCI_H__
 #define __SEACAVE_IMAGESCI_H__
 
-
 // I N C L U D E S /////////////////////////////////////////////////
 
 #include "Image.h"
-
 
 namespace SEACAVE {
 
 // S T R U C T S ///////////////////////////////////////////////////
 
-class IO_API CImageSCI : public CImage
-{
+class IO_API CImageSCI : public CImage {
 public:
-	CImageSCI();
-	virtual ~CImageSCI();
+  CImageSCI();
+  virtual ~CImageSCI();
 
-	HRESULT		ReadHeader();
-	HRESULT		WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
+  HRESULT ReadHeader();
+  HRESULT WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
 }; // class CImageSCI
 /*----------------------------------------------------------------*/
 
