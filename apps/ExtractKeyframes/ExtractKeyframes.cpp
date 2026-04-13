@@ -101,7 +101,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 			), "verbosity level")
 		#endif
 		#ifdef _USE_CUDA
-		("cuda-device", boost::program_options::value(&SEACAVE::CUDA::desiredDeviceID)->default_value(-1), "CUDA device number to be used for depth-map estimation (-2 - CPU/GLSL processing, -1 - best GPU, >=0 - device index)")
+		("cuda-device", boost::program_options::value<std::string>(&SEACAVE::CUDA::desiredDeviceIDs)->default_value("-1"), "CUDA device(s) for processing (-2 - CPU/GLSL processing, -1 - best GPU, >=0 - comma-separated IDs)")
 		#endif
 		;
 
@@ -227,7 +227,7 @@ int main(int argc, LPCTSTR* argv)
 	config.cameraType = (CameraType)(OPT::nCameraType+1);
 	config.refineCalibration = (KeyframeConfig::RefineCalibrationType)OPT::nRefineCalibration;
 	#ifdef _USE_CUDA
-	config.useCUDA = (SEACAVE::CUDA::desiredDeviceID > -2);
+	config.useCUDA = !SEACAVE::CUDA::desiredDeviceIDs.empty();
 	#endif
 
 	VERBOSE("Keyframe Extraction Configuration:");
@@ -245,8 +245,8 @@ int main(int argc, LPCTSTR* argv)
 		VERBOSE("  Principal point offset: (%.2f, %.2f) pixels", config.ppOffsetX, config.ppOffsetY);
 	} else {
 		VERBOSE("  Focal length: auto-calibrate from fundamental matrices");
-		VERBOSE("  Principal point: image center%s", 
-		        (config.ppOffsetX != 0 || config.ppOffsetY != 0) ? 
+		VERBOSE("  Principal point: image center%s",
+		        (config.ppOffsetX != 0 || config.ppOffsetY != 0) ?
 		        String::FormatString(" + offset (%.2f, %.2f)", config.ppOffsetX, config.ppOffsetY).c_str() : "");
 	}
 

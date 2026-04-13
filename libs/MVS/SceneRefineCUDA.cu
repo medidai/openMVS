@@ -112,11 +112,11 @@ __global__ void kernelProjectMesh(
 	if (invDet <= 0.f) return;
 
 	// Bounding box with ±0.5 padding, clamped to 5-pixel border
-	const float border = 5.f;
-	const int ixMin = max(__float2int_ru(fminf(fminf(p0.x(), p1.x()), p2.x()) - 0.5f), (int)border);
-	const int ixMax = min(__float2int_rd(fmaxf(fmaxf(p0.x(), p1.x()), p2.x()) + 0.5f), (int)xMax);
-	const int iyMin = max(__float2int_ru(fminf(fminf(p0.y(), p1.y()), p2.y()) - 0.5f), (int)border);
-	const int iyMax = min(__float2int_rd(fmaxf(fmaxf(p0.y(), p1.y()), p2.y()) + 0.5f), (int)yMax);
+	const int border = 5;
+	const int ixMin = max(__float2int_ru(fminf(fminf(p0.x(), p1.x()), p2.x()) - 0.5f), border);
+	const int ixMax = min(__float2int_rd(fmaxf(fmaxf(p0.x(), p1.x()), p2.x()) + 0.5f), camera.size.x() - border);
+	const int iyMin = max(__float2int_ru(fminf(fminf(p0.y(), p1.y()), p2.y()) - 0.5f), border);
+	const int iyMax = min(__float2int_rd(fmaxf(fmaxf(p0.y(), p1.y()), p2.y()) + 0.5f), camera.size.y() - border);
 	if (ixMin > ixMax || iyMin > iyMax) return;
 
 	const int width = camera.size.x();

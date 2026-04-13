@@ -48,6 +48,7 @@ private:
 	bool showCameraControls;
 	bool showSelectionControls;
 	bool showRenderSettings;
+	bool showBoundingBoxControls;
 	bool showConsoleOverlay;
 	bool showPerformanceOverlay;
 	bool showWorkflowOverlay;
@@ -102,6 +103,7 @@ public:
 	void ShowCameraControls(Window& window);
 	void ShowSelectionControls(Window& window);
 	void ShowRenderSettings(Window& window);
+	void ShowBoundingBoxControls(Window& window);
 	void ShowConsoleOverlay(Window& window);
 	void ShowPerformanceOverlay(Window& window);
 	void ShowWorkflowOverlay(Window& window);
@@ -115,6 +117,7 @@ public:
 	void ToggleCameraControls() { showCameraControls = !showCameraControls; }
 	void ToggleSelectionDialog() { showSelectionDialog = !showSelectionDialog; }
 	void ToggleRenderSettings() { showRenderSettings = !showRenderSettings; }
+	void ToggleBoundingBoxControls() { showBoundingBoxControls = !showBoundingBoxControls; }
 	void SetSelectionControls(bool v) { showSelectionControls = v; }
 	void SetUserFontScale(float scale);
 

@@ -56,6 +56,7 @@ UI::UI()
 	, showCameraControls(false)
 	, showSelectionControls(false)
 	, showRenderSettings(false)
+	, showBoundingBoxControls(false)
 	, showConsoleOverlay(true)
 	, showPerformanceOverlay(true)
 	, showWorkflowOverlay(true)
@@ -328,6 +329,7 @@ void UI::ShowMainMenuBar(Window& window) {
 			ImGui::MenuItem("Camera Controls", "Shift+C", &showCameraControls);
 			ImGui::MenuItem("Selection Dialog", "Shift+S", &showSelectionDialog);
 			ImGui::MenuItem("Render Settings", "Shift+R", &showRenderSettings);
+			ImGui::MenuItem("Bounding Box", "Shift+B", &showBoundingBoxControls);
 			ImGui::Separator();
 			ImGui::MenuItem("Console", nullptr, &showConsoleOverlay);
 			ImGui::MenuItem("Performance Overlay", nullptr, &showPerformanceOverlay);
@@ -342,6 +344,8 @@ void UI::ShowMainMenuBar(Window& window) {
 				ImGui::MenuItem("Wireframe", "W", &window.showMeshWireframe);
 				ImGui::MenuItem("Textured", "T", &window.showMeshTextured);
 			}
+			if (ImGui::MenuItem("Show Bounding Box", "B", &window.showBounds))
+				window.RequestRedraw();
 			ImGui::Separator();
 			if (ImGui::MenuItem("Reset Camera", "R"))
 				window.ResetView();
@@ -370,6 +374,19 @@ void UI::ShowMainMenuBar(Window& window) {
 				}
 			};
 			addWorkflowEntry("Estimate ROI", hasPoints, showEstimateROIWorkflow, "Requires calibrated images and point-cloud.");
+			if (ImGui::MenuItem("Recompute Bounding Box", "Ctrl+B", false, hasPoints && !workflowRunning))
+				window.GetScene().RunEstimateROIWorkflow(window.GetScene().GetEstimateROIWorkflowOptions());
+			else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("Run the ROI estimation workflow with the current options (same as Ctrl+B)");
+			if (ImGui::MenuItem("Set Bounding Box from Selection", nullptr, false, hasScene))
+				window.GetScene().SetROIFromSelection(false);
+			else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("Fit an oriented bounding box to the currently selected points/faces");
+			if (ImGui::MenuItem("Clear Bounding Box", nullptr, false, hasScene && mvsScene.IsBounded()))
+				window.GetScene().ClearBoundingBox();
+			else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("Remove the scene's bounding box");
+			ImGui::Separator();
 			addWorkflowEntry("Densify Point Cloud", hasImages, showDensifyWorkflow, "Requires calibrated images.");
 			addWorkflowEntry("Reconstruct Mesh", hasPoints, showReconstructWorkflow, "Requires a dense point-cloud.");
 			addWorkflowEntry("Refine Mesh", hasMesh, showRefineWorkflow, "Requires an existing mesh.");
@@ -781,6 +798,127 @@ void UI::ShowRenderSettings(Window& window) {
 	ImGui::End();
 }
 
+void UI::ShowBoundingBoxControls(Window& window) {
+	if (!showBoundingBoxControls) return;
+
+	Scene& scene = window.GetScene();
+	MVS::Scene& mvsScene = scene.GetScene();
+
+	ImGui::SetNextWindowPos(ImVec2(20, 130), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(340, 420), ImGuiCond_FirstUseEver);
+	if (ImGui::Begin("Bounding Box", &showBoundingBoxControls)) {
+		const bool hasScene = scene.IsOpen();
+		const bool hasPoints = mvsScene.pointcloud.IsValid();
+		const bool isBounded = mvsScene.IsBounded();
+		const bool workflowRunning = scene.IsWorkflowRunning();
+
+		// --- Visibility ---
+		ImGui::TextUnformatted("Visibility");
+		ImGui::Separator();
+		if (ImGui::Checkbox("Show Bounding Box", &window.showBounds))
+			window.RequestRedraw();
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Toggle (B)")) {
+			window.showBounds = !window.showBounds;
+			window.RequestRedraw();
+		}
+		ImGui::Spacing();
+
+		// --- Compute / recompute / clear ---
+		ImGui::TextUnformatted("Compute");
+		ImGui::Separator();
+		{
+			ImGui::BeginDisabled(!hasPoints || workflowRunning);
+			if (ImGui::Button("Estimate ROI (run workflow)"))
+				scene.RunEstimateROIWorkflow(scene.GetEstimateROIWorkflowOptions());
+			ImGui::EndDisabled();
+			if (!hasPoints && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("Requires a valid point-cloud");
+			else if (workflowRunning && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("A workflow is currently running");
+
+			Scene::EstimateROIWorkflowOptions& opts = scene.GetEstimateROIWorkflowOptions();
+			ImGui::DragFloat("Scale ROI", &opts.scaleROI, 0.01f, 1.0f, 5.0f, "%.2f");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Extra margin applied by EstimateROI (1.0 = no margin)");
+			const char* upAxisLabels[4] = { "auto", "X", "Y", "Z" };
+			int upAxisIdx = opts.upAxis < 0 ? 0 : (opts.upAxis + 1);
+			if (ImGui::Combo("Up axis", &upAxisIdx, upAxisLabels, 4))
+				opts.upAxis = upAxisIdx == 0 ? -1 : (upAxisIdx - 1);
+		}
+		ImGui::Spacing();
+		{
+			if (ImGui::Button("Select ROI with mouse...")) {
+				// Switch to selection control so the user can draw a region.
+				window.SetControlMode(Window::CONTROL_SELECTION);
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Enters selection mode (press 'G' to toggle). Draw a region,\n"
+					"then press 'O' or use the panel buttons bellow to fit\n"
+					"the bounding box to the selection.");
+			ImGui::BeginDisabled(!hasScene);
+			if (ImGui::Button("Set from Selection (OBB)"))
+				scene.SetROIFromSelection(false);
+			if (ImGui::Button("Set from Selection (AABB)"))
+				scene.SetROIFromSelection(true);
+			ImGui::EndDisabled();
+		}
+		ImGui::Spacing();
+		{
+			ImGui::BeginDisabled(!isBounded);
+			if (ImGui::Button("Clear Bounding Box"))
+				scene.ClearBoundingBox();
+			ImGui::EndDisabled();
+			if (!isBounded && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("No bounding box to clear");
+		}
+		ImGui::Spacing();
+
+		// --- Manual edit (numeric + 3D gizmo) ---
+		ImGui::TextUnformatted("Manual Edit");
+		ImGui::Separator();
+		if (!isBounded) {
+			ImGui::TextDisabled("(no bounding box - compute or set one first)");
+		} else {
+			// 3D gizmo edit mode toggle
+			const bool inEditMode = window.GetControlMode() == Window::CONTROL_BBOX_EDIT;
+			if (inEditMode) {
+				if (ImGui::Button("Exit Edit Mode"))
+					window.SetControlMode(Window::CONTROL_ARCBALL);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Return to camera controls. Press Esc in edit mode to cancel a drag.");
+			} else {
+				if (ImGui::Button("Enter Edit Mode (3D gizmo)"))
+					window.SetControlMode(Window::CONTROL_BBOX_EDIT);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Show draggable corner, face and rotation handles on the bounding box.\n"
+						"Left-drag to edit; Esc cancels the current drag.");
+			}
+			ImGui::Spacing();
+
+			// Numeric edit - always available. Edit a local copy, then commit
+			// through Scene::SetBoundingBox so invariants stay centralized.
+			OBB3f edited = mvsScene.obb;
+			if (BoxRotationWidget::EditOBB("##OBBEdit", edited)) {
+				scene.SetBoundingBox(edited);
+				// If the controller is active, refresh its working copy too.
+				if (inEditMode)
+					window.GetBBoxEditController().setOBB(edited);
+			}
+			ImGui::Spacing();
+			if (ImGui::SmallButton("Re-run Estimate ROI")) {
+				if (inEditMode)
+					window.SetControlMode(Window::CONTROL_ARCBALL);
+				scene.ClearBoundingBox();
+				scene.RunEstimateROIWorkflow(scene.GetEstimateROIWorkflowOptions());
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Clear the current OBB and re-run Estimate ROI");
+		}
+	}
+	ImGui::End();
+}
+
 void UI::ShowConsoleOverlay(Window& window)
 {
 	if (!showConsoleOverlay)
@@ -1158,6 +1296,20 @@ void UI::ShowHelpDialog() {
 		ImGui::Text("  C             Toggle camera frustum display");
 		ImGui::Text("  W             Toggle wireframe mesh rendering");
 		ImGui::Text("  T             Toggle textured mesh rendering");
+		ImGui::Text("  B             Toggle bounding-box display");
+		ImGui::Separator();
+
+		// Bounding Box Controls
+		ImGui::TextColored(ImVec4(1.f, 0.9f, 0.6f, 1.f), "Bounding Box:");
+		if (isMacOS) {
+			ImGui::Text("  Shift+B       Toggle Bounding Box panel");
+			ImGui::Text("  Cmd+B         Recompute via Estimate ROI");
+		} else {
+			ImGui::Text("  Shift+B       Toggle Bounding Box panel");
+			ImGui::Text("  Ctrl+B        Recompute via Estimate ROI");
+		}
+		ImGui::Text("  (From panel)  Enter 3D edit mode for draggable corner/face/rotation handles");
+		ImGui::Text("  Escape        Cancel active handle drag while editing");
 		ImGui::Separator();
 
 		// Arcball Controls
@@ -2170,6 +2322,10 @@ void UI::HandleGlobalKeys(Window& window) {
 			showRenderSettings = false;
 			return;
 		}
+		if (showBoundingBoxControls) {
+			showBoundingBoxControls = false;
+			return;
+		}
 		if (showDensifyWorkflow) {
 			showDensifyWorkflow = false;
 			return;
@@ -2851,6 +3007,9 @@ void SettingsReadLine(ImGuiContext*, ImGuiSettingsHandler* handler, void* entry,
 	else if (sscanf(line, "ShowMeshTextured=%d", &intVal) == 1) {
 		window.showMeshTextured = (intVal != 0);
 	}
+	else if (sscanf(line, "ShowBounds=%d", &intVal) == 1) {
+		window.showBounds = (intVal != 0);
+	}
 	else if (sscanf(line, "ImageOverlayOpacity=%f", &x) == 1) {
 		window.imageOverlayOpacity = x;
 	}
@@ -2890,6 +3049,7 @@ void SettingsWriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuf
 	buf->appendf("ShowCameras=%d\n", window.showCameras ? 1 : 0);
 	buf->appendf("ShowMeshWireframe=%d\n", window.showMeshWireframe ? 1 : 0);
 	buf->appendf("ShowMeshTextured=%d\n", window.showMeshTextured ? 1 : 0);
+	buf->appendf("ShowBounds=%d\n", window.showBounds ? 1 : 0);
 	buf->appendf("ImageOverlayOpacity=%f\n", window.imageOverlayOpacity);
 	buf->appendf("FontScale=%f\n", window.userFontScale);
 	buf->appendf("ArcballRenderGizmos=%d\n",

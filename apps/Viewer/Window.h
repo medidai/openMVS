@@ -35,6 +35,7 @@
 #include "ArcballControls.h"
 #include "FirstPersonControls.h"
 #include "SelectionController.h"
+#include "BoundingBoxEdit.h"
 #include "Renderer.h"
 #include "UI.h"
 
@@ -49,6 +50,7 @@ public:
 		CONTROL_ARCBALL,
 		CONTROL_FIRST_PERSON,
 		CONTROL_SELECTION,
+		CONTROL_BBOX_EDIT,
 		CONTROL_NONE
 	};
 
@@ -70,6 +72,7 @@ private:
 	std::unique_ptr<ArcballControls> arcballControls;
 	std::unique_ptr<FirstPersonControls> firstPersonControls;
 	std::unique_ptr<SelectionController> selectionController;
+	std::unique_ptr<BoundingBoxEditController> bboxEditController;
 	std::unique_ptr<Renderer> renderer;
 	std::unique_ptr<UI> ui;
 
@@ -111,6 +114,7 @@ public:
 	bool showMesh;
 	bool showMeshWireframe;
 	bool showMeshTextured;
+	bool showBounds; // draw the scene oriented bounding-box wireframe
 	std::vector<bool> meshSubMeshVisible; // control visibility of individual sub-meshes (using unsigned char instead of bool for ImGui compatibility)
 	String pendingScreenshotPath;
 	bool pendingScreenshotIncludeUI;
@@ -143,6 +147,7 @@ public:
 	ArcballControls& GetArcballControls() const { return *arcballControls; }
 	FirstPersonControls& GetFirstPersonControls() { return *firstPersonControls; }
 	SelectionController& GetSelectionController() const { return *selectionController; }
+	BoundingBoxEditController& GetBBoxEditController() const { return *bboxEditController; }
 
 	// Selection helpers
 	bool HasSelectionIds() const { return !selectionIdx.empty(); }

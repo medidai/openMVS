@@ -779,10 +779,14 @@ void SemiGlobalMatcher::Fuse(const Scene& scene, IIndex idxImage, IIndex numNeig
 			CMatrix poseC;
 			ComputeRelativePose(rightImage.camera.R, rightImage.camera.C, leftImage.camera.R, leftImage.camera.C, poseR, poseC);
 			Matrix4x4 P(Matrix4x4::IDENTITY);
+			#if defined(__GNUC__) || defined(__clang__)
 			#pragma GCC diagnostic push
 			#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+			#endif
 			AssembleProjectionMatrix(leftImage.camera.K, poseR, poseC, reinterpret_cast<PMatrix&>(P));
+			#if defined(__GNUC__) || defined(__clang__)
 			#pragma GCC diagnostic pop
+			#endif
 			Matrix4x4 invK(Matrix4x4::IDENTITY);
 			cv::Mat(rightImage.camera.GetInvK()).copyTo(cv::Mat(4,4,cv::DataType<Matrix4x4::Type>::type,invK.val)(cv::Rect(0,0,3,3)));
 			Q = P*invK*Q;

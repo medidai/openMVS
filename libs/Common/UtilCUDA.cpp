@@ -35,23 +35,29 @@ static CUresult _validateDevice(int devID, Device& device)
 		VERBOSE("CUDA error: device [%d] is not a valid GPU device (%d detected)", devID, device_count);
 		return CUDA_ERROR_INVALID_DEVICE;
 	}
-	cudaDeviceProp props;
-	if (cudaGetDeviceProperties(&props, devID) != cudaSuccess) {
-		VERBOSE("CUDA error: failed to get properties for device %d", devID);
+	int computeMode;
+	if (cudaDeviceGetAttribute(&computeMode, cudaDevAttrComputeMode, devID) != cudaSuccess) {
+		VERBOSE("CUDA error: failed to get compute mode for device %d", devID);
 		return CUDA_ERROR_INVALID_DEVICE;
 	}
-	if (props.computeMode == cudaComputeModeProhibited) {
+	if (computeMode == cudaComputeModeProhibited) {
 		VERBOSE("CUDA error: device %d is running in Compute Mode Prohibited", devID);
 		return CUDA_ERROR_INVALID_DEVICE;
 	}
-	if (props.major < 3) {
-		VERBOSE("CUDA error: device %d compute capability %d.%d < 3.0", devID, props.major, props.minor);
+	int major, minor;
+	if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, devID) != cudaSuccess ||
+		cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, devID) != cudaSuccess) {
+		VERBOSE("CUDA error: failed to get compute capability for device %d", devID);
+		return CUDA_ERROR_INVALID_DEVICE;
+	}
+	if (major < 3) {
+		VERBOSE("CUDA error: device %d compute capability %d.%d < 3.0", devID, major, minor);
 		return CUDA_ERROR_INVALID_DEVICE;
 	}
 	device.ID = devID;
-	device.major = props.major;
-	device.minor = props.minor;
-	device.computeMode = props.computeMode;
+	device.major = major;
+	device.minor = minor;
+	device.computeMode = computeMode;
 	return CUDA_SUCCESS;
 }
 
@@ -66,21 +72,29 @@ static CUresult _selectBestDevice(Device& bestDevice)
 	size_t max_perf = 0;
 	bool found = false;
 	for (int i = 0; i < device_count; ++i) {
-		cudaDeviceProp props;
-		if (cudaGetDeviceProperties(&props, i) != cudaSuccess)
+		int computeMode;
+		if (cudaDeviceGetAttribute(&computeMode, cudaDevAttrComputeMode, i) != cudaSuccess)
 			continue;
-		if (props.computeMode == cudaComputeModeProhibited || props.major < 3)
+		int major, minor;
+		if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, i) != cudaSuccess ||
+			cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, i) != cudaSuccess)
 			continue;
-		const size_t perf = (size_t)props.multiProcessorCount * props.clockRate;
+		if (computeMode == cudaComputeModeProhibited || major < 3)
+			continue;
+		int multiProcessorCount, clockRate;
+		if (cudaDeviceGetAttribute(&multiProcessorCount, cudaDevAttrMultiProcessorCount, i) != cudaSuccess ||
+			cudaDeviceGetAttribute(&clockRate, cudaDevAttrClockRate, i) != cudaSuccess)
+			continue;
+		const size_t perf = (size_t)multiProcessorCount * (size_t)clockRate;
 		if (!found ||
-			props.major > bestDevice.major ||
-			(props.major == bestDevice.major && props.minor > bestDevice.minor) ||
-			(props.major == bestDevice.major && props.minor == bestDevice.minor && perf > max_perf))
+			major > bestDevice.major ||
+			(major == bestDevice.major && minor > bestDevice.minor) ||
+			(major == bestDevice.major && minor == bestDevice.minor && perf > max_perf))
 		{
 			bestDevice.ID = i;
-			bestDevice.major = props.major;
-			bestDevice.minor = props.minor;
-			bestDevice.computeMode = props.computeMode;
+			bestDevice.major = major;
+			bestDevice.minor = minor;
+			bestDevice.computeMode = computeMode;
 			max_perf = perf;
 			found = true;
 		}
