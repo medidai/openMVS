@@ -119,6 +119,10 @@ private:
 	std::unique_ptr<VBO> boundsVBO;
 	size_t boundsPrimitiveCount;
 
+	// Bounding-box edit handles (8 corner points; reuses boundsShader)
+	std::unique_ptr<VAO> bboxHandleVAO;
+	std::unique_ptr<VBO> bboxHandleVBO;
+
 	// Coordinate axes
 	std::unique_ptr<Shader> axesShader;
 	std::unique_ptr<VAO> axesVAO;
@@ -168,6 +172,13 @@ public:
 	void RenderSelectionOverlay(const Window& window);
 	void RenderSelectedGeometry(const Window& window);
 	void RenderBounds();
+	// Render the interactive bounding-box edit gizmos: 8 corner point handles,
+	// 6 face center handles and 3 rotation rings around the OBB center.
+	// hoverAxisIdx < 0 means no rotation ring is hovered; hoverCornerIdx / hoverFaceIdx < 0 means no corner/face hover.
+	void RenderBoundingBoxGizmos(const OBB3f& obb,
+	                             int hoverCornerIdx = -1,
+	                             int hoverFaceIdx = -1,
+	                             int hoverAxisIdx = -1);
 	void RenderCoordinateAxes(const Camera& camera);
 	void RenderArcballGizmos(const Camera& camera, const class ArcballControls& controls);
 
@@ -199,8 +210,19 @@ private:
 	void SetupSelectionBuffers();
 	void SetupSelectionOverlayBuffers();
 	void SetupBoundsBuffers();
+	void SetupBBoxHandleBuffers();
 	void SetupAxesBuffers();
 	void SetupGizmoBuffers();
+
+	// Reusable unit-circle line-list builder. Generates XY-plane vertices for a
+	// closed line-loop of 'numSegments' segments with given radius, and matching
+	// line-pair indices. Used by gizmo circles (arcball + OBB rotation rings).
+	// Vertices are appended as {x,y,z} triples. Indices are offset by baseIndex
+	// so callers can append multiple shapes into the same buffer.
+	static void BuildCircleLineSegments(int numSegments, float radius,
+	                                    std::vector<float>& vertices,
+	                                    std::vector<uint32_t>& indices,
+	                                    uint32_t baseIndex = 0);
 
     // Ensure pick FBO matches requested size (creates or recreates textures/renderbuffers)
     void EnsurePickFBOSize(int width, int height);

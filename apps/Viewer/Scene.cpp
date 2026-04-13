@@ -795,16 +795,21 @@ void Scene::TogleSceneBox()
 {
 	if (!IsOpen())
 		return;
+	if (scene.IsBounded()) {
+		ClearBoundingBox();
+		return;
+	}
 	const auto EnlargeAABB = [](AABB3f aabb) {
 		return aabb.Enlarge(aabb.GetSize().maxCoeff()*0.03f);
 	};
-	if (scene.IsBounded())
-		scene.obb = OBB3f(true);
-	else if (!scene.mesh.IsEmpty())
-		scene.obb.Set(EnlargeAABB(scene.mesh.GetAABB(0.1f, 0.9f)));
+	OBB3f newObb;
+	if (!scene.mesh.IsEmpty())
+		newObb.Set(EnlargeAABB(scene.mesh.GetAABB(0.1f, 0.9f)));
 	else if (!scene.pointcloud.IsEmpty())
-		scene.obb.Set(EnlargeAABB(scene.pointcloud.GetAABB(0.1f, 0.9f)));
-	window.GetRenderer().UploadBounds(scene);
+		newObb.Set(EnlargeAABB(scene.pointcloud.GetAABB(0.1f, 0.9f)));
+	else
+		return;
+	SetBoundingBox(newObb);
 }
 
 void Scene::OnCenterScene(const Point3f& center) {
@@ -1147,26 +1152,42 @@ void Scene::SetROIFromSelection(bool aabb) {
 	if (selectedPoints.empty())
 		return;
 
-	// If AABB is requested, compute it directly
+	// Fit a new OBB to the selected points (aabb=true => axis-aligned fit)
+	OBB3f newObb;
 	if (aabb) {
-		// Compute the axis-aligned bounding box from selected points
 		AABB3f aabbBounds;
 		aabbBounds.Set(selectedPoints.data(), selectedPoints.size());
-		// Set the OBB to the computed AABB
-		scene.obb.Set(aabbBounds);
+		newObb.Set(aabbBounds);
 	} else {
-		// If OBB is requested,
-		// Use OBB3f's built-in fitting functionality to compute the optimal oriented bounding box
-		scene.obb.Set(selectedPoints.data(), selectedPoints.size(), 32);
+		// Use OBB3f's built-in fitting to compute the optimal oriented bounding box
+		newObb.Set(selectedPoints.data(), selectedPoints.size(), 32);
 	}
-	// Add a small margin by enlarging the OBB
-	const float margin = scene.obb.GetSize().maxCoeff() * 0.03f; // 3% margin
-	scene.obb.Enlarge(margin);
+	// Add a small margin
+	const float margin = newObb.GetSize().maxCoeff() * 0.03f; // 3% margin
+	newObb.Enlarge(margin);
 
-	// Update bounds rendering data
+	// Commit via the centralizing setter (handles UploadBounds + RequestRedraw)
+	SetBoundingBox(newObb);
+}
+
+// Clear the scene bounding box, invalidating it so Scene::IsBounded() returns false.
+// Centralizes the invariant: any code path that mutates scene.obb must refresh GPU
+// buffers and request a redraw. Call this from menu actions, workflows, and controllers.
+void Scene::ClearBoundingBox() {
+	if (!IsOpen())
+		return;
+	scene.obb = OBB3f(true); // zero-extent => IsValid() == false
 	window.GetRenderer().UploadBounds(scene);
+	window.RequestRedraw();
+}
 
-	// Request a redraw
+// Replace the scene bounding box and refresh GPU buffers.
+// See ClearBoundingBox() for the rationale.
+void Scene::SetBoundingBox(const OBB3f& obb) {
+	if (!IsOpen())
+		return;
+	scene.obb = obb;
+	window.GetRenderer().UploadBounds(scene);
 	window.RequestRedraw();
 }
 

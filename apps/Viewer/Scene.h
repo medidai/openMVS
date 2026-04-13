@@ -225,6 +225,8 @@ public:
 	// Geometry operations
 	void RemoveSelectedGeometry();
 	void SetROIFromSelection(bool aabb = false);
+	void ClearBoundingBox();
+	void SetBoundingBox(const OBB3f& obb);
 	MVS::Scene CropToPoints(const MVS::PointCloud::IndexArr& selectedPointIndices, unsigned minPoints = 20) const;
 
 	// Accessors

@@ -32,6 +32,7 @@
 #include "Common.h"
 #include "Renderer.h"
 #include "Scene.h"
+#include "BoundingBoxEdit.h"
 
 using namespace VIEWER;
 
@@ -275,6 +276,7 @@ void Renderer::CreateBuffers() {
 	SetupSelectionBuffers();
 	SetupSelectionOverlayBuffers();
 	SetupBoundsBuffers();
+	SetupBBoxHandleBuffers();
 	SetupAxesBuffers();
 	SetupGizmoBuffers();
 }
@@ -392,6 +394,21 @@ void Renderer::SetupBoundsBuffers() {
 	boundsVAO->Unbind();
 }
 
+// Small scratch buffer for the 8 corner + 6 face-center position markers used
+// during bounding-box edit mode. Vertex data is refreshed per-frame via
+// SetData() from the currently-edited OBB.
+void Renderer::SetupBBoxHandleBuffers() {
+	bboxHandleVAO = std::make_unique<VAO>();
+	bboxHandleVBO = std::make_unique<VBO>(GL_ARRAY_BUFFER);
+
+	bboxHandleVAO->Bind();
+
+	bboxHandleVBO->Bind();
+	bboxHandleVAO->EnableAttribute(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+
+	bboxHandleVAO->Unbind();
+}
+
 void Renderer::SetupAxesBuffers() {
 	axesVAO = std::make_unique<VAO>();
 	axesVBO = std::make_unique<VBO>(GL_ARRAY_BUFFER);
@@ -454,6 +471,26 @@ void Renderer::SetupImageOverlayBuffers() {
 	imageOverlayVAO->Unbind();
 }
 
+// Reusable circle line-segment builder (see Renderer.h for contract).
+void Renderer::BuildCircleLineSegments(int numSegments, float radius,
+                                       std::vector<float>& vertices,
+                                       std::vector<uint32_t>& indices,
+                                       uint32_t baseIndex)
+{
+	// Vertices for a closed unit circle in the local XY plane.
+	for (int i = 0; i <= numSegments; ++i) {
+		const float angle = FTWO_PI * i / numSegments;
+		vertices.push_back(COS(angle) * radius);
+		vertices.push_back(SIN(angle) * radius);
+		vertices.push_back(0.f);
+	}
+	// Line-pair indices forming the loop.
+	for (int i = 0; i < numSegments; ++i) {
+		indices.push_back(baseIndex + i);
+		indices.push_back(baseIndex + i + 1);
+	}
+}
+
 void Renderer::SetupGizmoBuffers() {
 	// Setup combined gizmo buffers for both circles and center axes
 	gizmoVAO = std::make_unique<VAO>();
@@ -466,26 +503,13 @@ void Renderer::SetupGizmoBuffers() {
 	gizmoVBO->Bind();
 	gizmoVAO->EnableAttribute(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 
-	// Generate circle geometry for trackball gizmos
+	// Generate unit-circle geometry for trackball gizmos via the shared helper.
 	const int numSegments = 64;
 	const float radius = 1.f;
 
 	std::vector<float> vertices;
 	std::vector<uint32_t> indices;
-
-	// Generate vertices for a unit circle
-	for (int i = 0; i <= numSegments; ++i) {
-		float angle = FTWO_PI * i / numSegments;
-		vertices.push_back(COS(angle) * radius); // x
-		vertices.push_back(SIN(angle) * radius); // y
-		vertices.push_back(0.f);                 // z
-	}
-
-	// Generate indices for line loop
-	for (int i = 0; i < numSegments; ++i) {
-		indices.push_back(i);
-		indices.push_back(i + 1);
-	}
+	BuildCircleLineSegments(numSegments, radius, vertices, indices, 0);
 
 	// Store index count for circles
 	gizmoCircleIndexCount = indices.size();
@@ -983,6 +1007,7 @@ void Renderer::UploadSelection(const Window& window) {
 }
 
 void Renderer::UploadBounds(const MVS::Scene& scene) {
+	boundsPrimitiveCount = 0;
 	if (!scene.IsBounded())
 		return;
 	Point3f::EVec corners[8];
@@ -1281,6 +1306,156 @@ void Renderer::RenderBounds() {
 	GL_CHECK(glDrawArrays(GL_LINES, 0, boundsPrimitiveCount));
 
 	boundsVAO->Unbind();
+}
+
+// Render the interactive bounding-box edit gizmos.
+// Drawn only while the bounding-box edit control mode is active; this routine
+// owns no state - every call re-uploads the (cheap) handle positions from
+// the provided OBB. Corners and face centers are rendered as GL_POINTS using
+// the existing boundsShader; rotation rings reuse the arcball gizmoShader/VBO
+// (unit circle) with per-axis modelMatrix transforms.
+void Renderer::RenderBoundingBoxGizmos(const OBB3f& obb,
+                                       int hoverCornerIdx,
+                                       int hoverFaceIdx,
+                                       int hoverAxisIdx)
+{
+	if (!obb.IsValid() || !boundsShader || !bboxHandleVAO || !bboxHandleVBO)
+		return;
+
+	// Gather handle world positions via the shared BoxHandleInteraction helpers
+	// so all three consumers (picking, rendering, dragging) agree on geometry.
+	Eigen::Vector3f corners[8];
+	BoxHandleInteraction::GetCornerWorldPositions(obb, corners);
+	Eigen::Vector3f faceCenters[6];
+	BoxHandleInteraction::GetFaceCenterWorldPositions(obb, faceCenters);
+
+	// Upload the 14 handle positions as a flat float array (corners 0..7
+	// followed by face centers 0..5). The layout matches the draw-time indexing.
+	std::vector<float> handleVerts;
+	handleVerts.reserve(14 * 3);
+	for (int i = 0; i < 8; ++i) {
+		handleVerts.push_back(corners[i].x());
+		handleVerts.push_back(corners[i].y());
+		handleVerts.push_back(corners[i].z());
+	}
+	for (int i = 0; i < 6; ++i) {
+		handleVerts.push_back(faceCenters[i].x());
+		handleVerts.push_back(faceCenters[i].y());
+		handleVerts.push_back(faceCenters[i].z());
+	}
+
+	bboxHandleVBO->Bind();
+	bboxHandleVBO->SetData(handleVerts);
+
+	// Depth test stays enabled so handles occlude correctly against geometry,
+	// but we disable it just for the draw so handles remain visible even when
+	// they sit inside the bounding box wireframe. This mirrors the arcball
+	// gizmo convention (always visible on top).
+	GLboolean depthWasEnabled;
+	GL_CHECK(glGetBooleanv(GL_DEPTH_TEST, &depthWasEnabled));
+	GL_CHECK(glDisable(GL_DEPTH_TEST));
+
+	boundsShader->Use();
+	bboxHandleVAO->Bind();
+
+	// --- Corner handles ---
+	{
+		const Eigen::Vector3f cornerColor(1.0f, 0.85f, 0.2f);     // warm yellow
+		const Eigen::Vector3f hoverColor (1.0f, 0.4f,  0.1f);     // bright orange
+		const float basePointSize  = 12.0f;
+		const float hoverPointSize = 18.0f;
+
+		GL_CHECK(glPointSize(basePointSize));
+		boundsShader->SetVector3("boundsColor", cornerColor);
+		GL_CHECK(glDrawArrays(GL_POINTS, 0, 8));
+
+		if (hoverCornerIdx >= 0 && hoverCornerIdx < 8) {
+			GL_CHECK(glPointSize(hoverPointSize));
+			boundsShader->SetVector3("boundsColor", hoverColor);
+			GL_CHECK(glDrawArrays(GL_POINTS, hoverCornerIdx, 1));
+		}
+	}
+
+	// --- Face-center handles ---
+	{
+		const Eigen::Vector3f faceColor (0.3f, 0.9f, 1.0f);       // cyan
+		const Eigen::Vector3f hoverColor(1.0f, 0.4f, 0.1f);       // bright orange
+		const float basePointSize  = 10.0f;
+		const float hoverPointSize = 16.0f;
+
+		GL_CHECK(glPointSize(basePointSize));
+		boundsShader->SetVector3("boundsColor", faceColor);
+		GL_CHECK(glDrawArrays(GL_POINTS, 8, 6));
+
+		if (hoverFaceIdx >= 0 && hoverFaceIdx < 6) {
+			GL_CHECK(glPointSize(hoverPointSize));
+			boundsShader->SetVector3("boundsColor", hoverColor);
+			GL_CHECK(glDrawArrays(GL_POINTS, 8 + hoverFaceIdx, 1));
+		}
+	}
+
+	bboxHandleVAO->Unbind();
+	GL_CHECK(glPointSize(1.0f));
+
+	// --- Rotation rings (3 per-axis circles) ---
+	// Reuse the arcball gizmo VAO/VBO which already holds a unit circle.
+	if (gizmoShader && gizmoVAO) {
+		gizmoVAO->Bind();
+		gizmoShader->Use();
+
+		const float ringRadius = BoxHandleInteraction::GetRotationRingRadius(obb);
+		const Eigen::Vector3f center = obb.m_pos;
+
+		// Local axes in world coordinates - row(k) of m_rot (world->local).
+		const Eigen::Matrix3f rot = obb.m_rot;
+
+		const Eigen::Vector3f baseColors[3] = {
+			Eigen::Vector3f(1.0f, 0.35f, 0.35f), // X - red
+			Eigen::Vector3f(0.35f, 1.0f, 0.35f), // Y - green
+			Eigen::Vector3f(0.35f, 0.35f, 1.0f), // Z - blue
+		};
+		const Eigen::Vector3f hoverColor(1.0f, 0.9f, 0.2f);
+
+		for (int axis = 0; axis < 3; ++axis) {
+			// Target: a circle in world space whose plane is perpendicular to
+			// the local axis 'axis'. The unit circle geometry lies in XY (z=0),
+			// so we build a frame {e1, e2, n} where n = axis direction in world,
+			// and e1, e2 span the ring plane.
+			Eigen::Vector3f n = rot.row(axis).normalized();
+			Eigen::Vector3f e1;
+			// Pick a stable helper vector to derive e1.
+			if (std::abs(n.x()) < 0.9f)
+				e1 = Eigen::Vector3f::UnitX().cross(n);
+			else
+				e1 = Eigen::Vector3f::UnitY().cross(n);
+			if (e1.norm() < 1e-6f) {
+				// Degenerate; skip this ring.
+				continue;
+			}
+			e1.normalize();
+			Eigen::Vector3f e2 = n.cross(e1);
+
+			// Build the 4x4 model matrix: columns [e1*r, e2*r, n*r, center]
+			// with homogeneous row [0 0 0 1].
+			Eigen::Matrix4f model = Eigen::Matrix4f::Identity();
+			model.block<3, 1>(0, 0) = e1 * ringRadius;
+			model.block<3, 1>(0, 1) = e2 * ringRadius;
+			model.block<3, 1>(0, 2) = n  * ringRadius;
+			model.block<3, 1>(0, 3) = center;
+
+			const bool isHovered = (hoverAxisIdx == axis);
+			gizmoShader->SetMatrix4("modelMatrix", model);
+			gizmoShader->SetVector3("gizmoColor", isHovered ? hoverColor : baseColors[axis]);
+			gizmoShader->SetFloat("opacity", isHovered ? 1.0f : 0.85f);
+
+			GL_CHECK(glDrawElements(GL_LINES, gizmoCircleIndexCount, GL_UNSIGNED_INT, 0));
+		}
+
+		gizmoVAO->Unbind();
+	}
+
+	if (depthWasEnabled)
+		GL_CHECK(glEnable(GL_DEPTH_TEST));
 }
 
 void Renderer::RenderCoordinateAxes(const Camera& camera) {

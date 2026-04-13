@@ -73,6 +73,7 @@ Window::Window()
 	, showMesh(true)
 	, showMeshWireframe(false)
 	, showMeshTextured(true)
+	, showBounds(true)
 	, pendingScreenshotIncludeUI(false)
 {
 }
@@ -174,6 +175,13 @@ bool Window::Initialize(const cv::Size& size, const String& windowTitle, Scene& 
 	arcballControls = std::make_unique<ArcballControls>(camera);
 	firstPersonControls = std::make_unique<FirstPersonControls>(camera);
 	selectionController = std::make_unique<SelectionController>(camera);
+	bboxEditController = std::make_unique<BoundingBoxEditController>(camera);
+	// Route every controller-driven OBB change through Scene::SetBoundingBox
+	// so GPU buffer refresh and redraw stay centralized in one place.
+	bboxEditController->setChangeCallback([this](const OBB3f& obb) {
+		if (GetScene().IsOpen())
+			GetScene().SetBoundingBox(obb);
+	});
 	renderer = std::make_unique<Renderer>();
 	ui = std::make_unique<UI>();
 
@@ -284,6 +292,9 @@ void Window::Run() {
 		case CONTROL_SELECTION:
 			selectionController->update(deltaTime);
 			break;
+		case CONTROL_BBOX_EDIT:
+			bboxEditController->update(deltaTime);
+			break;
 		}
 
 		#ifdef __APPLE__
@@ -392,8 +403,21 @@ void Window::Render() {
 		renderer->RenderSelection(*this);
 		renderer->RenderSelectedGeometry(*this);
 
-		// Render bounds if available
-		renderer->RenderBounds();
+		// Render bounds if visible and available
+		if (showBounds)
+			renderer->RenderBounds();
+
+		// Render the interactive bounding-box edit gizmos while edit mode is active
+		if (currentControlMode == CONTROL_BBOX_EDIT && GetScene().IsOpen()) {
+			const OBB3f& editOBB = bboxEditController->getOBB();
+			if (editOBB.IsValid()) {
+				renderer->RenderBoundingBoxGizmos(
+					editOBB,
+					bboxEditController->getHoverCornerIdx(),
+					bboxEditController->getHoverFaceIdx(),
+					bboxEditController->getHoverAxisIdx());
+			}
+		}
 
 		// Render image overlay when in camera view mode
 		renderer->RenderImageOverlays(*this);
@@ -412,6 +436,9 @@ void Window::Render() {
 
 		// Show render settings
 		ui->ShowRenderSettings(*this);
+
+		// Show bounding-box editor
+		ui->ShowBoundingBoxControls(*this);
 		ui->ShowWorkflowWindows(*this);
 	}
 
@@ -499,6 +526,13 @@ Window& Window::GetCurrentWindow()
 void Window::SetControlMode(ControlMode mode) {
 	if (currentControlMode == mode)
 		return;
+	// Leaving bounding-box edit mode mid-drag: auto-commit the working OBB so
+	// the next mode change doesn't drop user edits. Esc during drag should
+	// revert instead - see HandleKeyboard which forwards Esc to the controller.
+	if (currentControlMode == CONTROL_BBOX_EDIT && bboxEditController) {
+		if (bboxEditController->isDragging())
+			bboxEditController->commit();
+	}
 	currentControlMode = mode;
 	// Reset any control state when switching modes
 	switch (currentControlMode) {
@@ -513,6 +547,13 @@ void Window::SetControlMode(ControlMode mode) {
 		ui->SetSelectionControls(true);
 		// Don't reset selection when switching to selection mode
 		// This preserves the active selection for inspection while navigating
+		break;
+	case CONTROL_BBOX_EDIT:
+		// Seed the controller with the current scene OBB so its hover/drag
+		// math operates on the live bounding box.
+		if (GetScene().IsOpen())
+			bboxEditController->setOBB(GetScene().GetScene().obb);
+		RequestRedraw();
 		break;
 	}
 }
@@ -563,6 +604,10 @@ void Window::HandleMouseMove(double xpos, double ypos) {
 	case CONTROL_SELECTION:
 		selectionController->handleMouseMove(normalizedPos);
 		break;
+	case CONTROL_BBOX_EDIT:
+		bboxEditController->handleMouseMove(normalizedPos);
+		RequestRedraw(); // hover highlight needs a redraw to refresh
+		break;
 	}
 
 	lastMousePos = Eigen::Vector2d(xpos, ypos);
@@ -588,6 +633,10 @@ void Window::HandleMouseButton(int button, int action, int mods) {
 		break;
 	case CONTROL_SELECTION:
 		selectionController->handleMouseButton(button, action, normalizedPos, mods);
+		break;
+	case CONTROL_BBOX_EDIT:
+		bboxEditController->handleMouseButton(button, action, normalizedPos, mods);
+		RequestRedraw();
 		break;
 	}
 
@@ -642,6 +691,10 @@ void Window::HandleKeyboard(int key, int action, int mods) {
 			return;
 		case GLFW_KEY_R:
 			ui->ToggleRenderSettings();
+			RequestRedraw();
+			return;
+		case GLFW_KEY_B:
+			ui->ToggleBoundingBoxControls();
 			RequestRedraw();
 			return;
 		default:
@@ -740,6 +793,11 @@ void Window::HandleKeyboard(int key, int action, int mods) {
 				#endif
 					// Ctrl+B - Estimate ROI with default parameters
 					GetScene().RunEstimateROIWorkflow(GetScene().GetEstimateROIWorkflowOptions());
+				} else if (mods == 0 && currentControlMode != CONTROL_SELECTION) {
+					// Plain B toggles bounding-box visibility, but we reserve B
+					// for "Box selection mode" while the selection controller is active.
+					showBounds = !showBounds;
+					RequestRedraw();
 				}
 				break;
 
@@ -824,6 +882,8 @@ void Window::HandleKeyboard(int key, int action, int mods) {
 		firstPersonControls->handleKeyboard(key, action, mods);
 	else if (currentControlMode == CONTROL_SELECTION)
 		selectionController->handleKeyboard(key, action, mods);
+	else if (currentControlMode == CONTROL_BBOX_EDIT)
+		bboxEditController->handleKeyboard(key, action, mods);
 }
 
 void Window::HandleFileDrop(int count, const char** paths) {
