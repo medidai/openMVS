@@ -39,7 +39,8 @@ using namespace VIEWER;
 Renderer::Renderer()
 	: pointCount(0)
 	, pointNormalCount(0)
-	, cameraIndexCount(0)
+	, cameraPointIndexCount(0)
+	, cameraLineIndexCount(0)
 	, imageOverlayIndexCount(0)
 	, selectionPrimitiveCount(0)
 	, selectionOverlayVertexCount(0)
@@ -102,7 +103,8 @@ void Renderer::Reset() {
 	// Reset scene-dependent primitive counts
 	pointCount = 0;
 	pointNormalCount = 0;
-	cameraIndexCount = 0;
+	cameraPointIndexCount = 0;
+	cameraLineIndexCount = 0;
 	imageOverlayIndexCount = 0;
 	selectionPrimitiveCount = 0;
 	boundsPrimitiveCount = 0;
@@ -725,13 +727,15 @@ static std::array<Point3f, 4> ComputeCameraFrustumCorners(const MVS::Image& imag
 	return worldCorners;
 }
 
-// Helper function to create camera frustum geometry for a single camera
-// Returns the vertices, colors, and indices for the camera wireframe
-static void CreateCameraFrustumGeometry(
+// Helper function to create camera frustum geometry for a single camera;
+// generate the vertices, colors, and indices for the camera wireframe and
+// returns the number of indices added
+static uint32_t CreateCameraFrustumGeometry(
 	const MVS::Image& imageData,
 	float depth,
-	const Eigen::Vector3f& centerColor,
-	const Eigen::Vector3f& frustumColor,
+	bool showLookAt,
+	const Pixel32F& centerColor,
+	const Pixel32F& frustumColor,
 	std::vector<float>& vertices,
 	std::vector<float>& colors,
 	std::vector<uint32_t>& indices,
@@ -740,31 +744,17 @@ static void CreateCameraFrustumGeometry(
 	// Camera center (apex of the pyramid)
 	const Point3f center = imageData.camera.C;
 	vertices.insert(vertices.end(), {center.x, center.y, center.z});
-	colors.insert(colors.end(), {centerColor.x(), centerColor.y(), centerColor.z()});
+	colors.insert(colors.end(), {centerColor.c2, centerColor.c1, centerColor.c0});
 
-	// Get frustum corners using the helper function
-	std::array<Point3f, 4> worldCorners = ComputeCameraFrustumCorners(imageData, depth);
-
-	// Add the 4 corners to vertices and colors
-	for (int j = 0; j < 4; ++j) {
-		const Point3f& worldCorner = worldCorners[j];
+	// Get frustum corners using the helper function,
+	// add the 4 corners to vertices and colors
+	for (const Point3f& worldCorner : ComputeCameraFrustumCorners(imageData, depth)) {
 		vertices.insert(vertices.end(), {worldCorner.x, worldCorner.y, worldCorner.z});
-		colors.insert(colors.end(), {frustumColor.x(), frustumColor.y(), frustumColor.z()});
+		colors.insert(colors.end(), {frustumColor.c2, frustumColor.c1, frustumColor.c0});
 	}
 
-	// Add principal center point (green) - point on the image plane at the principal point
-	const Point2 pp = imageData.camera.GetPrincipalPoint();
-	const Point3f worldPrincipalPoint = imageData.camera.TransformPointI2W(Point3(pp.x, pp.y, depth));
-	vertices.insert(vertices.end(), {worldPrincipalPoint.x, worldPrincipalPoint.y, worldPrincipalPoint.z});
-	colors.insert(colors.end(), {0.f, 1.f, 0.f}); // Green
-
-	// Add upwards direction indicator (blue) - line showing camera's up direction
-	const Point3f worldUpPoint = imageData.camera.TransformPointI2W(Point3(pp.x, pp.y - imageData.height * 0.5f, depth)); // Half way up from center
-	vertices.insert(vertices.end(), {worldUpPoint.x, worldUpPoint.y, worldUpPoint.z});
-	colors.insert(colors.end(), {0.f, 0.f, 1.f}); // Blue
-
-	// Create indices for wireframe lines
-	// Lines from camera center to each corner (4 lines)
+	// Create indices for wireframe lines,
+	// lines from camera center to each corner (4 lines)
 	for (int j = 0; j < 4; ++j) {
 		indices.push_back(baseIndex);           // camera center
 		indices.push_back(baseIndex + 1 + j);   // corner j
@@ -775,56 +765,102 @@ static void CreateCameraFrustumGeometry(
 		indices.push_back(baseIndex + 1 + j);             // current corner
 		indices.push_back(baseIndex + 1 + ((j + 1) % 4)); // next corner
 	}
+	if (!showLookAt)
+		return 16; // 4 lines from center + 4 lines for rectangle = 8 lines = 16 indices
 
-	// Line from camera center to principal point (green indicator)
+	// Add principal center point (green) - point on the image plane at the principal point
+	const Point2 pp = imageData.camera.GetPrincipalPoint();
+	const Point3f worldPrincipalPoint = imageData.camera.TransformPointI2W(Point3(pp.x, pp.y, depth));
+	vertices.insert(vertices.end(), {worldPrincipalPoint.x, worldPrincipalPoint.y, worldPrincipalPoint.z});
+	colors.insert(colors.end(), {0.f, 1.f, 0.f}); // Green
+
+	// Add upwards direction indicator (blue) - line showing camera's up direction
+	const Point3f worldUpPoint = imageData.camera.TransformPointI2W(Point3(pp.x, pp.y - imageData.height * 0.25f, depth)); // Quarter way up from center
+	vertices.insert(vertices.end(), {worldUpPoint.x, worldUpPoint.y, worldUpPoint.z});
+	colors.insert(colors.end(), {0.f, 0.f, 1.f}); // Blue
+
+	// Line from camera center to principal point (look-at indicator).
 	indices.push_back(baseIndex);     // camera center
 	indices.push_back(baseIndex + 5); // principal point (index 5)
 
-	// Line from principal point to up direction point (blue indicator)
-	indices.push_back(baseIndex + 5); // principal point
-	indices.push_back(baseIndex + 6); // up direction point (index 6)
+	// Line from principal point to upwards direction indicator.
+	indices.push_back(baseIndex + 5); // principal point (index 5)
+	indices.push_back(baseIndex + 6); // upwards direction indicator (index 6)
+	
+	return 20; // 4 lines from center + 4 lines for rectangle + 2 lines for look-at = 10 lines = 20 indices
 }
 
 void Renderer::UploadCameras(const Window& window) {
+	cameraPointIndexCount = cameraLineIndexCount = imageOverlayIndexCount = 0;
 	if (window.GetScene().GetImages().empty())
 		return;
 	const float depth = window.GetCamera().GetSceneDistance() * window.cameraSize;
+	const bool useJetColors = window.cameraDisplayColor == Window::CAMERA_COLOR_JET;
+	const bool displayDots = window.cameraDisplayType == Window::CAMERA_DISPLAY_DOT;
+	const bool showLookAt = window.showCameraLookAt;
+	const MVS::ImageArr& images = window.GetScene().GetScene().images;
+	const ImageArr& viewerImages = window.GetScene().GetImages();
+	const size_t imageCount = viewerImages.size();
 
 	// Generate camera frustum geometry
-	cameraIndexCount = 0;
 	std::vector<float> cameraVertices;
 	std::vector<float> cameraColors;
-	std::vector<uint32_t> cameraIndices;
-	// Use white colors for normal camera rendering
-	const Eigen::Vector3f centerColor(1.f, 1.f, 1.f);   // White for center
-	const Eigen::Vector3f frustumColor(1.f, 1.f, 0.f);  // Yellow for frustum
-	for (const auto& image : window.GetScene().GetImages()) {
-		const MVS::Image& imageData = window.GetScene().GetScene().images[image.idx];
+	std::vector<uint32_t> cameraPointIndices;
+	std::vector<uint32_t> cameraLineIndices;
+	for (size_t cameraIdx = 0; cameraIdx < imageCount; ++cameraIdx) {
+		const MVS::Image& imageData = images[viewerImages[cameraIdx].idx];
 		ASSERT(imageData.IsValid());
-		// Create frustum vertices in camera coordinate system
-		size_t baseIndex = cameraVertices.size() / 3;
-		// Create camera frustum geometry using the shared function
-		CreateCameraFrustumGeometry(
+		const float colorValue = imageCount > 1 ? ((float)cameraIdx / (float)(imageCount - 1)) : 0.5f;
+		const Pixel32F cameraColor = useJetColors ? Pixel32F::gray2color(colorValue) : Pixel32F::YELLOW;
+
+		// Dot mode: draw only camera centers.
+		if (displayDots) {
+			const uint32_t baseIndex = (uint32_t)(cameraVertices.size() / 3);
+			const Point3f center = imageData.camera.C;
+			cameraVertices.insert(cameraVertices.end(), {center.x, center.y, center.z});
+			cameraColors.insert(cameraColors.end(), {cameraColor.c2, cameraColor.c1, cameraColor.c0});
+			cameraPointIndices.push_back((uint32_t)baseIndex);
+			++cameraPointIndexCount;
+			if (showLookAt) {
+				const Point2 pp = imageData.camera.GetPrincipalPoint();
+				const Point3f worldPrincipalPoint = imageData.camera.TransformPointI2W(Point3(pp.x, pp.y, depth));
+				cameraVertices.insert(cameraVertices.end(), {worldPrincipalPoint.x, worldPrincipalPoint.y, worldPrincipalPoint.z});
+				cameraColors.insert(cameraColors.end(), {0.f, 1.f, 0.f}); // Green look-at target
+				cameraLineIndices.push_back(baseIndex);
+				cameraLineIndices.push_back(baseIndex + 1);
+				cameraLineIndexCount += 2;
+			}
+			continue;
+		}
+
+		// Frustum mode: draw full camera wireframe.
+		const size_t baseIndex = cameraVertices.size() / 3;
+		cameraLineIndexCount += CreateCameraFrustumGeometry(
 			imageData,
 			depth,
-			centerColor,
-			frustumColor,
+			showLookAt,
+			cameraColor,
+			cameraColor,
 			cameraVertices,
 			cameraColors,
-			cameraIndices,
+			cameraLineIndices,
 			baseIndex
 		);
-		cameraIndexCount += 20; // 10 lines * 2 indices per line
 	}
+
+	std::vector<uint32_t> cameraIndices;
+	cameraIndices.reserve(cameraPointIndices.size() + cameraLineIndices.size());
+	cameraIndices.insert(cameraIndices.end(), cameraPointIndices.begin(), cameraPointIndices.end());
+	cameraIndices.insert(cameraIndices.end(), cameraLineIndices.begin(), cameraLineIndices.end());
+
 	// Upload camera geometry to GPU buffers
-	if (cameraIndexCount) {
+	if (!cameraIndices.empty()) {
 		cameraVBO->SetData(cameraVertices);
 		cameraColorVBO->SetData(cameraColors);
 		cameraEBO->SetData(cameraIndices);
 	}
 
 	// Collect all overlay geometry for images with valid textures
-	imageOverlayIndexCount = 0;
 	std::vector<float> allVertices;
 	std::vector<uint32_t> allIndices;
 	for (const auto& image : window.GetScene().GetImages()) {
@@ -1167,7 +1203,7 @@ void Renderer::RenderMesh(const Window& window) {
 }
 
 void Renderer::RenderCameras(const Window& window) {
-	if (cameraIndexCount == 0)
+	if (cameraPointIndexCount == 0 && cameraLineIndexCount == 0)
 		return;
 
 	cameraShader->Use();
@@ -1175,7 +1211,17 @@ void Renderer::RenderCameras(const Window& window) {
 	cameraVAO->Bind();
 	cameraEBO->Bind();
 
-	GL_CHECK(glDrawElements(GL_LINES, cameraIndexCount, GL_UNSIGNED_INT, 0));
+	if (window.cameraDisplayType == Window::CAMERA_DISPLAY_DOT) {
+		if (cameraPointIndexCount > 0)
+			GL_CHECK(glDrawElements(GL_POINTS, static_cast<GLsizei>(cameraPointIndexCount), GL_UNSIGNED_INT, 0));
+		if (window.showCameraLookAt && cameraLineIndexCount > 0) {
+			const void* lineOffset = reinterpret_cast<const void*>(cameraPointIndexCount * sizeof(uint32_t));
+			GL_CHECK(glDrawElements(GL_LINES, static_cast<GLsizei>(cameraLineIndexCount), GL_UNSIGNED_INT, lineOffset));
+		}
+	} else {
+		if (cameraLineIndexCount > 0)
+			GL_CHECK(glDrawElements(GL_LINES, static_cast<GLsizei>(cameraLineIndexCount), GL_UNSIGNED_INT, 0));
+	}
 
 	cameraVAO->Unbind();
 }

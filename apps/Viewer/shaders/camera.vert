@@ -16,5 +16,6 @@ layout (std140) uniform ViewProjection {
 void main() {
     gl_Position = viewProjection * vec4(aPos, 1.0);
     vertexColor = aColor;
+    gl_PointSize = 6.0;
 }
 )glsl"
