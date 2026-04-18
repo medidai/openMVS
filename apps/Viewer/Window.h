@@ -53,6 +53,14 @@ public:
 		CONTROL_BBOX_EDIT,
 		CONTROL_NONE
 	};
+	enum CameraDisplayColor {
+		CAMERA_COLOR_SOLID = 0,
+		CAMERA_COLOR_JET
+	};
+	enum CameraDisplayType {
+		CAMERA_DISPLAY_FRUSTUM = 0,
+		CAMERA_DISPLAY_DOT
+	};
 
 private:
 	GLFWwindow* window;
@@ -104,6 +112,9 @@ public:
 	MVS::IIndex minViews;
 	float userFontScale; // UI font scale
 	float cameraSize;
+	CameraDisplayColor cameraDisplayColor;
+	CameraDisplayType cameraDisplayType;
+	bool showCameraLookAt;
 	float pointSize;
 	float pointNormalLength;
 	float imageOverlayOpacity;

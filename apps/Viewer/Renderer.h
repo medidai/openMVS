@@ -92,7 +92,8 @@ private:
 	std::unique_ptr<Shader> cameraShader;
 	std::unique_ptr<VAO> cameraVAO;
 	std::unique_ptr<VBO> cameraVBO, cameraEBO, cameraColorVBO;
-	size_t cameraIndexCount;
+	size_t cameraPointIndexCount;
+	size_t cameraLineIndexCount;
 
 	// 3D image overlay rendering (pre-computed for all images with valid textures)
 	std::unique_ptr<Shader> imageOverlayShader;

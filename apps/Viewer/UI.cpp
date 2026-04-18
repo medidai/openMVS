@@ -490,7 +490,7 @@ void UI::ShowCameraControls(Window& window) {
 	if (!showCameraControls) return;
 
 	ImGui::SetNextWindowPos(ImVec2(1044, 100), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowSize(ImVec2(224, 296), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(224, 360), ImGuiCond_FirstUseEver);
 	if (ImGui::Begin("Camera Controls", &showCameraControls)) {
 		Camera& camera = window.GetCamera();
 
@@ -525,6 +525,38 @@ void UI::ShowCameraControls(Window& window) {
 		}
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Adjust camera size");
+
+		// Camera display color mode
+		ImGui::TextUnformatted("Camera Display Color");
+		int displayColor = (int)window.cameraDisplayColor;
+		bool cameraDisplayChanged = false;
+		if (ImGui::RadioButton("Solid##CameraDisplayColor", &displayColor, (int)Window::CAMERA_COLOR_SOLID))
+			cameraDisplayChanged = true;
+		ImGui::SameLine();
+		if (ImGui::RadioButton("Jet##CameraDisplayColor", &displayColor, (int)Window::CAMERA_COLOR_JET))
+			cameraDisplayChanged = true;
+
+		// Camera display type
+		ImGui::TextUnformatted("Camera Display Type");
+		int displayType = (int)window.cameraDisplayType;
+		if (ImGui::RadioButton("Frustum##CameraDisplayType", &displayType, (int)Window::CAMERA_DISPLAY_FRUSTUM))
+			cameraDisplayChanged = true;
+		ImGui::SameLine();
+		if (ImGui::RadioButton("Dot##CameraDisplayType", &displayType, (int)Window::CAMERA_DISPLAY_DOT))
+			cameraDisplayChanged = true;
+
+		if (ImGui::Checkbox("Show Camera LookAt", &window.showCameraLookAt))
+			cameraDisplayChanged = true;
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Show look-at direction indicator for each camera");
+
+		if (cameraDisplayChanged) {
+			window.cameraDisplayColor = (Window::CameraDisplayColor)displayColor;
+			window.cameraDisplayType = (Window::CameraDisplayType)displayType;
+			window.GetRenderer().UploadCameras(window);
+			window.GetRenderer().UploadSelection(window);
+			window.RequestRedraw();
+		}
 
 		// Arcball sensitivity controls (only show when in arcball mode)
 		if (window.GetControlMode() == Window::CONTROL_ARCBALL) {
@@ -2989,6 +3021,21 @@ void SettingsReadLine(ImGuiContext*, ImGuiSettingsHandler* handler, void* entry,
 	else if (sscanf(line, "CameraSize=%f", &x) == 1) {
 		window.cameraSize = x;
 	}
+	else if (sscanf(line, "CameraDisplayColor=%d", &intVal) == 1) {
+		window.cameraDisplayColor =
+			intVal == (int)Window::CAMERA_COLOR_JET ? Window::CAMERA_COLOR_JET : Window::CAMERA_COLOR_SOLID;
+	}
+	else if (sscanf(line, "CameraDisplayType=%d", &intVal) == 1) {
+		window.cameraDisplayType =
+			intVal == (int)Window::CAMERA_DISPLAY_DOT ? Window::CAMERA_DISPLAY_DOT : Window::CAMERA_DISPLAY_FRUSTUM;
+	}
+	else if (sscanf(line, "ShowCameraLookAt=%d", &intVal) == 1) {
+		window.showCameraLookAt = (intVal != 0);
+	}
+	else if (sscanf(line, "ShowCameraCoordinateSystem=%d", &intVal) == 1) {
+		// Backward compatibility with older saved settings key.
+		window.showCameraLookAt = (intVal != 0);
+	}
 	else if (sscanf(line, "PointSize=%f", &x) == 1) {
 		window.pointSize = x;
 	}
@@ -3041,6 +3088,9 @@ void SettingsWriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuf
 		window.clearColor[0], window.clearColor[1],
 		window.clearColor[2], window.clearColor[3]);
 	buf->appendf("CameraSize=%f\n", window.cameraSize);
+	buf->appendf("CameraDisplayColor=%d\n", (int)window.cameraDisplayColor);
+	buf->appendf("CameraDisplayType=%d\n", (int)window.cameraDisplayType);
+	buf->appendf("ShowCameraLookAt=%d\n", window.showCameraLookAt ? 1 : 0);
 	buf->appendf("PointSize=%f\n", window.pointSize);
 	buf->appendf("EstimateSfMNormals=%d\n",
 		window.GetScene().estimateSfMNormals ? 1 : 0);
