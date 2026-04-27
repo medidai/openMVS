@@ -21,9 +21,7 @@ on:
 env:
   BUILD_DIR: make
   CTEST_OUTPUT_ON_FAILURE: 1
-  CI_PARALLEL_JOBS: 2
   VCPKG_FEATURE_FLAGS: manifests,binarycaching,registries
-  VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg-cache,readwrite
   VCPKG_COMMIT: 'c3867e714dd3a51c272826eea77267876517ed99'
 
 defaults:
@@ -35,6 +33,11 @@ jobs:
     name: Build on ${{ matrix.os }}
     if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
+    # packages:write is needed to push vcpkg binary cache to GitHub Packages NuGet
+    # feed (see VCPKG_BINARY_SOURCES configuration). contents:read is the default.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -64,8 +67,38 @@ jobs:
         name: Checkout
         uses: actions/checkout@v4
 
-      - &cache-vcpkg-step
-        name: Cache vcpkg binary packages
+      - &setup-vcpkg-step
+        name: Setup vcpkg and cache artifacts
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+
+      - name: Install mono (required for nuget.exe on Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # Refresh the apt index first — fresh GH-hosted Ubuntu runners can ship
+          # with stale indices, in which case `apt-get install` fails to resolve
+          # mono-complete. The full Ubuntu dependency install step later does its
+          # own update; this duplicate update is cheap (cached) and keeps the two
+          # steps independent.
+          sudo apt-get update -y
+          sudo apt-get install -y mono-complete
+
+      # Use a NuGet feed hosted on GitHub Packages as vcpkg's binary cache. Each port
+      # is uploaded as its own NuGet package AS SOON AS IT FINISHES building — so even
+      # if the job hits the 6-hour Windows CI timeout mid-build, all completed ports
+      # are durably cached and the next trigger continues from there. This replaces
+      # the previous `x-gha` backend, which Microsoft removed from vcpkg in April 2025
+      # (vcpkg-tool PR #1662) without a drop-in replacement; NuGet on GH Packages is
+      # the migration path with equivalent per-port granularity.
+      # macOS arm64 is excluded: mono on Apple Silicon is unreliable (brew formula
+      # has been failing intermittently), and macOS builds are short enough that a
+      # source rebuild is acceptable. Windows is the real pain point this targets.
+      # On macOS we use the previous full-folder cache (files backend + actions/cache),
+      # since mono on Apple Silicon is unreliable so the NuGet path doesn't apply there.
+      # The macOS build is short enough that a single tarball at job end is acceptable.
+      - name: Cache vcpkg binary packages (macOS only)
+        if: runner.os == 'macOS'
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/vcpkg-cache
@@ -73,11 +106,59 @@ jobs:
           restore-keys: |
             vcpkg-${{ env.VCPKG_DEFAULT_TRIPLET }}-${{ env.VCPKG_COMMIT }}-
 
-      - &setup-vcpkg-step
-        name: Setup vcpkg and cache artifacts
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+      - &setup-nuget-cache-step
+        name: Configure vcpkg binary cache
+        env:
+          # GITHUB_TOKEN has packages:write on the workflow's own repository for
+          # in-repo events. On pull requests from forks the token is read-only:
+          # we still let vcpkg READ the cache (so forks benefit from already-built
+          # ports) but skip the write/setapikey path so the run doesn't fail
+          # trying to push.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUGET_FEED: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # lukka/run-vcpkg@v11 defaults VCPKG_BINARY_SOURCES to "clear;x-gha,readwrite"
+            # which references a backend Microsoft removed in April 2025. On macOS we
+            # fall back to the simple `files` backend pointing at a workspace folder,
+            # which actions/cache@v4 (set up just above) tarballs and persists between
+            # runs — same approach we used before x-gha.
+            mkdir -p "${GITHUB_WORKSPACE}/vcpkg-cache"
+            echo "VCPKG_BINARY_SOURCES=clear;files,${GITHUB_WORKSPACE}/vcpkg-cache,readwrite" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # Decide read vs readwrite mode for vcpkg's nuget backend.
+          if [ "$IS_FORK_PR" = "true" ]; then
+            NUGET_MODE=read
+            echo "Fork PR detected: vcpkg NuGet cache will be READ-ONLY (token cannot push to GitHub Packages)."
+          else
+            NUGET_MODE=readwrite
+          fi
+          # Locate the nuget binary that vcpkg ships (Windows: nuget.exe, Linux: via mono)
+          NUGET="$($VCPKG_ROOT/vcpkg fetch nuget | tail -n 1)"
+          # Register the GitHub Packages NuGet feed as a vcpkg binary source.
+          # `sources add` configures auth for both read and (if writable) write —
+          # the GH Packages NuGet endpoint requires auth even to read.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            "$NUGET" sources add -Source "$NUGET_FEED" -StorePasswordInClearText -Name GitHubPackages \
+              -UserName "${{ github.repository_owner }}" -Password "$GH_TOKEN"
+            if [ "$NUGET_MODE" = "readwrite" ]; then
+              "$NUGET" setapikey "$GH_TOKEN" -Source "$NUGET_FEED"
+            fi
+          else
+            mono "$NUGET" sources add -Source "$NUGET_FEED" -StorePasswordInClearText -Name GitHubPackages \
+              -UserName "${{ github.repository_owner }}" -Password "$GH_TOKEN"
+            if [ "$NUGET_MODE" = "readwrite" ]; then
+              mono "$NUGET" setapikey "$GH_TOKEN" -Source "$NUGET_FEED"
+            fi
+          fi
+          # Tell vcpkg to use this feed. Each port becomes its own NuGet package
+          # keyed by its computed ABI hash; partial vcpkg.json changes invalidate
+          # only the affected ports. Mode is read-only on fork PRs, readwrite on
+          # in-repo events (push, dispatch, internal PRs).
+          echo "VCPKG_BINARY_SOURCES=clear;nuget,$NUGET_FEED,$NUGET_MODE" >> "$GITHUB_ENV"
 
       - name: Install Ubuntu dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -101,12 +182,16 @@ jobs:
         run: |
           rm -rf ../vcpkg/buildtrees
           rm -rf ../vcpkg/downloads
-          cmake --build . --config ${{ env.BUILD_CONFIG }} --parallel ${{ env.CI_PARALLEL_JOBS }}
+          # Two-phase build to avoid linker memory exhaustion:
+          # Phase 1: libs at 4 threads (compile-bound, per-cl.exe RSS is modest).
+          # Phase 2: apps serially (link-bound, each link gets the full runner heap).
+          cmake --build . --config ${{ env.BUILD_CONFIG }} --parallel 4 --target MVS SFM
+          cmake --build . --config ${{ env.BUILD_CONFIG }} --parallel 1
 
       - name: Unit Tests
         working-directory: ./${{ env.BUILD_DIR }}
         run: |
-          ctest --parallel ${{ env.CI_PARALLEL_JOBS }} --build-config ${{ env.BUILD_CONFIG }}
+          ctest --parallel 2 --build-config ${{ env.BUILD_CONFIG }}
 
       - name: Deploy release
         uses: actions/upload-artifact@v4
@@ -123,6 +208,7 @@ jobs:
       contents: read
       security-events: write
       actions: read
+      packages: write
     env:
       VCPKG_DEFAULT_TRIPLET: x64-windows-release
       BUILD_CONFIG: Release
@@ -130,8 +216,8 @@ jobs:
 
     steps:
       - *checkout-step
-      - *cache-vcpkg-step
       - *setup-vcpkg-step
+      - *setup-nuget-cache-step
       - *configure-step
       - *build-step
 

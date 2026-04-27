@@ -1567,12 +1567,6 @@ bool CubeMapBridgeMVSLoadTest()
 		img.fileName = path;
 	}
 
-	// Copy track observations into the track's inlier list so ExportMVS
-	// sees them (the helper leaves numInliers = observations.size() already).
-	for (Track& t : scene.tracks) {
-		ASSERT(t.numInliers == t.observations.size());
-	}
-
 	// Export the scene with the cube-map bridge. The face files land
 	// alongside the .mvs output (no undistort dir provided).
 	const String mvsPath = String(tmpDir.string()) + _T("/scene.mvs");
@@ -3879,7 +3873,6 @@ bool GlobalAlignmentMergeSingleSceneTest()
 	std::vector<size_t> origKeypointCounts(scene.images.size());
 	for (unsigned i = 0; i < scene.images.size(); ++i)
 		origKeypointCounts[i] = scene.images[i].keypoints.size();
-	const unsigned origPairCount = (unsigned)scene.pairs.size();
 
 	// Save GT poses
 	std::vector<Pose3D> gtPoses(scene.images.size());
@@ -4011,7 +4004,6 @@ bool GlobalAlignmentTrackMergeDuplicateImageGuardTest()
 	// The union-find is in MergeTracksWithCrossSubScenePairs which is private.
 	// We verify via output: after the full merge, tracks A and B should stay separate.
 
-	const unsigned tracksBefore = (unsigned)scene.tracks.size();
 	// Since we can't call MergeTracksWithCrossSubScenePairs directly,
 	// verify the guard conceptually: both tracks share image 2,
 	// so they CANNOT be merged. Count tracks sharing image 2.

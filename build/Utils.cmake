@@ -158,7 +158,7 @@ macro(GetOperatingSystemArchitectureBitness)
 	elseif(CMAKE_SYSTEM_PROCESSOR MATCHES i686.*|i386.*|x86.*)
 		set(X86 1)
 	endif()
-	
+
 	if(NOT ${MY_VAR_PREFIX}_PACKAGE_REQUIRED)
 		set(${MY_VAR_PREFIX}_PACKAGE_REQUIRED "REQUIRED")
 	endif()
@@ -512,7 +512,7 @@ macro(optimize_default_compiler_settings)
 	  endif()
 	  add_extra_compiler_option(-fdiagnostics-show-option)
 	  add_extra_compiler_option(-ftemplate-backtrace-limit=0)
-	  
+
 	  # The -Wno-long-long is required in 64bit systems when including system headers.
 	  if(X86_64)
 		add_extra_compiler_option(-Wno-long-long)
@@ -664,6 +664,22 @@ macro(optimize_default_compiler_settings)
 
 	  # enable __cplusplus
 	  set(BUILD_EXTRA_FLAGS "${BUILD_EXTRA_FLAGS} /Zc:__cplusplus")
+
+	  # Multi-process compilation: spawns one cl.exe child per core to compile TUs of
+	  # a single vcxproj in parallel. Without this, ClCompile runs TUs serially and
+	  # MSBuild's /m parallelism is wasted on projects with many sources (SFM: 31 .cpp,
+	  # MVS: 19, Viewer: 15). Huge win on full project builds.
+	  # NOTE: /MP alone is enough; do NOT combine with /cgthreads>1, as /MP * /cgthreads
+	  # oversubscribes the CPU (e.g. 24 cl.exe * 8 threads on a 16-core box -> thrash).
+	  set(BUILD_EXTRA_FLAGS "${BUILD_EXTRA_FLAGS} /MP")
+
+	  # Bound optimizer time on huge generated functions. Undocumented but widely used
+	  # (Chromium, Unreal). CRITICAL for MVS: without it, cl.exe hangs indefinitely in
+	  # the optimizer on large TUs like Scene.cpp / SceneTexture.cpp / SceneRefine.cpp
+	  # / Camera.cpp (observed with MSVC 14.50 on i7-13700K, 10+ min per TU with no
+	  # progress). No effect at /Od; kicks in only for optimized (Release/RelWithDebInfo)
+	  # builds where cl.exe's optimizer would otherwise spin on pathological inlining.
+	  set(BUILD_EXTRA_FLAGS "${BUILD_EXTRA_FLAGS} /d2ReducedOptimizeHugeFunctions")
 	endif()
 
 	# Fix macOS linker warnings about reducing alignment from 0x8000 to 0x4000
@@ -751,11 +767,15 @@ macro(fix_default_compiler_settings)
 				string(REPLACE "/MD" "-MT" ${flag_var} "${${flag_var}}")
 			endforeach()
 		endif()
-		# Set WholeProgramOptimization flags for release
-		SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /GL")
-		SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /GL")
-		SET(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
-		SET(CMAKE_MODULE_LINKER_FLAGS_RELEASE "${CMAKE_MODULE_LINKER_FLAGS_RELEASE} /LTCG")
+		# Whole-program optimization (/GL + /LTCG) for Release, gated on OpenMVS_ENABLE_IPO.
+		# When OFF, dependent EXE link times drop dramatically because linker can skip
+		# codegen of IL-form .obj files produced by /GL libs.
+		if(OpenMVS_ENABLE_IPO)
+			SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /GL")
+			SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /GL")
+			SET(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
+			SET(CMAKE_MODULE_LINKER_FLAGS_RELEASE "${CMAKE_MODULE_LINKER_FLAGS_RELEASE} /LTCG")
+		endif()
 	endif()
 	# Save libs and executables in the same place
 	SET(LIBRARY_OUTPUT_PATH "${CMAKE_BINARY_DIR}/lib${PACKAGE_LIB_SUFFIX}" CACHE PATH "Output directory for libraries")
@@ -817,7 +837,7 @@ macro(ConfigCompilerAndLinker)
   else()
     set(cxx_rtti_support "${cxx_no_rtti_flags}")
   endif()
-  
+
   set(cxx_default "${cxx_exception_support} ${cxx_rtti_support}" CACHE PATH "Common compile CXX flags")
   set(c_default "${CMAKE_C_FLAGS} ${cxx_base_flags}" CACHE PATH "Common compile C flags")
 
@@ -854,7 +874,7 @@ endmacro()
 
 function(create_rc_files name)
   # Create the manifest file
-  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/app.manifest" 
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/app.manifest"
     "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
     <assembly manifestVersion='1.0' xmlns='urn:schemas-microsoft-com:asm.v1'>
       <assemblyIdentity type='win32' name='${name}' version='1.0.0.0'/>
@@ -915,12 +935,22 @@ function(cxx_library_with_type name folder type cxx_flags)
   endif()
 endfunction()
 
-# cxx_executable_with_flags(name cxx_flags libs srcs...)
+# cxx_executable_with_flags(name cxx_flags libs [DISABLE_IPO] srcs...)
 #
 # creates a named C++ executable that depends on the given libraries and
 # is built from the given source files with the given compiler flags.
+# If DISABLE_IPO is specified, interprocedural optimization is disabled for this target on Windows.
 function(cxx_executable_with_flags name folder cxx_flags libs)
-  add_executable("${name}" ${ARGN})
+  set(disable_ipo OFF)
+  set(source_files ${ARGN})
+
+  # Check if DISABLE_IPO keyword is present
+  if("DISABLE_IPO" IN_LIST source_files)
+    list(REMOVE_ITEM source_files "DISABLE_IPO")
+    set(disable_ipo ON)
+  endif()
+
+  add_executable("${name}" ${source_files})
   if (cxx_flags)
     set_target_properties("${name}" PROPERTIES COMPILE_FLAGS "${cxx_flags}")
   endif()
@@ -931,9 +961,23 @@ function(cxx_executable_with_flags name folder cxx_flags libs)
   endforeach()
   # Set project folder
   set_target_properties("${name}" PROPERTIES FOLDER "${folder}")
+
+  # Disable IPO and LTO flags for this target if requested (useful for slow builds on Windows).
+  # /GL and /LTCG are appended globally to CMAKE_*_FLAGS_RELEASE in fix_default_compiler_settings(),
+  # NOT to any per-target COMPILE_FLAGS / LINK_FLAGS. Stripping those target properties is a no-op.
+  # Instead we append MSVC's documented negations, which override earlier occurrences (last wins):
+  #   /GL-      disables whole-program optimization at compile time
+  #   /LTCG:OFF disables link-time code generation at link time
+  # Both are per-config (Release only) since the globals only inject /GL and /LTCG in Release.
+  if(disable_ipo AND MSVC)
+    set_property(TARGET "${name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+    target_compile_options("${name}" PRIVATE $<$<CONFIG:Release>:/GL->)
+    target_link_options("${name}" PRIVATE $<$<CONFIG:Release>:/LTCG:OFF>)
+  endif()
+
   if (MSVC)
-    # Check if any of the files listed in ARGN has the extension .rc
-    foreach (file ${ARGN})
+    # Check if any of the files listed in source_files has the extension .rc
+    foreach (file ${source_files})
       if (file MATCHES "\\.rc$")
         set_target_properties("${name}" PROPERTIES LINK_FLAGS "/MANIFEST:NO")
         break()

@@ -96,6 +96,9 @@ bool UnitTests()
 // test OpenMVS functionality
 int main(int argc, LPCTSTR* argv)
 {
+	// Line-buffer stdout/stderr so CI logs are flushed per line and not lost on SIGKILL
+	std::setvbuf(stdout, NULL, _IOLBF, 0);
+	std::setvbuf(stderr, NULL, _IOLBF, 0);
 	OPEN_LOG();
 	OPEN_LOGCONSOLE();
 	Initialize(APPNAME);
