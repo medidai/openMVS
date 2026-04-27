@@ -1,7 +1,7 @@
 {
   "name": "poselib",
   "version-date": "2026-04-22",
-  "port-version": 1,
+  "port-version": 2,
   "description": "Minimal solvers for calibrated camera pose estimation. Pinned to cdcseacave/PoseLib commit 53acfda7b889f01f86a377a27dd5b3500a7d06d5 from feature/spherical-camera-support, with unified bearing-vector estimate_* API for pinhole and spherical (equirectangular) cameras.",
   "homepage": "https://github.com/PoseLib/PoseLib",
   "license": "BSD-3-Clause",

@@ -5,7 +5,7 @@ Dependencies
 *OpenMVS* relies on a number of open source libraries, some optional, which are managed automatically by [vcpkg](https://github.com/Microsoft/vcpkg). For details on customizing the build process, see the build instructions.
 * [Eigen](http://eigen.tuxfamily.org) version 3.4 or higher
 * [OpenCV](http://opencv.org) version 2.4 or higher
-* [Ceres](http://ceres-solver.org) version 1.10 or higher (optional)
+* [Ceres](http://ceres-solver.org) version 1.10 or higher (required for the native Structure-from-Motion module; optional otherwise)
 * [CGAL](http://www.cgal.org) version 4.2 or higher
 * [Boost](http://www.boost.org) version 1.56 or higher
 * [CUDA](https://developer.nvidia.com/cuda-downloads) (optional)
@@ -22,7 +22,7 @@ Required tools:
 
 The dependencies can be fetched and built automatically using `vcpkg` on all major platform, by setting the environment variable `VCPKG_ROOT` to point to its path or by using the `cmake` parameter `-DCMAKE_TOOLCHAIN_FILE=[path to vcpkg]/scripts/buildsystems/vcpkg.cmake`.
 
-The latest pre-built stable binaries can be download from [here](https://github.com/cdcseacave/openMVS_sample/releases/latest).
+Pre-built stable binaries for every supported platform (Windows x64, Windows x64 with CUDA, Ubuntu x64 and macOS arm64) are published with each tagged release on the [OpenMVS releases page](https://github.com/cdcseacave/openMVS/releases/latest).
 
 ```
 #Install necesary system packages, for ex. on Debian OS:

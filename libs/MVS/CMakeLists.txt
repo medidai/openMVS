@@ -39,6 +39,41 @@ cxx_library_with_type(MVS "Libs" "" "${cxx_default}"
 	${CUDA_LIBRARY_FILES_C} ${CUDA_LIBRARY_FILES_H}
 )
 
+# MSVC scalpel: Camera.cpp and Scene.cpp drag in a template graph (CGAL/Eigen/OpenCV)
+# that lands MSVC's optimizer in a pathological codegen path. Camera.cpp takes ~3 min
+# and Scene.cpp ~10 min under /O2 at this template depth.
+#
+# Policy:
+#   * Release       — full /O2 (no override). Long compile accepted; see warning below.
+#   * RelWithDebInfo/Debug — /Od for just these two files, keeping dev builds under 30 min.
+#
+# Implementation notes:
+#   * PCH for MVS is built with /O2, so /Od on a TU reusing that PCH triggers warning
+#     C4653 and cl.exe silently snaps the TU back to /O2 — the /Od becomes a no-op.
+#     To actually apply /Od we must also skip the PCH on these files.
+#   * SKIP_PRECOMPILE_HEADERS is set unconditionally (no genex): in Release it means
+#     Camera/Scene re-parse Common.h instead of reusing the PCH (2-3s overhead, dwarfed
+#     by the 10+ min optimizer cost), and in non-Release it enables the /Od override.
+if(MSVC)
+	set_source_files_properties(
+		"${CMAKE_CURRENT_SOURCE_DIR}/Camera.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Scene.cpp"
+		PROPERTIES
+			COMPILE_OPTIONS "$<$<NOT:$<CONFIG:Release>>:/Od>"
+			SKIP_PRECOMPILE_HEADERS ON
+	)
+	message(WARNING "MVS build speed notice:\n"
+	        "  * Release builds compile Camera.cpp and Scene.cpp at full /O2. These two\n"
+	        "    files alone can add 10-20 min to Release wall time due to heavy\n"
+	        "    CGAL/Eigen/OpenCV template instantiation.\n"
+	        "  * RelWithDebInfo (and Debug) use /Od for just these two files to keep\n"
+	        "    dev-iteration builds under ~30 min; the rest of the project stays at /O2.\n"
+	        "  * To speed up Release at the cost of slightly-less-optimized Camera/Scene,\n"
+	        "    edit libs/MVS/CMakeLists.txt and change the COMPILE_OPTIONS line to:\n"
+	        "        COMPILE_OPTIONS \"/Od\"\n"
+	        "    (remove the $<NOT:$<CONFIG:Release>> generator expression).")
+endif()
+
 # Manually set Common.h as the precompiled header
 IF(CMAKE_VERSION VERSION_GREATER_EQUAL 3.16.0)
 	TARGET_PRECOMPILE_HEADERS(MVS PRIVATE "Common.h")

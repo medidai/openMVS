@@ -6,12 +6,18 @@ vcpkg_from_github(
     HEAD_REF feature/spherical-camera-support
 )
 
+# PoseLib headers do not export symbols (no __declspec(dllexport)),
+# so a Windows DLL build produces no import library. Force static linkage on Windows only.
+if(VCPKG_TARGET_IS_WINDOWS)
+    vcpkg_check_linkage(ONLY_STATIC_LIBRARY)
+endif()
+
 vcpkg_cmake_configure(
     SOURCE_PATH "${SOURCE_PATH}"
     OPTIONS
         -DMARCH_NATIVE=OFF
         -DWITH_BENCHMARK=OFF
-        -DBUILD_TESTS=ON
+        -DBUILD_TESTS=OFF
         -DPYTHON_PACKAGE=OFF
 )
 vcpkg_cmake_install()

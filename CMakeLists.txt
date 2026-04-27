@@ -128,10 +128,20 @@ if(OpenMVS_ENABLE_IPO)
 	INCLUDE(CheckIPOSupported)
 	check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
 	if(IPO_SUPPORTED)
-		SET_PROPERTY(GLOBAL PROPERTY CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-		MESSAGE(STATUS "Interprocedural optimization enabled")
+		# On MSVC, /GL + /LTCG are injected into the global Release flags by
+		# fix_default_compiler_settings() in build/Utils.cmake; do not also set
+		# CMAKE_INTERPROCEDURAL_OPTIMIZATION there, otherwise the per-target
+		# DISABLE_IPO opt-out (/GL- + /LTCG:OFF) becomes inconsistent.
+		# On non-MSVC toolchains we rely on CMake's IPO/LTO mechanism instead.
+		if(NOT MSVC)
+			SET_PROPERTY(GLOBAL PROPERTY CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+			MESSAGE(STATUS "Interprocedural optimization enabled (CMake IPO/LTO)")
+		else()
+			MESSAGE(STATUS "Interprocedural optimization enabled (MSVC: /GL + /LTCG in Release)")
+		endif()
 	else()
 		MESSAGE(WARNING "Interprocedural optimization is not supported: ${IPO_ERROR}")
+		SET(OpenMVS_ENABLE_IPO OFF CACHE BOOL "Whether to enable interprocedural optimization" FORCE)
 	endif()
 endif()
 
