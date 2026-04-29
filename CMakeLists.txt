@@ -57,8 +57,20 @@ IF(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
 		SET(VCPKG_TARGET_TRIPLET "$ENV{VCPKG_DEFAULT_TRIPLET}" CACHE STRING "")
 	ENDIF()
 ENDIF()
+
 # Add local ports to overlay
 SET(VCPKG_OVERLAY_PORTS "${CMAKE_SOURCE_DIR}/ports")
+
+# Define helper functions and macros (must come before the project() call
+# below: the opencv4 overlay generator declared in Utils.cmake mutates
+# VCPKG_OVERLAY_PORTS, which the vcpkg toolchain consumes during project()).
+INCLUDE(build/Utils.cmake)
+
+# On Linux: regenerate a build-tree opencv4 overlay against the upstream port
+# at $VCPKG_ROOT and append it to VCPKG_OVERLAY_PORTS. Skipped on
+# Windows/macOS — see Utils.cmake for the full rationale.
+OpenMVS_GenerateOpencv4Overlay(VCPKG_OVERLAY_PORTS)
+
 IF(OpenMVS_BUILD_TOOLS AND OpenMVS_BUILD_VIEWER)
 	LIST(APPEND VCPKG_MANIFEST_FEATURES "viewer")
 ENDIF()
@@ -107,8 +119,42 @@ SET(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Set global property to avoid cyclic dependencies.
 SET_PROPERTY(GLOBAL PROPERTY GLOBAL_DEPENDS_NO_CYCLES ON)
 
-# Define helper functions and macros.
-INCLUDE(build/Utils.cmake)
+# Co-locate executables and DLLs so apps find dependent shared libraries at runtime
+# (Windows resolves DLLs via the executable's directory). Multi-config generators
+# automatically append per-config subfolders (e.g. bin/Release).
+IF(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+	SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+ENDIF()
+IF(NOT CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+	SET(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+ENDIF()
+IF(NOT CMAKE_ARCHIVE_OUTPUT_DIRECTORY)
+	SET(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+ENDIF()
+
+# Hidden symbol visibility on non-Windows so explicit *_API macros control the export
+# surface uniformly across MSVC / GCC / Clang (matches the __declspec(dllexport) model).
+SET(CMAKE_CXX_VISIBILITY_PRESET hidden)
+SET(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+
+# build/Utils.cmake was already included above (it must run before project()
+# so the opencv4 overlay generator can append to VCPKG_OVERLAY_PORTS before
+# the vcpkg toolchain consumes it). Among other things, it declares
+# OPTION(BUILD_SHARED_LIBS ...), so the OPENMVS_SHARED / IPO logic that
+# follows can rely on BUILD_SHARED_LIBS being defined here.
+# Tell C++ code we are building shared libraries, so headers (e.g. Types.h) can
+# pick the cross-DLL-friendly path for things like boost exception-unwinding.
+IF(BUILD_SHARED_LIBS)
+	ADD_COMPILE_DEFINITIONS(OPENMVS_SHARED)
+	# MSVC's /GL+/LTCG is catastrophic on shared builds: the linker tries to
+	# re-do whole-program optimization across each DLL's .obj graph, peaking at
+	# 30-40 GB RAM and many minutes per DLL link. Per-DLL native code is fine
+	# without IPO; force-disable here so the user doesn't have to remember.
+	IF(OpenMVS_ENABLE_IPO)
+		MESSAGE(STATUS "Disabling OpenMVS_ENABLE_IPO under BUILD_SHARED_LIBS=ON (IPO under shared builds is memory-pathological).")
+	ENDIF()
+	SET(OpenMVS_ENABLE_IPO OFF CACHE BOOL "Whether to enable interprocedural optimization" FORCE)
+ENDIF()
 
 # Init session with macros defined in Utils.cmake
 GetOperatingSystemArchitectureBitness(SYSTEM)
@@ -253,7 +299,7 @@ if(OpenMVS_USE_PYTHON)
 	endif()
 endif()
 
-FIND_PACKAGE(Boost REQUIRED COMPONENTS iostreams program_options system serialization OPTIONAL_COMPONENTS ${Boost_EXTRA_COMPONENTS})
+FIND_PACKAGE(Boost REQUIRED COMPONENTS iostreams program_options system serialization exception OPTIONAL_COMPONENTS ${Boost_EXTRA_COMPONENTS})
 if(Boost_FOUND)
 	ADD_DEFINITIONS(${Boost_DEFINITIONS})
 	LIST(APPEND OpenMVS_EXTRA_LIBS ${Boost_LIBRARIES})
