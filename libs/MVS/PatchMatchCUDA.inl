@@ -83,6 +83,8 @@ private:
 	void AllocatePatchMatchCUDA(const cv::Mat1f& image);
 	void AllocateImageCUDA(size_t i, const cv::Mat1f& image, bool bInitImage, bool bInitDepthMap);
 	void RunCUDA(float* ptrCostMap=NULL, uint32_t* ptrViewsMap=NULL);
+	void UploadCameras(); // upload host cameras into __constant__ g_cameras
+	void UploadParams();  // upload host params into __constant__ g_params
 
 public:
 	Params params;
@@ -93,7 +95,6 @@ public:
 	std::vector<cudaTextureObject_t> textureDepths;
 	Point4* depthNormalEstimates;
 
-	Camera *cudaCameras;
 	std::vector<cudaArray_t> cudaImageArrays;
 	std::vector<cudaArray_t> cudaDepthArrays;
 	cudaTextureObject_t* cudaTextureImages;
@@ -103,6 +104,9 @@ public:
 	float* cudaDepthNormalCosts;
 	curandState* cudaRandStates;
 	uint32_t* cudaSelectedViews;
+	// per-instance stream: scopes kernel launches and syncs to this PatchMatch
+	// instead of fencing the whole device, and enables async H<->D transfers
+	cudaStream_t cudaStream;
 };
 /*----------------------------------------------------------------*/
 

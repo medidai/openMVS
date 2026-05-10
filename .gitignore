@@ -40,5 +40,6 @@ out/
 bin*/
 make*/
 build-*/
+bench*/
 tmp/
 build/

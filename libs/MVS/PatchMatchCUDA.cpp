@@ -36,7 +36,6 @@
 #ifdef _USE_CUDA
 
 
-
 // D E F I N E S ///////////////////////////////////////////////////
 
 #pragma push_macro("VERBOSE")
@@ -52,16 +51,39 @@ namespace MVS {
 
 namespace CUDA {
 
+// In-flight counter for the CUDA backend. The kernels read cameras/params
+// from module-global __constant__ memory (g_cameras / g_params, see
+// PatchMatchCUDA.cu), which is shared by every PatchMatch instance on the
+// device. Concurrent overlap would race; this guards EstimateDepthMap
+// against accidentally being run from two threads at once.
+namespace {
+std::atomic<int> g_patchMatchCudaInFlight{0};
+struct PatchMatchCudaInFlightGuard {
+	PatchMatchCudaInFlightGuard() {
+		const int prev = g_patchMatchCudaInFlight.fetch_add(1, std::memory_order_acq_rel);
+		ASSERT(prev == 0, "PatchMatchCUDA must be single-in-flight per device "
+			"(g_cameras/g_params live in shared __constant__ memory).");
+	}
+	~PatchMatchCudaInFlightGuard() {
+		g_patchMatchCudaInFlight.fetch_sub(1, std::memory_order_acq_rel);
+	}
+};
+} // anonymous namespace
+
 PatchMatch::PatchMatch()
+	: cudaStream(0)
 {
 	// initialize CUDA device if needed
 	if (SEACAVE::CUDA::devices.IsEmpty())
 		SEACAVE::CUDA::initDevices(SEACAVE::CUDA::desiredDeviceIDs);
+	CUDA_CHECK(cudaStreamCreate(&cudaStream));
 }
 
 PatchMatch::~PatchMatch()
 {
 	Release();
+	if (cudaStream)
+		cudaStreamDestroy(cudaStream);
 }
 
 void PatchMatch::Release()
@@ -92,15 +114,16 @@ void PatchMatch::Release()
 void PatchMatch::ReleaseCUDA()
 {
 	cudaFree(cudaTextureImages);
-	cudaFree(cudaCameras);
 	cudaFree(cudaDepthNormalEstimates);
 	cudaFree(cudaDepthNormalCosts);
 	cudaFree(cudaRandStates);
 	cudaFree(cudaSelectedViews);
 	if (params.bGeomConsistency)
 		cudaFree(cudaTextureDepths);
-
-	delete[] depthNormalEstimates;
+	if (depthNormalEstimates) {
+		cudaFreeHost(depthNormalEstimates);
+		depthNormalEstimates = NULL;
+	}
 }
 
 void PatchMatch::Init(bool bGeomConsistency)
@@ -118,12 +141,12 @@ void PatchMatch::AllocatePatchMatchCUDA(const cv::Mat1f& image)
 {
 	const size_t num_images = images.size();
 	CUDA_CHECK(cudaMalloc((void**)&cudaTextureImages, sizeof(cudaTextureObject_t) * num_images));
-	CUDA_CHECK(cudaMalloc((void**)&cudaCameras, sizeof(Camera) * num_images));
 	if (params.bGeomConsistency)
 		CUDA_CHECK(cudaMalloc((void**)&cudaTextureDepths, sizeof(cudaTextureObject_t) * (num_images-1)));
 
 	const size_t size = image.size().area();
-	depthNormalEstimates = new Point4[size];
+	// pin estimates buffer so the H<->D copies on cudaStream run as true DMA-async without driver staging
+	CUDA_CHECK(cudaHostAlloc((void**)&depthNormalEstimates, sizeof(Point4) * size, cudaHostAllocDefault));
 	CUDA_CHECK(cudaMalloc((void**)&cudaDepthNormalEstimates, sizeof(Point4) * size));
 
 	CUDA_CHECK(cudaMalloc((void**)&cudaDepthNormalCosts, sizeof(float) * size));
@@ -183,6 +206,7 @@ void PatchMatch::AllocateImageCUDA(size_t i, const cv::Mat1f& image, bool bInitI
 void PatchMatch::EstimateDepthMap(DepthData& depthData)
 {
 	TD_TIMER_STARTD();
+	const PatchMatchCudaInFlightGuard inFlightGuard;
 
 	ASSERT(depthData.images.size() > 1);
 
@@ -219,10 +243,11 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 		if (scaleNumber != totalScaleNumber) {
 			// all resolutions, but the smallest one, if multi-resolution is enabled
 			params.bLowResProcessed = true;
-			cv::resize(lowResDepthMap, depthData.depthMap, size, 0, 0, cv::INTER_LINEAR);
+			// INTER_NEAREST preserves [dMin, dMax] / normalized-normals / correct-view-IDs
+			cv::resize(lowResDepthMap, depthData.depthMap, size, 0, 0, cv::INTER_NEAREST);
 			cv::resize(lowResNormalMap, depthData.normalMap, size, 0, 0, cv::INTER_NEAREST);
 			cv::resize(lowResViewsMap, depthData.viewsMap, size, 0, 0, cv::INTER_NEAREST);
-			CUDA_CHECK(cudaMalloc((void**)&cudaLowDepths, sizeof(float) * size.area()));
+			CUDA_CHECK(cudaMallocAsync((void**)&cudaLowDepths, sizeof(float) * size.area(), cudaStream));
 		} else {
 			if (totalScaleNumber > 0) {
 				// smallest resolution, when multi-resolution is enabled
@@ -297,13 +322,15 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 				}
 				AllocateImageCUDA(i, image, false, !view.depthMap.empty());
 			}
-			CUDA_CHECK(cudaMemcpy2DToArray(cudaImageArrays[i], 0, 0, image.ptr<float>(), image.step[0], image.cols * sizeof(float), image.rows, cudaMemcpyHostToDevice));
+			// queued on cudaStream so the kernel does not need a device fence;
+			// pageable cv::Mat still stalls the host but ordering is stream-scoped
+			CUDA_CHECK(cudaMemcpy2DToArrayAsync(cudaImageArrays[i], 0, 0, image.ptr<float>(), image.step[0], image.cols * sizeof(float), image.rows, cudaMemcpyHostToDevice, cudaStream));
 			if (params.bGeomConsistency && i > 0 && !view.depthMap.empty()) {
 				// set previously computed depth-map
 				DepthMap depthMap(view.depthMap);
 				if (depthMap.size() != image.size())
 					cv::resize(depthMap, depthMap, image.size(), 0, 0, cv::INTER_LINEAR);
-				CUDA_CHECK(cudaMemcpy2DToArray(cudaDepthArrays[i-1], 0, 0, depthMap.ptr<float>(), depthMap.step[0], sizeof(float) * depthMap.cols, depthMap.rows, cudaMemcpyHostToDevice));
+				CUDA_CHECK(cudaMemcpy2DToArrayAsync(cudaDepthArrays[i-1], 0, 0, depthMap.ptr<float>(), depthMap.step[0], sizeof(float) * depthMap.cols, depthMap.rows, cudaMemcpyHostToDevice, cudaStream));
 			}
 			images[i] = std::move(image);
 			cameras[i] = std::move(camera);
@@ -330,13 +357,13 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 		}
 		prevNumImages = numImages;
 
-		// setup CUDA memory
-		CUDA_CHECK(cudaMemcpy(cudaTextureImages, textureImages.data(), sizeof(cudaTextureObject_t) * numImages, cudaMemcpyHostToDevice));
-		CUDA_CHECK(cudaMemcpy(cudaCameras, cameras.data(), sizeof(Camera) * numImages, cudaMemcpyHostToDevice));
+		// setup CUDA memory (queued on cudaStream)
+		CUDA_CHECK(cudaMemcpyAsync(cudaTextureImages, textureImages.data(), sizeof(cudaTextureObject_t) * numImages, cudaMemcpyHostToDevice, cudaStream));
+		UploadCameras();
 		if (params.bGeomConsistency) {
 			// set previously computed depth-maps
 			ASSERT(depthData.depthMap.size() == depthData.GetView().image.size());
-			CUDA_CHECK(cudaMemcpy(cudaTextureDepths, textureDepths.data(), sizeof(cudaTextureObject_t) * params.nNumViews, cudaMemcpyHostToDevice));
+			CUDA_CHECK(cudaMemcpyAsync(cudaTextureDepths, textureDepths.data(), sizeof(cudaTextureObject_t) * params.nNumViews, cudaMemcpyHostToDevice, cudaStream));
 		}
 
 		// load depth-map and normal-map into CUDA memory
@@ -350,12 +377,13 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 				depthNormal.w() = depthData.depthMap(r, c);
 			}
 		}
-		CUDA_CHECK(cudaMemcpy(cudaDepthNormalEstimates, depthNormalEstimates, sizeof(Point4) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice));
+		// pinned host buffer => DMA-async on cudaStream
+		CUDA_CHECK(cudaMemcpyAsync(cudaDepthNormalEstimates, depthNormalEstimates, sizeof(Point4) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice, cudaStream));
 
 		// load low resolution depth-map into CUDA memory
 		if (params.bLowResProcessed) {
 			ASSERT(depthData.depthMap.isContinuous());
-			CUDA_CHECK(cudaMemcpy(cudaLowDepths, depthData.depthMap.ptr<float>(), sizeof(float) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice));
+			CUDA_CHECK(cudaMemcpyAsync(cudaLowDepths, depthData.depthMap.ptr<float>(), sizeof(float) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice, cudaStream));
 		}
 
 		// run CUDA patch-match
@@ -363,7 +391,7 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 		RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
 		CUDA_CHECK(cudaGetLastError());
 		if (params.bLowResProcessed)
-			CUDA_CHECK(cudaFree(cudaLowDepths));
+			CUDA_CHECK(cudaFreeAsync(cudaLowDepths, cudaStream));
 
 		// load depth-map, normal-map and confidence-map from CUDA memory
 		for (int r = 0; r < depthData.depthMap.rows; ++r) {
@@ -399,7 +427,7 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 				}
 			}
 		}
-		
+
 		// remember sub-resolution estimates for next iteration
 		if (scaleNumber > 0) {
 			lowResDepthMap = depthData.depthMap;

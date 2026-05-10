@@ -22,7 +22,7 @@ env:
   BUILD_DIR: make
   CTEST_OUTPUT_ON_FAILURE: 1
   VCPKG_FEATURE_FLAGS: manifests,binarycaching,registries
-  VCPKG_COMMIT: 'c3867e714dd3a51c272826eea77267876517ed99'
+  VCPKG_COMMIT: '56bb2411609227288b70117ead2c47585ba07713'
 
 defaults:
   run:
@@ -176,7 +176,7 @@ jobs:
       - &configure-step
         name: Configure CMake
         run: |
-          cmake -S . -B ${{ env.BUILD_DIR }} -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIG }} -DVCPKG_ROOT=${{ env.VCPKG_ROOT }} -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_DEFAULT_TRIPLET }} -DOpenMVS_USE_CUDA=OFF ${{ env.CMAKE_EXTRA_ARGS }}
+          cmake -S . -B ${{ env.BUILD_DIR }} -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIG }} -DVCPKG_ROOT=${{ env.VCPKG_ROOT }} -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_DEFAULT_TRIPLET }} -DOpenMVS_USE_CUDA=OFF -DOpenMVS_HEADLESS_DEBUG=ON ${{ env.CMAKE_EXTRA_ARGS }}
 
       - &build-step
         name: Build
@@ -228,6 +228,7 @@ jobs:
         id: run-analysis
         with:
           cmakeBuildDirectory: ${{ env.BUILD_DIR }}
+          buildConfiguration: ${{ env.BUILD_CONFIG }}
           ruleset: NativeRecommendedRules.ruleset
 
       # MSVC's /analyze emits one SARIF "run" per translation unit, all packed into a

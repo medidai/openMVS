@@ -403,7 +403,7 @@ void* STCALL DepthMapsData::ScoreDepthMapTmp(void* arg)
 			// replace invalid normal with random values
 			normal = estimator.RandomNormal(viewDir);
 		}
-		ASSERT(ISEQUAL(norm(normal), 1.f, 1e-2f), "Norm = ", norm(normal));
+		ASSERT(ISEQUAL(norm(normal), 1.f), "Norm = ", norm(normal));
 		estimator.confMap0(x) = estimator.ScorePixel(depth, normal);
 	}
 	return NULL;
@@ -1295,7 +1295,7 @@ void DepthMapsData::MergeDepthMaps(PointCloud& pointcloud, bool bEstimateColor, 
 	GET_LOGCONSOLE().Play();
 	progress.close();
 
-	DEBUG_EXTRA("Depth-maps merged: %u depth-maps, %u depths, %u points (%d%%%%) (%s)",
+	DEBUG_EXTRA("Depth-maps merged: %u depth-maps, %u depths, %u points (%d%%) (%s)",
 		nDepthMaps, nDepths, pointcloud.points.size(), ROUND2INT(100.f*pointcloud.points.size()/nDepths), TD_TIMER_GET_FMT().c_str());
 } // MergeDepthMaps
 /*----------------------------------------------------------------*/
@@ -1501,10 +1501,10 @@ void DepthMapsData::FuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, b
 					if (depthDataB.IsEmpty())
 						continue;
 					const Image& imageDataB = scene.images[idxImageB];
-					const Point3f pt(imageDataB.camera.ProjectPointP3(point));
-					if (pt.z <= 0)
+					const auto [pt, depthProjB] = imageDataB.camera.ProjectPointP(point);
+					if (depthProjB <= 0)
 						continue;
-					const ImageRef xB(ROUND2INT(pt.x/pt.z), ROUND2INT(pt.y/pt.z));
+					const ImageRef xB(ROUND2INT(pt));
 					DepthMap& depthMapB = depthDataB.depthMap;
 					if (!depthMapB.isInside(xB))
 						continue;
@@ -1514,7 +1514,7 @@ void DepthMapsData::FuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, b
 					uint32_t& idxPointB = arrDepthIdx[idxImageB](xB);
 					if (idxPointB != NO_ID)
 						continue;
-					if (IsDepthSimilar(pt.z, depthB, OPTDENSE::fDepthDiffThreshold)) {
+					if (IsDepthSimilar(depthProjB, depthB, OPTDENSE::fDepthDiffThreshold)) {
 						// check if normals agree
 						const PointCloud::Normal normalB(!depthData.normalMap.empty() ? Cast<Normal::Type>(imageDataB.camera.R.t() * Cast<REAL>(depthDataB.normalMap(xB))) : Normal(0, 0, -1));
 						ASSERT(ISEQUAL(norm(normalB), 1.f, 1e-2f), "Norm = ", norm(normalB));
@@ -1535,7 +1535,7 @@ void DepthMapsData::FuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, b
 							continue;
 						}
 					}
-					if (pt.z < depthB) {
+					if (depthProjB < depthB) {
 						// discard depth
 						invalidDepths.emplace_back(&depthB);
 					}
@@ -1582,7 +1582,7 @@ void DepthMapsData::FuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, b
 	arrDepthIdx.Release();
 	cacheDMaps.ClearCache();
 
-	DEBUG_EXTRA("Depth-maps fused and filtered: %u depth-maps, %u depths, %u points (%d%%%%), %.2f hits in %.2f cached (%s)",
+	DEBUG_EXTRA("Depth-maps fused and filtered: %u depth-maps, %u depths, %u points (%d%%), %.2f hits in %.2f cached (%s)",
 		numDMapsFused, nDepths, pointcloud.points.size(), ROUND2INT((100.f*pointcloud.points.size())/nDepths),
 		static_cast<double>(totalNumImageNeighborsInCache) / numDMapsFused,
 		static_cast<double>(totalNumImagesInCache) / numDMapsFused, TD_TIMER_GET_FMT().c_str());
@@ -1685,13 +1685,13 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 			PointCloud::Normal normal;
 			if (fuseDepth > 0) {
 				// project reference point into current view
-				const Point3f pt(image.camera.ProjectPointP3(refPoint));
+				const auto [pt, depthProj] = image.camera.ProjectPointP(refPoint);
 				// check if depth agrees with current depth
-				ASSERT(pt.z > Depth(0) || !IsDepthSimilar(depth, pt.z, OPTDENSE::fDepthDiffThreshold));
-				if (!IsDepthSimilar(depth, pt.z, OPTDENSE::fDepthDiffThreshold))
+				ASSERT(depthProj > Depth(0) || !IsDepthSimilar(depth, depthProj, OPTDENSE::fDepthDiffThreshold));
+				if (!IsDepthSimilar(depth, depthProj, OPTDENSE::fDepthDiffThreshold))
 					return;
 				// check reprojection error of the reference point in the current view
-				const Point2f diff(pt.x / pt.z - float(x.x), pt.y / pt.z - float(x.y));
+				const Point2f diff(pt - Cast<float>(x));
 				if (normSq(diff) > maxReprojErrorSq)
 					return;
 				// check if normals agree
@@ -1740,7 +1740,7 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 				if (!neighbors[nextID])
 					continue;
 				const DepthData& nextDepthData = arrDepthData[nextID];
-				const ImageRef nextx(ROUND2INT(nextDepthData.GetCamera().ProjectPointP(X)));
+				const ImageRef nextx(ROUND2INT(std::get<0>(nextDepthData.GetCamera().ProjectPointP(X))));
 				FusePointImpl(nextID, nextx, fuseDepth, FusePointImpl);
 			}
 		};
@@ -1862,7 +1862,7 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 	if (!_bEstimateNormal)
 		pointcloud.normals.Release();
 
-	DEBUG_EXTRA("Depth-maps dense fused and filtered: %u depth-maps, %u depths, %u points (%d%%%%), %.2f hits in %.2f cached (%s)",
+	DEBUG_EXTRA("Depth-maps dense fused and filtered: %u depth-maps, %u depths, %u points (%d%%), %.2f hits in %.2f cached (%s)",
 		numDMapsFused, nDepths, pointcloud.points.size(), ROUND2INT((100.f*pointcloud.points.size())/nDepths),
 		static_cast<double>(totalNumImageNeighborsInCache) / numDMapsFused,
 		static_cast<double>(totalNumImagesInCache) / numDMapsFused, TD_TIMER_GET_FMT().c_str());
@@ -2608,7 +2608,7 @@ void Scene::PointCloudFilter(int thRemove)
 			pointcloud.RemovePoint(idxPoint);
 	}
 
-	DEBUG_EXTRA("Point-cloud filtered: %u/%u points (%d%%%%) (%s)", pointcloud.points.size(), numInitPoints, ROUND2INT((100.f*pointcloud.points.GetSize())/numInitPoints), TD_TIMER_GET_FMT().c_str());
+	DEBUG_EXTRA("Point-cloud filtered: %u/%u points (%d%%) (%s)", pointcloud.points.size(), numInitPoints, ROUND2INT((100.f*pointcloud.points.GetSize())/numInitPoints), TD_TIMER_GET_FMT().c_str());
 } // PointCloudFilter
 /*----------------------------------------------------------------*/
 
