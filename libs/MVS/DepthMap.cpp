@@ -591,8 +591,10 @@ float DepthEstimator::ScorePixelImage(const DepthData::ViewData& image1, Depth d
 		}
 		score += OPTDENSE::fEstimationGeometricWeight * consistency;
 	}
-	// apply depth prior weight based on patch textureless
-	if (!lowResDepthMap.empty()) {
+	// apply depth prior weight based on patch textureless;
+	// hard-cap the prior on medium to well-textured patches:
+	// 0.0025 is the optimum tested on several GT datasets
+	if (!lowResDepthMap.empty() && normSq0 < 0.0025f) {
 		const Depth d0 = lowResDepthMap(x0);
 		if (d0 > 0) {
 			const float deltaDepth(MINF(DepthSimilarity(d0, depth), 0.5f));
@@ -684,7 +686,7 @@ void DepthEstimator::ProcessPixel(IDX idx)
 		const Depth ndepth(depthMap0(nx));
 		if (ndepth > 0) {
 			#if DENSE_SMOOTHNESS != DENSE_SMOOTHNESS_NA
-			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f, 1e-1f), "Norm = ", norm(normalMap0(nx)));
+			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f), "Norm = ", norm(normalMap0(nx)));
 			neighbors.emplace_back(nx);
 			neighborsClose.emplace_back(NeighborEstimate{ndepth, normalMap0(nx)
 				#if DENSE_SMOOTHNESS == DENSE_SMOOTHNESS_PLANE
@@ -699,7 +701,7 @@ void DepthEstimator::ProcessPixel(IDX idx)
 	const auto AddDirection = [this] (const ImageRef& nx) {
 		const Depth ndepth(depthMap0(nx));
 		if (ndepth > 0) {
-			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f, 1e-1f), "Norm = ", norm(normalMap0(nx)));
+			ASSERT(ISEQUAL(norm(normalMap0(nx)), 1.f), "Norm = ", norm(normalMap0(nx)));
 			neighborsClose.emplace_back(NeighborEstimate{ndepth, normalMap0(nx)
 				#if DENSE_SMOOTHNESS == DENSE_SMOOTHNESS_PLANE
 				, Cast<float>(image0.camera.TransformPointI2C(Point3(nx, ndepth)))
@@ -950,17 +952,26 @@ DepthEstimator::PixelEstimate DepthEstimator::PerturbEstimate(const PixelEstimat
 	const float maxDepth = est.depth * (1.f+perturbation);
 	ptbEst.depth = CLAMP(rnd.randomUniform(minDepth, maxDepth), dMin, dMax);
 
-	// perturb normal
+	// perturb normal: Rodrigues rotation around a Marsaglia-unit axis;
+	// using a unit axis + real Rodrigues keeps |perturbed| within float-32 noise
 	const Normal viewDir(Cast<float>(X0));
 	std::uniform_real_distribution<float> urd(-1.f, 1.f);
 	const int numMaxTrials = 3;
 	int numTrials = 0;
 	perturbation *= FHALF_PI;
 	while(true) {
-		// generate random perturbation rotation
-		const RMatrixBaseF R(urd(rnd)*perturbation, urd(rnd)*perturbation, urd(rnd)*perturbation);
-		// perturb normal vector
-		ptbEst.normal = R * est.normal;
+		// random unit-length axis (Marsaglia's method, exact in math)
+		float q1, q2, ss;
+		do {
+			q1 = urd(rnd);
+			q2 = urd(rnd);
+			ss = q1*q1 + q2*q2;
+		} while (ss >= 1.f);
+		const float sq = SQRT(1.f - ss);
+		const Normal axis(2.f*q1*sq, 2.f*q2*sq, 1.f - 2.f*ss);
+		const float theta = urd(rnd) * perturbation;
+		// RMatrixBaseF(axis, theta) builds an orthogonal Rodrigues rotation
+		ptbEst.normal = RMatrixBaseF(axis, theta) * est.normal;
 		// make sure the perturbed normal is still looking towards the camera,
 		// otherwise try again with a smaller perturbation
 		if (ptbEst.normal.dot(viewDir) < 0.f)
@@ -971,7 +982,7 @@ DepthEstimator::PixelEstimate DepthEstimator::PerturbEstimate(const PixelEstimat
 		}
 		perturbation *= 0.5f;
 	}
-	ASSERT(ISEQUAL(norm(ptbEst.normal), 1.f, 1e-2f), "Norm = ", norm(ptbEst.normal));
+	ASSERT(ISEQUAL(norm(ptbEst.normal), 1.f), "Norm = ", norm(ptbEst.normal));
 
 	return ptbEst;
 }
@@ -1007,15 +1018,16 @@ std::pair<float,float> TriangulatePointsDelaunay(const Camera& camera, const cv:
 	projs.reserve(mesh.vertices.capacity());
 	Delaunay delaunay;
 	for (uint32_t idx: points) {
-		const Point3f pt(camera.ProjectPointP3(pointcloud.points[idx]));
-		const Point3f x(pt.x/pt.z, pt.y/pt.z, pt.z);
+		const Point3 Xcam = camera.TransformPointW2C(Cast<REAL>(pointcloud.points[idx]));
+		ASSERT(Xcam.z > 0);
+		const Point2f x = camera.TransformPointC2I(Xcam);
+		projs.emplace_back(x);
 		delaunay.insert(CPoint(x.x, x.y))->info() = mesh.vertices.size();
-		mesh.vertices.emplace_back(camera.TransformPointI2C(x));
-		projs.emplace_back(x.x, x.y);
-		if (depthBounds.first > pt.z)
-			depthBounds.first = pt.z;
-		if (depthBounds.second < pt.z)
-			depthBounds.second = pt.z;
+		const float depth = mesh.vertices.emplace_back(Xcam).z;
+		if (depthBounds.first > depth)
+			depthBounds.first = depth;
+		if (depthBounds.second < depth)
+			depthBounds.second = depth;
 	}
 	// if full size depth-map requested
 	const size_t numPoints(3);
@@ -1426,8 +1438,8 @@ void MVS::EstimatePointColors(const ImageArr& images, PointCloud& pointcloud)
 			color = Pixel8U::WHITE;
 		} else {
 			// get image color
-			const Point2f proj(pImageData->camera.ProjectPointP(point));
-			color = (pImageData->image.isInsideWithBorder<float,1>(proj) ? pImageData->image.sample(proj) : Pixel8U::WHITE);
+			const auto [proj, depth] = pImageData->camera.ProjectPointP(point);
+			color = (depth > 0 && pImageData->image.isInsideWithBorder<float,1>(proj) ? pImageData->image.sample(proj) : Pixel8U::WHITE);
 		}
 	}
 
@@ -1464,7 +1476,7 @@ void MVS::EstimatePointSegmentation(const ImageArr& images, PointCloud& pointclo
 			if (imageData.mask.empty())
 				continue;
 			// get image mask label
-			const ImageRef proj(ROUND2INT(imageData.camera.ProjectPointP(point)));
+			const ImageRef proj(ROUND2INT(std::get<0>(imageData.camera.ProjectPointP(point))));
 			if (!imageData.mask.isInside(proj))
 				continue;
 			const PointCloud::Label& maskLabel = imageData.mask(proj);
@@ -2273,7 +2285,7 @@ void MVS::CompareDepthMaps(const DepthMap& depthMap, const DepthMap& depthMapGT,
 	}
 	errorsVisual.Save(ComposeDepthFilePath(idxImage, "errors.png"));
 	#endif
-	VERBOSE("Depth-maps compared for image % 3u: %.4f PSNR; %g median %g mean %g stddev error; %u (%.2f%%%%) error %u (%.2f%%%%) missing %u (%.2f%%%%) extra pixels (%s)",
+	VERBOSE("Depth-maps compared for image % 3u: %.4f PSNR; %g median %g mean %g stddev error; %u (%.2f%%) error %u (%.2f%%) missing %u (%.2f%%) extra pixels (%s)",
 		idxImage,
 		fPSNR,
 		th.first, mean, stddev,

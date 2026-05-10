@@ -42,3 +42,4 @@ make*/
 tmp/
 build/
 build-*/
+bench*/

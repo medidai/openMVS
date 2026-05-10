@@ -42,12 +42,13 @@ DEFINE_LOG_NAME(lt, _T("TestMVS "));
 namespace MVS {
 
 // test MVS stages on a small sample dataset
-bool PipelineTest(bool verbose)
+bool PipelineTest(bool forceCPU, bool verbose)
 {
 	TD_TIMER_START();
-	#if 0 && defined(_USE_CUDA)
+	#ifdef _USE_CUDA
 	// force CPU for testing even if CUDA is available
-	SEACAVE::CUDA::desiredDeviceIDs.clear();
+	if (forceCPU)
+		SEACAVE::CUDA::desiredDeviceIDs.clear();
 	#endif
 	Scene scene;
 	if (!scene.Load(MAKE_PATH("scene.mvs"))) {
@@ -62,7 +63,7 @@ bool PipelineTest(bool verbose)
 	}
 	if (verbose)
 		scene.pointcloud.Save(MAKE_PATH("scene_dense.ply"));
-	if (!scene.ReconstructMesh() || scene.mesh.faces.size() < 25000u) {
+	if (!scene.ReconstructMesh() || !ISINSIDE(scene.mesh.faces.size(), 25000u, 38000u)) {
 		VERBOSE("ERROR: TestDataset failed reconstructing the mesh!");
 		return false;
 	}
@@ -70,10 +71,12 @@ bool PipelineTest(bool verbose)
 		scene.mesh.Save(MAKE_PATH("scene_dense_mesh.ply"));
 	constexpr float decimate = 0.7f;
 	scene.mesh.Clean(decimate);
-	if (!ISINSIDE(scene.mesh.faces.size(), 18000u, 30000u)) {
+	if (!ISINSIDE(scene.mesh.faces.size(), 17000u, 25000u)) {
 		VERBOSE("ERROR: TestDataset failed cleaning the mesh!");
 		return false;
 	}
+	if (verbose)
+		scene.mesh.Save(MAKE_PATH("scene_dense_mesh_clean.ply"));
 	#ifdef _USE_OPENMP
 	TestMeshProjectionMT(scene.mesh, scene.images[1]);
 	#endif
