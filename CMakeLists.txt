@@ -120,19 +120,6 @@ SET(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Set global property to avoid cyclic dependencies.
 SET_PROPERTY(GLOBAL PROPERTY GLOBAL_DEPENDS_NO_CYCLES ON)
 
-# Co-locate executables and DLLs so apps find dependent shared libraries at runtime
-# (Windows resolves DLLs via the executable's directory). Multi-config generators
-# automatically append per-config subfolders (e.g. bin/Release).
-IF(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
-	SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-ENDIF()
-IF(NOT CMAKE_LIBRARY_OUTPUT_DIRECTORY)
-	SET(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-ENDIF()
-IF(NOT CMAKE_ARCHIVE_OUTPUT_DIRECTORY)
-	SET(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-ENDIF()
-
 # Hidden symbol visibility on non-Windows so explicit *_API macros control the export
 # surface uniformly across MSVC / GCC / Clang (matches the __declspec(dllexport) model).
 SET(CMAKE_CXX_VISIBILITY_PRESET hidden)
@@ -162,6 +149,24 @@ GetOperatingSystemArchitectureBitness(SYSTEM)
 ComposePackageLibSuffix()
 ConfigCompilerAndLinker()
 ConfigLibrary()
+
+# Co-locate executables and DLLs so apps find dependent shared libraries at runtime
+# (Windows resolves DLLs via the executable's directory). Multi-config generators
+# automatically append per-config subfolders (e.g. bin/vc18/x64/Release).
+# Honor user-supplied -DCMAKE_*_OUTPUT_DIRECTORY=... cache values; only fill in
+# the defaults when nothing has been set. Utils.cmake's fix_default_compiler_settings
+# already seeds CMAKE_RUNTIME_OUTPUT_DIRECTORY with the same suffix-aware path,
+# so the runtime guard normally short-circuits — these defaults exist for the
+# library/archive variables which Utils.cmake does not touch.
+IF(NOT DEFINED CMAKE_RUNTIME_OUTPUT_DIRECTORY OR NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+	SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin${PACKAGE_LIB_SUFFIX}" CACHE PATH "Runtime output directory")
+ENDIF()
+IF(NOT DEFINED CMAKE_LIBRARY_OUTPUT_DIRECTORY OR NOT CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+	SET(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin${PACKAGE_LIB_SUFFIX}" CACHE PATH "Library output directory")
+ENDIF()
+IF(NOT DEFINED CMAKE_ARCHIVE_OUTPUT_DIRECTORY OR NOT CMAKE_ARCHIVE_OUTPUT_DIRECTORY)
+	SET(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib${PACKAGE_LIB_SUFFIX}" CACHE PATH "Archive output directory")
+ENDIF()
 
 # Find dependencies:
 SET(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/build/Modules)
