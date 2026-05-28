@@ -41,7 +41,7 @@
 // S T R U C T S ///////////////////////////////////////////////////
 
 namespace MVS {
-	
+
 // Forward declarations
 class MVS_API Scene;
 #ifdef _USE_CUDA
@@ -57,10 +57,26 @@ public:
 	DepthMapsData(Scene& _scene);
 	~DepthMapsData();
 
+	// pmCUDAPool holds move-only std::unique_ptrs; explicitly forbid copy so the
+	// MSVC dllexport instantiator does not try to synthesize a copy constructor.
+	DepthMapsData(const DepthMapsData&) = delete;
+	DepthMapsData& operator=(const DepthMapsData&) = delete;
+
 	bool SelectViews(DepthData& depthData);
 	bool InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex numNeighbors, bool loadImages, int loadDepthMaps);
 	bool InitDepthMap(DepthData& depthData);
 	bool EstimateDepthMap(IIndex idxImage, int nGeometricIter);
+
+	#ifdef _USE_CUDA
+	// Construct poolSize PatchMatch instances ready for the depth-map phase.
+	// First construction probes CUDA::initDevices(); returns false if the
+	// device set is still empty afterwards (caller falls back to CPU).
+	bool AllocateCudaPool(unsigned poolSize);
+	// Tear down per-instance state and re-init for the geometric-consistency
+	// phase, resetting the slot counter and bumping the epoch so worker threads
+	// re-claim slots cleanly even if the OS reuses them across the boundary.
+	void ReinitCudaPoolForGeom();
+	#endif // _USE_CUDA
 
 	bool RemoveSmallSegments(DepthData& depthData);
 	bool GapInterpolation(DepthData& depthData);
@@ -92,8 +108,14 @@ public:
 	DepthEstimator::MapRefArr coordsTrg; // ... same for target image
 
 	#ifdef _USE_CUDA
-	// used internally to estimate the depth-maps using CUDA
-	CAutoPtr<MVS::CUDA::PatchMatch> pmCUDA;
+	// One PatchMatch instance per worker thread; each worker claims a slot via
+	// thread-local index gated by pmCUDAEpoch. Lets the {UploadCameras + kernel
+	// launch} window stay mutex-serialized via the global event chain while the
+	// per-instance host prep (image upload, depth-prior packing, result unpack)
+	// runs lock-free in parallel across the SceneDensify ThreadPool workers.
+	std::vector<std::unique_ptr<MVS::CUDA::PatchMatch>> pmCUDAPool;
+	mutable volatile Thread::safe_t pmCUDANextIdx;
+	mutable volatile Thread::safe_t pmCUDAEpoch;
 	#endif // _USE_CUDA
 };
 /*----------------------------------------------------------------*/
@@ -111,6 +133,11 @@ struct MVS_API DenseDepthMapData {
 	int nFusionMode;
 	float fSampleMeshNeighbors;
 	STEREO::SemiGlobalMatcher sgm;
+	// number of workers in the dense-reconstruction ThreadPool; set by
+	// DenseReconstruction once the CUDA pool size is known. Used by the worker
+	// EVT_PROCESSIMAGE handler to broadcast EVT_CLOSE to all sibling workers
+	// (the old single-EVT_CLOSE pattern hung when nWorkers > 2).
+	unsigned nDenseWorkers;
 
 	DenseDepthMapData(Scene& _scene, int _nFusionMode=0, float _fSampleMeshNeighbors=0);
 	~DenseDepthMapData();

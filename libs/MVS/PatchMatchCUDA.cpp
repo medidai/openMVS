@@ -51,22 +51,22 @@ namespace MVS {
 
 namespace CUDA {
 
-// In-flight serializer for the CUDA backend. The kernels read cameras/params
+// Kernel-launch serializer for the CUDA backend. The kernels read cameras/params
 // from module-global __constant__ memory (g_cameras / g_params, see
 // PatchMatchCUDA.cu), which is shared by every PatchMatch instance on the
-// device. Concurrent overlap would race, so EstimateDepthMap must run
-// single-in-flight per device.
+// device. Concurrent overlap would race the __constant__ writes against an
+// in-flight kernel's reads.
 //
-// SceneDensify spawns two worker threads in its event loop (see
-// DenseReconstructionEstimateTmp) so concurrent calls into here do happen;
-// a std::mutex serializes the host-side critical section while still letting
-// the kernel enjoy the constant-memory broadcast that the optimization commit added.
+// Strategy: a global cudaEvent_t chains worker N+1's kernels behind worker N's
+// kernels on the GPU side. A tiny host mutex covers only the queueing sequence
+// {wait-event, upload-cameras, queue-kernels, record-event} so the host releases
+// after queueing (~1ms) rather than after kernel execution (~80-400ms). Each
+// worker then cudaStreamSynchronize's its own stream outside the mutex before
+// reading results into its per-instance pinned buffer.
 namespace {
 std::mutex g_patchMatchCudaMutex;
-struct PatchMatchCudaInFlightGuard {
-	std::lock_guard<std::mutex> _lock;
-	PatchMatchCudaInFlightGuard() : _lock(g_patchMatchCudaMutex) {}
-};
+cudaEvent_t g_constMemReady = nullptr;
+std::once_flag g_constMemEventInit;
 } // anonymous namespace
 
 PatchMatch::PatchMatch()
@@ -107,7 +107,46 @@ void PatchMatch::Release()
 	images.clear();
 	cameras.clear();
 
+	for (float*& p : hostImageStaging) if (p) cudaFreeHost(p);
+	hostImageStaging.clear();
+	hostImageStagingArea.clear();
+	for (float*& p : hostDepthPriorStaging) if (p) cudaFreeHost(p);
+	hostDepthPriorStaging.clear();
+	hostDepthPriorStagingArea.clear();
+
 	ReleaseCUDA();
+}
+
+// pinned staging wins on large images (driver-internal staging stall scales with
+// area) but loses on small ones (cudaHostAlloc + explicit memcpy overhead is fixed)
+void PatchMatch::StagedUploadCvMat(cudaArray_t dst, const cv::Mat1f& src,
+	std::vector<float*>& slots, std::vector<size_t>& areas, size_t slotIdx)
+{
+	ASSERT(src.type() == CV_32FC1);
+	const size_t area = (size_t)src.rows * (size_t)src.cols;
+	const size_t rowBytes = (size_t)src.cols * sizeof(float);
+	constexpr size_t kPinnedStagingThresholdArea = 1500000;
+	if (area < kPinnedStagingThresholdArea) {
+		CUDA_CHECK(cudaMemcpy2DToArrayAsync(dst, 0, 0, src.ptr<float>(), src.step[0],
+			rowBytes, src.rows, cudaMemcpyHostToDevice, cudaStream));
+		return;
+	}
+	if (slots.size() <= slotIdx) slots.resize(slotIdx + 1, nullptr);
+	if (areas.size() <= slotIdx) areas.resize(slotIdx + 1, 0);
+	if (slots[slotIdx] == nullptr || areas[slotIdx] < area) {
+		if (slots[slotIdx]) CUDA_CHECK(cudaFreeHost(slots[slotIdx]));
+		CUDA_CHECK(cudaHostAlloc((void**)&slots[slotIdx], area * sizeof(float), cudaHostAllocDefault));
+		areas[slotIdx] = area;
+	}
+	float* dstPinned = slots[slotIdx];
+	if (src.isContinuous() && src.step[0] == rowBytes) {
+		memcpy(dstPinned, src.ptr<float>(), area * sizeof(float));
+	} else {
+		for (int r = 0; r < src.rows; ++r)
+			memcpy(dstPinned + (size_t)r * src.cols, src.ptr<float>(r), rowBytes);
+	}
+	CUDA_CHECK(cudaMemcpy2DToArrayAsync(dst, 0, 0, dstPinned, rowBytes,
+		rowBytes, src.rows, cudaMemcpyHostToDevice, cudaStream));
 }
 
 void PatchMatch::ReleaseCUDA()
@@ -205,7 +244,6 @@ void PatchMatch::AllocateImageCUDA(size_t i, const cv::Mat1f& image, bool bInitI
 void PatchMatch::EstimateDepthMap(DepthData& depthData)
 {
 	TD_TIMER_STARTD();
-	const PatchMatchCudaInFlightGuard inFlightGuard;
 
 	ASSERT(depthData.images.size() > 1);
 
@@ -321,15 +359,16 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 				}
 				AllocateImageCUDA(i, image, false, !view.depthMap.empty());
 			}
-			// queued on cudaStream so the kernel does not need a device fence;
-			// pageable cv::Mat still stalls the host but ordering is stream-scoped
-			CUDA_CHECK(cudaMemcpy2DToArrayAsync(cudaImageArrays[i], 0, 0, image.ptr<float>(), image.step[0], image.cols * sizeof(float), image.rows, cudaMemcpyHostToDevice, cudaStream));
+			// large images stage through per-instance pinned slot for a truly-async
+			// H->D DMA on cudaStream; small images fall through to direct pageable
+			// DMA inside StagedUploadCvMat (driver-internal staging is cheaper)
+			StagedUploadCvMat(cudaImageArrays[i], image, hostImageStaging, hostImageStagingArea, (size_t)i);
 			if (params.bGeomConsistency && i > 0 && !view.depthMap.empty()) {
 				// set previously computed depth-map
 				DepthMap depthMap(view.depthMap);
 				if (depthMap.size() != image.size())
 					cv::resize(depthMap, depthMap, image.size(), 0, 0, cv::INTER_LINEAR);
-				CUDA_CHECK(cudaMemcpy2DToArrayAsync(cudaDepthArrays[i-1], 0, 0, depthMap.ptr<float>(), depthMap.step[0], sizeof(float) * depthMap.cols, depthMap.rows, cudaMemcpyHostToDevice, cudaStream));
+				StagedUploadCvMat(cudaDepthArrays[i-1], depthMap, hostDepthPriorStaging, hostDepthPriorStagingArea, (size_t)(i-1));
 			}
 			images[i] = std::move(image);
 			cameras[i] = std::move(camera);
@@ -358,7 +397,6 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 
 		// setup CUDA memory (queued on cudaStream)
 		CUDA_CHECK(cudaMemcpyAsync(cudaTextureImages, textureImages.data(), sizeof(cudaTextureObject_t) * numImages, cudaMemcpyHostToDevice, cudaStream));
-		UploadCameras();
 		if (params.bGeomConsistency) {
 			// set previously computed depth-maps
 			ASSERT(depthData.depthMap.size() == depthData.GetView().image.size());
@@ -385,9 +423,24 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 			CUDA_CHECK(cudaMemcpyAsync(cudaLowDepths, depthData.depthMap.ptr<float>(), sizeof(float) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice, cudaStream));
 		}
 
-		// run CUDA patch-match
+		// run CUDA patch-match: GPU-side event chains successive workers'
+		// kernel sequences so the next worker's __constant__ writes wait for
+		// the previous worker's kernels to finish reading them. Host mutex
+		// covers only the queueing window, not kernel execution.
 		ASSERT(!depthData.viewsMap.empty());
-		RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
+		std::call_once(g_constMemEventInit, []() {
+			CUDA_CHECK(cudaEventCreateWithFlags(&g_constMemReady, cudaEventDisableTiming));
+		});
+		{
+			std::lock_guard<std::mutex> queueLock(g_patchMatchCudaMutex);
+			CUDA_CHECK(cudaStreamWaitEvent(cudaStream, g_constMemReady, 0));
+			UploadCameras();
+			RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
+			CUDA_CHECK(cudaEventRecord(g_constMemReady, cudaStream));
+		}
+		// wait for our own kernels + D2H copies to finish before the unpack loop
+		// reads from the pinned host buffer
+		CUDA_CHECK(cudaStreamSynchronize(cudaStream));
 		CUDA_CHECK(cudaGetLastError());
 		if (params.bLowResProcessed)
 			CUDA_CHECK(cudaFreeAsync(cudaLowDepths, cudaStream));
