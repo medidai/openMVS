@@ -249,6 +249,7 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 		DepthData::ViewData& view = depthData.images[i];
 		if (loadDepthMaps > 0) {
 			// load known depth-map
+			const String neighborDmap(ComposeDepthFilePath(view.GetID(), "dmap"));
 			String imageFileName;
 			IIndexArr IDs;
 			cv::Size imageSize;
@@ -256,9 +257,10 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 			NormalMap normalMap;
 			ConfidenceMap confMap;
 			ViewsMap viewsMap;
-			ImportDepthDataRaw(ComposeDepthFilePath(view.GetID(), "dmap"),
+			if (!ImportDepthDataRaw(neighborDmap,
 				imageFileName, IDs, imageSize, view.cameraDepthMap.K, view.cameraDepthMap.R, view.cameraDepthMap.C,
-				dMin, dMax, view.depthMap, normalMap, confMap, viewsMap, 1);
+				dMin, dMax, view.depthMap, normalMap, confMap, viewsMap, 1))
+				DEBUG_EXTRA("warning: could not load neighbor depth-map for view %3u from '%s' (geometric-consistency pass)", view.GetID(), neighborDmap.c_str());
 			ASSERT(viewRef.image.size() == view.depthMap.size());
 		}
 		view.Init(viewRef.camera);
@@ -324,6 +326,11 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 			// compute rough estimates using the sparse point-cloud
 			InitDepthMap(depthData);
 		}
+		// optionally override the rough initialization with an external precomputed depth-map
+		if (!OPTDENSE::strInitDepthDir.empty())
+			ImportInitDepthMap(depthData);
+	} else if (loadDepthMaps > 0) {
+		DEBUG_EXTRA("Depth-map %3u: loading existing depth-maps from working dir (init prior skipped)", idxImage);
 	}
 	return true;
 } // InitViews
@@ -355,6 +362,72 @@ bool DepthMapsData::InitDepthMap(DepthData& depthData)
 } // InitDepthMap
 /*----------------------------------------------------------------*/
 
+// override the rough depth-map initialization with an externally precomputed
+// depth-map (e.g. a learned monocular/multi-view prior), matched by image name;
+// only the depth values are used - normals are left to PatchMatch to estimate;
+// the precomputed depth-maps are expected as OpenMVS raw '.dmap' files named
+// '{image-name}.dmap' inside OPTDENSE::strInitDepthDir
+bool DepthMapsData::ImportInitDepthMap(DepthData& depthData)
+{
+	ASSERT(!OPTDENSE::strInitDepthDir.empty());
+	const DepthData::ViewData& viewRef = depthData.GetView();
+	String initDepthDir(OPTDENSE::strInitDepthDir);
+	Util::ensureFolderSlash(initDepthDir);
+	const String fileName(initDepthDir + Util::getFileName(viewRef.pImageData->name) + _T(".dmap"));
+	if (!File::access(fileName)) {
+		DEBUG_EXTRA("warning: no init depth-map for image %3u (%s) at '%s'", viewRef.GetID(), Util::getFileName(viewRef.pImageData->name).c_str(), fileName.c_str());
+		return false;
+	}
+	// load the precomputed depth-map (depth values only)
+	String imageFileName;
+	IIndexArr IDs;
+	cv::Size imageSize;
+	Camera camera;
+	Depth dMin, dMax;
+	DepthMap initDepthMap;
+	NormalMap normalMap;
+	ConfidenceMap confMap;
+	ViewsMap viewsMap;
+	if (!ImportDepthDataRaw(fileName, imageFileName, IDs, imageSize, camera.K, camera.R, camera.C, dMin, dMax, initDepthMap, normalMap, confMap, viewsMap, 1) || initDepthMap.empty()) {
+		DEBUG("warning: could not read init depth-map %s", fileName.c_str());
+		return false;
+	}
+	// resize to the working depth-map resolution
+	const cv::Size srcSize(initDepthMap.size());
+	const bool bResized(srcSize != depthData.depthMap.size());
+	if (bResized)
+		cv::resize(initDepthMap, initDepthMap, depthData.depthMap.size(), 0, 0, cv::INTER_LINEAR);
+	// copy the valid depths over the current initialization and expand the depth-range accordingly
+	Depth newMin(depthData.dMin), newMax(depthData.dMax);
+	unsigned numValid(0);
+	for (int r=0; r<depthData.depthMap.rows; ++r) {
+		for (int c=0; c<depthData.depthMap.cols; ++c) {
+			const Depth d(initDepthMap(r,c));
+			if (d > 0 && ISFINITE(d)) {
+				depthData.depthMap(r,c) = d;
+				depthData.normalMap(r,c) = Normal::ZERO;
+				if (newMin > d) newMin = d;
+				if (newMax < d) newMax = d;
+				++numValid;
+			}
+		}
+	}
+	if (numValid == 0) {
+		DEBUG("warning: init depth-map %s has no valid depths", fileName.c_str());
+		return false;
+	}
+	if (newMin < depthData.dMin) depthData.dMin = MAXF(newMin*0.9f, 1e-3f);
+	if (newMax > depthData.dMax) depthData.dMax = newMax*1.1f;
+	const unsigned numTotal((unsigned)depthData.depthMap.rows * depthData.depthMap.cols);
+	const float coverage(numTotal ? 100.f*numValid/numTotal : 0.f);
+	DEBUG_EXTRA("Depth-map %3u (%s) initialized from external prior %s (%u/%u valid depths, %.1f%%, dMin=%.4f dMax=%.4f%s)",
+		viewRef.GetID(), Util::getFileName(viewRef.pImageData->name).c_str(), Util::getFileNameExt(fileName).c_str(),
+		numValid, numTotal, coverage, depthData.dMin, depthData.dMax,
+		bResized ? String::FormatString(", resized %dx%d->%dx%d", srcSize.width, srcSize.height, depthData.depthMap.cols, depthData.depthMap.rows).c_str() : "");
+	return true;
+} // ImportInitDepthMap
+/*----------------------------------------------------------------*/
+
 
 // initialize the confidence map (NCC score map) with the score of the current estimates
 void* STCALL DepthMapsData::ScoreDepthMapTmp(void* arg)
@@ -376,9 +449,19 @@ void* STCALL DepthMapsData::ScoreDepthMapTmp(void* arg)
 			// init with random values
 			depth = estimator.RandomDepth(estimator.dMinSqr, estimator.dMaxSqr);
 			normal = estimator.RandomNormal(viewDir);
-		} else if (normal.dot(viewDir) >= 0) {
-			// replace invalid normal with random values
-			normal = estimator.RandomNormal(viewDir);
+		} else {
+			// valid initialization (sparse triangulation or external prior)
+			if (!OPTDENSE::strInitDepthDir.empty() && OPTDENSE::fInitDepthNoise > 0) {
+				// alpha-blend the prior depth toward a random depth: factor in [0,1],
+				// 0 => exact prior, 1 => same distribution as the default random init
+				const float f(MINF(OPTDENSE::fInitDepthNoise, 1.f));
+				const Depth dRand(estimator.RandomDepth(estimator.dMinSqr, estimator.dMaxSqr));
+				depth = MINF(MAXF((1.f - f) * depth + f * dRand, estimator.dMin), estimator.dMax);
+			}
+			if (normal.dot(viewDir) >= 0) {
+				// replace invalid normal with random values
+				normal = estimator.RandomNormal(viewDir);
+			}
 		}
 		ASSERT(ISEQUAL(norm(normal), 1.f), "Norm = ", norm(normal));
 		estimator.confMap0(x) = estimator.ScorePixel(depth, normal);
@@ -491,6 +574,10 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 		return true;
 	}
 	#endif // _USE_CUDA
+
+	DEBUG_EXTRA("CPU PatchMatch image %3u: geomIter=%d, initDepthNoise=%.3f",
+		arrDepthData[idxImage].images.front().GetID(), nGeometricIter,
+		OPTDENSE::strInitDepthDir.empty() ? 0.f : OPTDENSE::fInitDepthNoise);
 
 	TD_TIMER_STARTD();
 
@@ -2075,6 +2162,31 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 	}
 	#endif // _USE_CUDA
 
+	if (!OPTDENSE::strInitDepthDir.empty()) {
+		String initDepthDir(OPTDENSE::strInitDepthDir);
+		Util::ensureFolderSlash(initDepthDir);
+		unsigned numMatched(0);
+
+		for (IIndex idx: data.images) {
+			const String fileName(initDepthDir + Util::getFileName(images[idx].name) + _T(".dmap"));
+			if (File::access(fileName)) {
+				++numMatched;
+			}
+		}
+
+		VERBOSE("Init depth priors: dir='%s', noise=%.3f, matched %u/%u selected images",
+			initDepthDir.c_str(), OPTDENSE::fInitDepthNoise, numMatched, data.images.GetSize());
+	}
+	
+	VERBOSE("Depth-map estimation: photometric pass (iters=%u, geom-iters=%u, patch-match=%s)",
+		OPTDENSE::nEstimationIters, OPTDENSE::nEstimationGeometricIters,
+		#ifdef _USE_CUDA
+		(data.depthMaps.pmCUDA ? "CUDA" : "CPU")
+		#else
+		"CPU"
+		#endif
+	);
+
 	// initialize the queue of images to be processed
 	const int nOptimize(OPTDENSE::nOptimize);
 	if (OPTDENSE::nEstimationGeometricIters && data.nFusionMode >= 0)
@@ -2110,6 +2222,8 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 		}
 		#endif // _USE_CUDA
 		while (++data.nEstimationGeometricIter < (int)OPTDENSE::nEstimationGeometricIters) {
+			VERBOSE("Depth-map estimation: geometric-consistency pass %u/%u (loading neighbor depth-maps from working dir, init priors disabled)",
+				data.nEstimationGeometricIter+1, OPTDENSE::nEstimationGeometricIters);
 			// initialize the queue of images to be geometric processed
 			if (data.nEstimationGeometricIter+1 == (int)OPTDENSE::nEstimationGeometricIters)
 				OPTDENSE::nOptimize = nOptimize;

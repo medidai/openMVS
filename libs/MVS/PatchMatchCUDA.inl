@@ -64,6 +64,7 @@ public:
 		bool bGeomConsistency = false;
 		bool bLowResProcessed = false;
 		float fThresholdKeepCost = 0;
+		float fInitDepthNoise = 0.f;
 	};
 
 public:

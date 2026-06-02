@@ -192,6 +192,11 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 	params.nInitTopK = std::min(params.nInitTopK, params.nNumViews);
 	params.fDepthMin = depthData.dMin;
 	params.fDepthMax = depthData.dMax;
+	params.fInitDepthNoise = OPTDENSE::strInitDepthDir.empty() ? 0.f : OPTDENSE::fInitDepthNoise;
+	DEBUG_EXTRA("CUDA PatchMatch image %3u: geomConsistency=%d, initDepthNoise=%.3f, depthRange=[%.4f,%.4f], subResLevels=%u",
+		depthData.images.front().GetID(), params.bGeomConsistency, params.fInitDepthNoise,
+		params.fDepthMin, params.fDepthMax, params.bGeomConsistency ? 0u : OPTDENSE::nSubResolutionLevels);
+
 	if (prevNumImages < numImages) {
 		images.resize(numImages);
 		cameras.resize(numImages);

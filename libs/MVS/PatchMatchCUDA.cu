@@ -526,9 +526,18 @@ __device__ void InitializePixelScore(const ImagePixels *images, const ImagePixel
 		// generate random plane
 		plane.topLeftCorner<3,1>() = GenerateRandomNormal(cameras[0], p, randState);
 		plane.w() = curand_uniform(randState) * (params.fDepthMax - params.fDepthMin) + params.fDepthMin;
-	} else if (plane.topLeftCorner<3,1>().dot(cameras[0].model.ViewDirection(p)) >= 0.f) {
-		// generate random normal
-		plane.topLeftCorner<3,1>() = GenerateRandomNormal(cameras[0], p, randState);
+	} else {
+		if (params.fInitDepthNoise > 0.f) {
+			// alpha-blend the prior depth toward a random depth: factor in [0,1],
+			// 0 => exact prior, 1 => same distribution as the default random init
+			const float f = fminf(params.fInitDepthNoise, 1.f);
+			const float dRand = curand_uniform(randState) * (params.fDepthMax - params.fDepthMin) + params.fDepthMin;
+			plane.w() = fminf(fmaxf((1.f - f) * depth + f * dRand, params.fDepthMin), params.fDepthMax);
+		}
+		if (plane.topLeftCorner<3,1>().dot(cameras[0].model.ViewDirection(p)) >= 0.f) {
+			// generate random normal
+			plane.topLeftCorner<3,1>() = GenerateRandomNormal(cameras[0], p, randState);
+		}
 	}
 	// compute costs
 	float costVector[MAX_VIEWS];

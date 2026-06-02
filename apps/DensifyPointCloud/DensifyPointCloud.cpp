@@ -139,6 +139,8 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	unsigned nOptimize;
 	int nIgnoreMaskLabel;
 	bool bRemoveDmaps;
+	String strInitDepthDir;
+	float fInitDepthNoise;
 	boost::program_options::options_description config("Densify options");
 	config.add_options()
 		("input-file,i", boost::program_options::value<std::string>(&OPT::strInputFileName), "input filename containing camera poses and image list")
@@ -171,6 +173,8 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("estimate-roi", boost::program_options::value(&OPT::nEstimateROI)->default_value(2), "estimate and set region-of-interest (0 - disabled, 1 - enabled, 2 - adaptive)")
 		("crop-to-roi", boost::program_options::value(&OPT::bCrop2ROI)->default_value(true), "crop scene using the region-of-interest")
 		("remove-dmaps", boost::program_options::value(&bRemoveDmaps)->default_value(false), "remove depth-maps after fusion")
+		("init-depth-dir", boost::program_options::value<std::string>(&strInitDepthDir), "optional directory with precomputed per-view depth-maps ('{image-name}.dmap') used to initialize PatchMatch instead of random depths (empty - disabled)")
+		("init-depth-noise", boost::program_options::value(&fInitDepthNoise)->default_value(0.1f), "alpha-blend weight in [0,1] toward a random depth for the precomputed init depths when --init-depth-dir is set (0 - exact prior, 1 - default random init)")
 		("tower-mode", boost::program_options::value(&OPT::nTowerMode)->default_value(4), "add a cylinder of points in the center of ROI; scene assume to be Z-up oriented (0 - disabled, 1 - replace, 2 - append, 3 - select neighbors, 4 - select neighbors & append, <0 - force tower mode)")
 		("normalize-coordinates", boost::program_options::value(&OPT::nNormalizeCoordinates)->default_value(0), "normalize scene coordinates and output the inverse transform to file (0 - disabled, 1 - center, 2 - center & scale)")
 		;
@@ -263,6 +267,14 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	OPTDENSE::nOptimize = nOptimize;
 	OPTDENSE::nIgnoreMaskLabel = nIgnoreMaskLabel;
 	OPTDENSE::bRemoveDmaps = bRemoveDmaps;
+	
+	if (!strInitDepthDir.empty()) {
+		Util::ensureValidPath(strInitDepthDir);
+		OPTDENSE::strInitDepthDir = strInitDepthDir;
+		OPTDENSE::fInitDepthNoise = fInitDepthNoise;
+		VERBOSE("Init depth priors enabled: dir='%s', noise=%.3f (0=exact prior, 1=random init)", strInitDepthDir.c_str(), fInitDepthNoise);
+	}
+	
 	if (!bValidConfig && !OPT::strDenseConfigFileName.empty())
 		OPTDENSE::oConfig.Save(OPT::strDenseConfigFileName);
 

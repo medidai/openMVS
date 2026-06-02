@@ -147,6 +147,8 @@ extern float fRandomAngle2Range;
 extern float fRandomSmoothDepth;
 extern float fRandomSmoothNormal;
 extern float fRandomSmoothBonus;
+extern String strInitDepthDir;
+extern float fInitDepthNoise;
 } // namespace OPTDENSE
 /*----------------------------------------------------------------*/
 

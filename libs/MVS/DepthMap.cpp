@@ -122,6 +122,8 @@ MDEFVAR_OPTDENSE_float(fRandomAngle2Range, "Random Angle2 Range", "Angle 2 range
 MDEFVAR_OPTDENSE_float(fRandomSmoothDepth, "Random Smooth Depth", "Depth variance used during neighbor smoothness assignment (ratio)", "0.02")
 MDEFVAR_OPTDENSE_float(fRandomSmoothNormal, "Random Smooth Normal", "Normal variance used during neighbor smoothness assignment (degrees)", "13")
 MDEFVAR_OPTDENSE_float(fRandomSmoothBonus, "Random Smooth Bonus", "Score factor used to encourage smoothness (1 - disabled)", "0.93")
+DEFVAR_OPTDENSE_string(strInitDepthDir, "Init Depth Dir", "directory with precomputed per-view depth-maps ('{image-name}.dmap') used to initialize PatchMatch instead of random depths (empty - disabled)", "")
+MDEFVAR_OPTDENSE_float(fInitDepthNoise, "Init Depth Noise", "alpha-blend weight in [0,1] toward a random depth for the precomputed init depths when Init Depth Dir is set (0 - exact prior, 1 - same as default random init)", "0.1")
 }
 
 
