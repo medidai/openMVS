@@ -838,17 +838,40 @@ bool Scene::AlignToGPS(double threshold)
 		enuPositions.emplace_back((REAL)e, (REAL)n, (REAL)u);
 	}
 
-	// 4. Estimate similarity transform: Camera -> ENU
+	// 4. Verify the GPS positions are well spread: the similarity transform needs
+	// at least 3 distinct, non-collinear positions spread wider than the GPS noise
+	// (consumer devices often tag consecutive images with the same stale GPS fix)
+	if (threshold > 0) {
+		Point3 mean(Point3::ZERO);
+		for (const Point3& enu : enuPositions)
+			mean += enu;
+		mean /= (double)enuPositions.size();
+		Eigen::Matrix3d cov(Eigen::Matrix3d::Zero());
+		for (const Point3& enu : enuPositions) {
+			const Eigen::Vector3d d(Point3d(enu - mean));
+			cov += d * d.transpose();
+		}
+		cov /= (double)enuPositions.size();
+		// standard deviation along each principal axis, in increasing order
+		const Eigen::Vector3d spread(Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(cov, Eigen::EigenvaluesOnly).eigenvalues().cwiseMax(0.).cwiseSqrt());
+		if (spread(1) < threshold) {
+			VERBOSE("error: GPS positions nearly coincident or collinear (spread %.1fx%.1fx%.1fm, need %.1fm+), skipping GPS alignment",
+				spread(2), spread(1), spread(0), threshold);
+			return false;
+		}
+	}
+
+	// 5. Estimate similarity transform: Camera -> ENU
 	SEACAVE::Transform T_cam_to_enu;
 	if (EstimateSimilarityTransform(camCenters, enuPositions, T_cam_to_enu, threshold) == 0) {
 		VERBOSE("error: failed to estimate transform");
 		return false;
 	}
 
-	// 5. Transform the scene to ENU
+	// 6. Transform the scene to ENU
 	Transform(T_cam_to_enu);
 
-	// 6. Set Scene::transform to the transform that brings ENU (centered) back to Absolute (ECEF)
+	// 7. Set Scene::transform to the transform that brings ENU (centered) back to Absolute (ECEF)
 	transform = Matrix4x4::IDENTITY;
 	transform(0, 3) = centerECEF.x;
 	transform(1, 3) = centerECEF.y;

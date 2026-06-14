@@ -29,7 +29,7 @@ namespace SFM {
  * @return number of inliers used for the final estimate (RANSAC inlier count when threshold > 0,
  *         otherwise the total correspondence count) or 0 on failure
  */
-unsigned EstimateSimilarityTransform(
+SFM_API unsigned EstimateSimilarityTransform(
 	const Point3Arr& srcPoints,
 	const Point3Arr& dstPoints,
 	Transform& transform,
