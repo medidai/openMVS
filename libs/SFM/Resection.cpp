@@ -185,6 +185,10 @@ bool Resection::RegisterImages()
 		IIndexArr nextIDs = SelectNextImages(unregistered);
 		if (nextIDs.empty()) {
 			VERBOSE("warning: no more connected images to register, %u images remain", unregistered.size());
+			for (const auto& it : unregistered) {
+				DEBUG_EXTRA("\timage %u ('%s'): %u 2D-3D correspondences (min %u)", it.first,
+					Util::getFileName(scene.images[it.first].fileName).c_str(), it.second, config.minCorrespondences);
+			}
 			break;
 		}
 		const unsigned startRegisteredCount = registeredCount;
@@ -241,12 +245,14 @@ bool Resection::RegisterImages()
 		}
 	}
 
-	// Full BA after all images are registered
-	TriangulateTracks(scene, false, config.maxReprojError, config.minAngleThreshold);
-	config.fullBAConfig.maxIterations = 100;
-	config.fullBAConfig.RefineExtendedIntrinsics();
-	BundleAdjustment::Adjust(scene, config.fullBAConfig);
-	FilterTracks(scene, config.maxReprojError, config.minAngleThreshold, config.multDepthNear, config.multDepthFar);
+	// Full BA after all images are registered (nothing changed if none were)
+	if (registeredCount > 0) {
+		TriangulateTracks(scene, false, config.maxReprojError, config.minAngleThreshold);
+		config.fullBAConfig.maxIterations = 100;
+		config.fullBAConfig.RefineExtendedIntrinsics();
+		BundleAdjustment::Adjust(scene, config.fullBAConfig);
+		FilterTracks(scene, config.maxReprojError, config.minAngleThreshold, config.multDepthNear, config.multDepthFar);
+	}
 
 	// Update scene status
 	scene.status.nCalibratedImages += registeredCount;

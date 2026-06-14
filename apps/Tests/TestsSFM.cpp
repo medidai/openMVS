@@ -1963,6 +1963,101 @@ bool CubeMapBridgeDropTopBottomTest()
 /*----------------------------------------------------------------*/
 
 
+// GPS alignment degeneracy test: coincident or collinear GPS positions
+// (e.g. a phone tagging many consecutive images with the same stale fix)
+// must make AlignToGPS fail gracefully, leaving the scene untouched,
+// instead of collapsing it with a scale-0 similarity transform
+bool AlignToGPSDegenerateTest()
+{
+	const auto setGPS = [](Scene& scene, const std::function<double(const Image&)>& latitude) {
+		for (Image& img : scene.images) {
+			View::Metadata& meta = static_cast<View&>(img).metadata;
+			meta.latitude = latitude(img);
+			meta.longitude = 2.1649;
+			meta.altitude = 80.4;
+			meta.positionAccuracy = 5.0;
+			meta.positionAccuracyZ = 5.0;
+		}
+	};
+	const auto checkUnchanged = [](const Scene& scene, const Point3& C0, const char* test) {
+		if (scene.status.nState.isSet(Scene::Status::STATE::GEO_ALIGN) ||
+			!ISZERO(norm(scene.images[0].C - C0))) {
+			VERBOSE("AlignToGPSDegenerateTest FAILED: scene modified by rejected alignment (%s)", test);
+			return false;
+		}
+		return true;
+	};
+
+	SceneConfig cfg;
+	cfg.numImages = 12;
+	cfg.numPoints = 50;
+	cfg.rotationAngleStep = 30.0;
+	Scene scene;
+	GenerateTestScene(scene, cfg);
+	const Point3 C0 = scene.images[0].C;
+
+	// Test 1: all images share the same GPS fix
+	setGPS(scene, [](const Image&) { return 41.3918; });
+	if (scene.AlignToGPS(5.0)) {
+		VERBOSE("AlignToGPSDegenerateTest FAILED: coincident GPS positions accepted");
+		return false;
+	}
+	if (!checkUnchanged(scene, C0, "coincident"))
+		return false;
+
+	// Test 2: only two distinct GPS fixes (collinear)
+	setGPS(scene, [](const Image& img) { return img.ID % 2 ? 41.3918 : 41.39191; });
+	if (scene.AlignToGPS(5.0)) {
+		VERBOSE("AlignToGPSDegenerateTest FAILED: collinear GPS positions accepted");
+		return false;
+	}
+	if (!checkUnchanged(scene, C0, "collinear"))
+		return false;
+
+	// Test 3: the closed-form estimation must reject coincident destination points
+	{
+		std::mt19937 rng(42);
+		std::uniform_real_distribution<REAL> dist(-10, 10);
+		Point3Arr src, dst;
+		for (int i = 0; i < 12; ++i) {
+			src.emplace_back(dist(rng), dist(rng), dist(rng));
+			dst.emplace_back(1.0, 2.0, 3.0);
+		}
+		SEACAVE::Transform t;
+		if (EstimateSimilarityTransform(src, dst, t, 0.0) != 0) {
+			VERBOSE("AlignToGPSDegenerateTest FAILED: scale-0 similarity transform accepted");
+			return false;
+		}
+	}
+
+	// Test 4: well-spread GPS positions must still align (positive control)
+	{
+		SceneConfig cfgGPS;
+		cfgGPS.numImages = 12;
+		cfgGPS.numPoints = 50;
+		cfgGPS.rotationAngleStep = 30.0;
+		cfgGPS.circularRadius = 30.0;
+		cfgGPS.generateGPS = true; // aligns to GPS with threshold 0 during generation
+		Scene sceneGPS;
+		GenerateTestScene(sceneGPS, cfgGPS);
+		const REAL baseline = norm(sceneGPS.images[0].C - sceneGPS.images[6].C);
+		if (!sceneGPS.AlignToGPS(5.0)) {
+			VERBOSE("AlignToGPSDegenerateTest FAILED: well-spread GPS positions rejected");
+			return false;
+		}
+		const REAL baselineAligned = norm(sceneGPS.images[0].C - sceneGPS.images[6].C);
+		if (ABS(baselineAligned / baseline - REAL(1)) > REAL(1e-6)) {
+			VERBOSE("AlignToGPSDegenerateTest FAILED: scale not preserved (%g -> %g)", baseline, baselineAligned);
+			return false;
+		}
+	}
+
+	VERBOSE("AlignToGPSDegenerateTest PASSED");
+	return true;
+}
+/*----------------------------------------------------------------*/
+
+
 // Small SFM smoke test: build tiny scene and run BundleAdjustment::Adjust
 bool PipelineTest()
 {

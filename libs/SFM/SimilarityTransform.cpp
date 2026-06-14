@@ -137,6 +137,10 @@ unsigned SFM::EstimateSimilarityTransform(
 	}
 
 	transform = EstimateSimilarityTransform(srcPoints, dstPoints);
+	if (!ISFINITE(transform.scale) || transform.scale <= 0) {
+		VERBOSE("error: degenerate similarity transform (scale %.3g), points likely coincident or collinear", transform.scale);
+		return 0;
+	}
 	DEBUG_EXTRA("Estimated transform: scale %.3g, translation %.3g, rotation %.3g",
 		transform.scale, norm(transform.t), FrobeniusNorm(transform.R));
 
@@ -182,7 +186,7 @@ unsigned SFM::EstimateSimilarityTransform(
 		ceres::Solver::Summary summary;
 		ceres::Solve(options, &problem, &summary);
 		DEBUG("BA Summary: %s", summary.BriefReport().c_str());
-		if (!summary.IsSolutionUsable()) {
+		if (!summary.IsSolutionUsable() || !ISFINITE(params[7]) || params[7] <= 0) {
 			VERBOSE("error: similarity transform refinement failed");
 			return 0;
 		}

@@ -46,6 +46,10 @@ bool BAPinholeReprojectionJacobianTest();
 // Small SFM smoke test: build tiny scene and run BundleAdjustment::Adjust
 bool PipelineTest();
 
+// GPS alignment degeneracy test: coincident/collinear GPS positions must be
+// rejected without modifying the scene; well-spread GPS must still align
+bool AlignToGPSDegenerateTest();
+
 // Full-hemisphere spherical reconstruction regression test: exercises the
 // Triangulation + BA pipeline on a spherical scene with 3D points distributed
 // across the entire sphere (front AND back hemispheres). Pins the correctness
