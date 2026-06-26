@@ -33,6 +33,7 @@
 #include "Scene.h"
 #include "SceneDensify.h"
 #include "PatchMatchCUDA.h"
+#include "PatchMatchMetal.h"
 #include "DMapCache.h"
 
 using namespace MVS;
@@ -139,6 +140,10 @@ DepthMapsData::DepthMapsData(Scene& _scene)
 	, pmCUDANextIdx((Thread::safe_t)-1)
 	, pmCUDAEpoch(0)
 	#endif // _USE_CUDA
+	#ifdef _USE_METAL
+	, pmMetalNextIdx((Thread::safe_t)-1)
+	, pmMetalEpoch(0)
+	#endif // _USE_METAL
 {
 } // constructor
 
@@ -179,6 +184,43 @@ void DepthMapsData::ReinitCudaPoolForGeom()
 	Thread::safeInc(pmCUDAEpoch);
 }
 #endif // _USE_CUDA
+
+#ifdef _USE_METAL
+bool DepthMapsData::AllocateMetalPool(unsigned poolSize)
+{
+	ASSERT(pmMetalPool.empty());
+	if (poolSize == 0)
+		poolSize = 1;
+	auto probe = std::make_unique<MVS::METAL::PatchMatch>();
+	if (!probe->IsValid())
+		return false;
+	probe->Init(false);
+	pmMetalPool.reserve(poolSize);
+	pmMetalPool.emplace_back(std::move(probe));
+	for (unsigned k = 1; k < poolSize; ++k) {
+		auto pm = std::make_unique<MVS::METAL::PatchMatch>();
+		// the probe proved the device + pipelines build; an additional instance
+		// failing is unexpected (e.g. resource exhaustion), so stop growing rather
+		// than add an invalid worker that would silently produce empty depth-maps
+		if (!pm->IsValid())
+			break;
+		pm->Init(false);
+		pmMetalPool.emplace_back(std::move(pm));
+	}
+	pmMetalNextIdx = (Thread::safe_t)-1;
+	return true;
+}
+
+void DepthMapsData::ReinitMetalPoolForGeom()
+{
+	for (auto& pm : pmMetalPool) {
+		pm->Release();
+		pm->Init(true);
+	}
+	pmMetalNextIdx = (Thread::safe_t)-1;
+	Thread::safeInc(pmMetalEpoch);
+}
+#endif // _USE_METAL
 /*----------------------------------------------------------------*/
 
 // compute visibility for the reference image (the first image in "images")
@@ -549,10 +591,12 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 	#ifdef _USE_CUDA
 	if (!pmCUDAPool.empty()) {
 		// claim a pool slot for this worker thread; epoch invalidates the claim
-		// across phase boundaries so re-used OS threads pick a fresh slot
+		// across phase boundaries so re-used OS threads pick a fresh slot. also
+		// re-claim when a thread reused across DepthMapsData instances holds a slot
+		// now out of range for a smaller pool (epochs can collide at the value 0)
 		static thread_local int s_slot = -1;
 		static thread_local Thread::safe_t s_epoch = (Thread::safe_t)-1;
-		if (s_slot < 0 || s_epoch != pmCUDAEpoch) {
+		if (!ISINSIDE(s_slot, 0, (int)pmCUDAPool.size()) || s_epoch != pmCUDAEpoch) {
 			s_slot = (int)(Thread::safeInc(pmCUDANextIdx) % (Thread::safe_t)pmCUDAPool.size());
 			s_epoch = pmCUDAEpoch;
 		}
@@ -560,6 +604,24 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 		return true;
 	}
 	#endif // _USE_CUDA
+
+	#ifdef _USE_METAL
+	if (!pmMetalPool.empty()) {
+		// runs both photometric (nGeometricIter < 0) and geometric-consistency passes;
+		// the pool's bGeomConsistency state (Init/ReinitMetalPoolForGeom) selects the mode
+		static thread_local int s_slotM = -1;
+		static thread_local Thread::safe_t s_epochM = (Thread::safe_t)-1;
+		// re-claim a slot when uninitialized, after a phase boundary (epoch bump), or
+		// when a thread reused across DepthMapsData instances holds a slot that is now
+		// out of range for a smaller pool (epochs can collide at the initial value 0)
+		if (!ISINSIDE(s_slotM, 0, (int)pmMetalPool.size()) || s_epochM != pmMetalEpoch) {
+			s_slotM = (int)(Thread::safeInc(pmMetalNextIdx) % (Thread::safe_t)pmMetalPool.size());
+			s_epochM = pmMetalEpoch;
+		}
+		pmMetalPool[s_slotM]->EstimateDepthMap(arrDepthData[idxImage]);
+		return true;
+	}
+	#endif // _USE_METAL
 
 	TD_TIMER_STARTD();
 
@@ -1921,7 +1983,7 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 
 DenseDepthMapData::DenseDepthMapData(Scene& _scene, int _nFusionMode, float _fSampleMeshNeighbors) :
 	scene(_scene), depthMaps(_scene), idxImage(0), sem(1), nEstimationGeometricIter(-1),
-	nFusionMode(_nFusionMode), fSampleMeshNeighbors(_fSampleMeshNeighbors), nDenseWorkers(2u)
+	nFusionMode(_nFusionMode), fSampleMeshNeighbors(_fSampleMeshNeighbors), nClosing(0), nDenseWorkers(2u)
 {
 	if (nFusionMode < 0) {
 		STEREO::SemiGlobalMatcher::CreateThreads(scene.nMaxThreads);
@@ -2145,28 +2207,41 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 	}
 	}
 
-	#ifdef _USE_CUDA
+	#if defined(_USE_CUDA) || defined(_USE_METAL)
 	// One PatchMatch instance per worker thread; host-side prep (image upload,
-	// depth-prior packing, result unpack) then parallelizes while the kernel
-	// launches stay GPU-side-serialized via the cudaEvent_t chain.
+	// depth-prior packing, result unpack) parallelizes across the worker pool while
+	// the backend serializes the kernel launches as needed (CUDA via the cudaEvent_t
+	// chain). The GPU backend (CUDA on Windows/Linux, Metal on Apple) is selected by
+	// the shared --gpu-device param (-1 GPU, -2/cpu/empty CPU).
 	if (!SEACAVE::CUDA::isCpuRequested(SEACAVE::CUDA::desiredDeviceIDs) && data.nFusionMode >= 0) {
 		const unsigned poolSize = (nMaxThreads > 1)
 			? CLAMP(OPTDENSE::nPatchMatchCUDAInstances, 1u, nMaxThreads)
 			: 1u;
-		if (data.depthMaps.AllocateCudaPool(poolSize)) {
+		#ifdef _USE_CUDA
+		const bool bAllocatedPool = data.depthMaps.AllocateCudaPool(poolSize);
+		#else
+		const bool bAllocatedPool = data.depthMaps.AllocateMetalPool(poolSize);
+		#endif
+		if (bAllocatedPool) {
 			// raise the in-flight semaphore so all pool workers can run
 			// EstimateDepthMap concurrently
 			data.sem.Clear(poolSize);
 			data.nDenseWorkers = poolSize;
+			#ifdef _USE_CUDA
+			VERBOSE("Using CUDA compute backend for depth-map estimation (%u workers)", poolSize);
+			#else
+			VERBOSE("Using Metal compute backend for depth-map estimation (%u workers)", poolSize);
+			#endif
 		}
 	}
-	#endif // _USE_CUDA
+	#endif // _USE_CUDA || _USE_METAL
 
 	// initialize the queue of images to be processed
 	const int nOptimize(OPTDENSE::nOptimize);
 	if (OPTDENSE::nEstimationGeometricIters && data.nFusionMode >= 0)
 		OPTDENSE::nOptimize = 0;
 	data.idxImage = 0;
+	data.nClosing = 0;
 	ASSERT(data.events.IsEmpty());
 	data.events.AddEvent(new EVTProcessImage(0));
 	// start working threads
@@ -2185,6 +2260,8 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 		DenseReconstructionEstimate((void*)&data);
 	}
 	GET_LOGCONSOLE().Play();
+	// the balanced shutdown leaves the queue empty on success; anything left is a
+	// genuine worker failure (e.g. a propagated EVTFail)
 	if (!data.events.IsEmpty())
 		return false;
 	data.progress.Release();
@@ -2194,11 +2271,16 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 		if (!data.depthMaps.pmCUDAPool.empty() && OPTDENSE::nEstimationGeometricIters)
 			data.depthMaps.ReinitCudaPoolForGeom();
 		#endif // _USE_CUDA
+		#ifdef _USE_METAL
+		if (!data.depthMaps.pmMetalPool.empty() && OPTDENSE::nEstimationGeometricIters)
+			data.depthMaps.ReinitMetalPoolForGeom();
+		#endif // _USE_METAL
 		while (++data.nEstimationGeometricIter < (int)OPTDENSE::nEstimationGeometricIters) {
 			// initialize the queue of images to be geometric processed
 			if (data.nEstimationGeometricIter+1 == (int)OPTDENSE::nEstimationGeometricIters)
 				OPTDENSE::nOptimize = nOptimize;
 			data.idxImage = 0;
+			data.nClosing = 0;
 			ASSERT(data.events.IsEmpty());
 			data.events.AddEvent(new EVTProcessImage(0));
 			// start working threads
@@ -2279,11 +2361,18 @@ void Scene::DenseReconstructionEstimate(void* pData)
 			const EVTProcessImage& evtImage = *((EVTProcessImage*)(Event*)evt);
 			if (evtImage.idxImage >= data.images.size()) {
 				if (nMaxThreads > 1) {
-					// close working threads: broadcast one EVT_CLOSE per sibling.
-					// This worker exits below; each other worker consumes one event.
-					// (Old single-event pattern hung whenever nDenseWorkers > 2.)
-					for (unsigned k = 1; k < data.nDenseWorkers; ++k)
-						data.events.AddEvent(new EVTClose);
+					// Work is exhausted. More than one worker can reach this branch
+					// (each pulls a distinct safeInc'd index past the end), so don't
+					// let every one of them broadcast: the first worker here (latch
+					// 0->1) enqueues exactly one EVT_CLOSE per worker -- itself
+					// included -- and every worker, including the ones in this branch,
+					// then exits by consuming exactly one. The counts stay balanced,
+					// so no orphaned EVT_CLOSE is left behind and a non-empty queue
+					// after the join remains a reliable failure signal.
+					if (Thread::safeInc(data.nClosing) == 1)
+						for (unsigned k = 0; k < data.nDenseWorkers; ++k)
+							data.events.AddEvent(new EVTClose);
+					break; // loop back to consume our own EVT_CLOSE
 				}
 				return;
 			}
