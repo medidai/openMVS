@@ -1536,7 +1536,16 @@ void DepthMapsData::FuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, b
 		cacheDMaps.SkipMemoryCheckIdxImage(idxImage);
 		const DepthData& depthData(arrDepthData[idxImage]);
 		ASSERT(depthData.GetView().GetLocalID(scene.images) == idxImage);
-		ASSERT(!depthData.IsEmpty());
+		// See DenseFuseDepthMaps: FetchBestNextDMapIndex can select a reference
+		// view whose depth-map raster failed to load (missing/empty/corrupt
+		// .dmap from a view with "not enough images in view"); skip it instead
+		// of indexing an empty raster below (release-mode SIGSEGV).
+		if (depthData.IsEmpty()) {
+			VERBOSE("warning: skipping reference view %u: depth-map could not be loaded for fusion", depthData.GetView().GetID());
+			cacheDMaps.SkipMemoryCheckIdxImage();
+			fusedDMaps[idxImage] = true;
+			continue;
+		}
 		if (bEstimateNormal && depthData.normalMap.empty())
 			EstimateNormalMaps();
 		ASSERT(!depthData.images.empty() && !depthData.neighbors.empty());
@@ -1871,7 +1880,20 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 		cacheDMaps.SkipMemoryCheckIdxImage(idxImage);
 		const DepthData& depthData(arrDepthData[idxImage]);
 		ASSERT(depthData.GetView().GetLocalID(scene.images) == idxImage);
-		ASSERT(!depthData.IsEmpty());
+		// FetchBestNextDMapIndex only checks IsValid() (depth-data metadata is
+		// present), so a reference view whose depth-map raster could not be
+		// loaded - a missing/empty/corrupt .dmap, e.g. a view that failed depth
+		// estimation with "not enough images in view" on hard or tower-like
+		// scenes - can still be selected here. The per-pixel fusion loop below
+		// indexes depthData.depthMap(x) directly, guarded only by ASSERTs that
+		// are compiled out in Release, so an empty raster is a hard SIGSEGV.
+		// Skip the reference view instead of fusing it.
+		if (depthData.IsEmpty()) {
+			VERBOSE("warning: skipping reference view %u: depth-map could not be loaded for fusion", depthData.GetView().GetID());
+			cacheDMaps.SkipMemoryCheckIdxImage();
+			fusedDMaps[idxImage] = true;
+			continue;
+		}
 		if (bEstimateNormal && depthData.normalMap.empty())
 			EstimateNormalMaps();
 		// make sure all neighbors are cached
