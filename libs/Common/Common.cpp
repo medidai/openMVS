@@ -11,6 +11,53 @@
 
 #include "Common.h"
 
+// On Linux the upstream Breakpad MiniDumper is Windows-only, so a crash (e.g. a
+// SIGSEGV deep inside dense reconstruction) dies with no backtrace - the parent
+// only sees rc=139. Install a lightweight execinfo-based signal handler that
+// prints a symbolized backtrace to stderr (captured by the pipeline logs) and
+// then re-raises the signal so the process still core-dumps as before.
+#if defined(__linux__)
+#include <execinfo.h>
+#include <csignal>
+#include <cstdio>
+#include <cstring>
+#include <unistd.h>
+
+namespace {
+void SeacaveCrashSignalHandler(int sig) {
+	// backtrace()/backtrace_symbols_fd() are the async-signal-safe pair
+	// (unlike backtrace_symbols(), which allocates); keep everything else here
+	// minimal and reentrancy-friendly since we run from a crashing context.
+	void* frames[64];
+	const int numFrames = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+	char header[96];
+	const int len = snprintf(header, sizeof(header),
+		"\n=== OpenMVS fatal signal %d; backtrace (%d frames) ===\n", sig, numFrames);
+	if (len > 0)
+		(void)!write(STDERR_FILENO, header, (size_t)len);
+	backtrace_symbols_fd(frames, numFrames, STDERR_FILENO);
+	static const char footer[] = "=== end OpenMVS backtrace ===\n";
+	(void)!write(STDERR_FILENO, footer, sizeof(footer) - 1);
+	// SA_RESETHAND restored the default disposition on entry, so re-raising now
+	// produces the original signal/core-dump behaviour (parent still sees rc=139).
+	raise(sig);
+}
+
+void InstallCrashSignalHandlers() {
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SeacaveCrashSignalHandler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESETHAND | SA_NODEFER;
+	sigaction(SIGSEGV, &sa, nullptr);
+	sigaction(SIGABRT, &sa, nullptr);
+	sigaction(SIGBUS, &sa, nullptr);
+	sigaction(SIGFPE, &sa, nullptr);
+	sigaction(SIGILL, &sa, nullptr);
+}
+} // namespace
+#endif // __linux__
+
 namespace SEACAVE {
 // Tagged GENERAL_API to match the `extern GENERAL_API` declarations in
 // Common.h so MSVC actually emits these as exported entries in Common.dll.
@@ -59,6 +106,12 @@ void SEACAVE::Initialize(LPCTSTR appname, unsigned nMaxThreads, int nProcessPrio
 	#ifdef _USE_BREAKPAD
 	// initialize crash memory dumper
 	MiniDumper::Create(appname, WORKING_FOLDER);
+	#endif
+
+	#if defined(__linux__)
+	// Breakpad above is Windows-only; on Linux install an execinfo backtrace
+	// handler so fatal signals leave a stack trace in the logs.
+	InstallCrashSignalHandlers();
 	#endif
 
 	// initialize random number generator

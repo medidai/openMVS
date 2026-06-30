@@ -114,6 +114,17 @@ ELSE()
 	MESSAGE(STATUS "Build configuration: ${CMAKE_GENERATOR} - ${CMAKE_BUILD_TYPE}")
 ENDIF()
 
+# Crash diagnostics (Linux): keep the optimized Release build but also emit DWARF
+# line tables (-g) and export the dynamic symbol table (-rdynamic) so the
+# in-process SIGSEGV backtrace handler in libs/Common/Common.cpp prints frames
+# that resolve to file:line via addr2line on the built binaries/.so files.
+# Guarded to C/C++ so nvcc (CUDA) is unaffected.
+IF(UNIX AND NOT APPLE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+	ADD_COMPILE_OPTIONS($<$<COMPILE_LANGUAGE:CXX>:-g> $<$<COMPILE_LANGUAGE:C>:-g>)
+	ADD_LINK_OPTIONS(-rdynamic)
+	MESSAGE(STATUS "Crash diagnostics: enabling -g + -rdynamic for symbolized backtraces")
+ENDIF()
+
 # Build position-independent code, so that shared libraries can link against OpenMVS static libraries.
 SET(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Set global property to avoid cyclic dependencies.
