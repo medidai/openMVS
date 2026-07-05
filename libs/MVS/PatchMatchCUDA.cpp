@@ -192,9 +192,9 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 	params.nInitTopK = std::min(params.nInitTopK, params.nNumViews);
 	params.fDepthMin = depthData.dMin;
 	params.fDepthMax = depthData.dMax;
-	params.fInitDepthNoise = OPTDENSE::strInitDepthDir.empty() ? 0.f : OPTDENSE::fInitDepthNoise;
-	DEBUG_EXTRA("CUDA PatchMatch image %3u: geomConsistency=%d, initDepthNoise=%.3f, depthRange=[%.4f,%.4f], subResLevels=%u",
-		depthData.images.front().GetID(), params.bGeomConsistency, params.fInitDepthNoise,
+	DEBUG_EXTRA("CUDA PatchMatch image %3u: geomConsistency=%d, depthPriorWeight=%.3f (prior %s), depthRange=[%.4f,%.4f], subResLevels=%u",
+		depthData.images.front().GetID(), params.bGeomConsistency, OPTDENSE::fDepthPriorWeight,
+		depthData.priorDepthMap.empty() ? "absent" : "present",
 		params.fDepthMin, params.fDepthMax, params.bGeomConsistency ? 0u : OPTDENSE::nSubResolutionLevels);
 
 	if (prevNumImages < numImages) {
@@ -357,12 +357,34 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 			CUDA_CHECK(cudaMemcpy(cudaLowDepths, depthData.depthMap.ptr<float>(), sizeof(float) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice));
 		}
 
+		// load the persistent depth prior (+confidence) into CUDA memory; the prior
+		// biases ScorePlane across all iterations, gated by fDepthPriorWeight
+		params.fDepthPriorWeight = 0.f;
+		if (OPTDENSE::fDepthPriorWeight > 0 && !depthData.priorDepthMap.empty() && !depthData.priorConfMap.empty()) {
+			DepthMap priorDepthMap(depthData.priorDepthMap);
+			ConfidenceMap priorConfMap(depthData.priorConfMap);
+			if (priorDepthMap.size() != size)
+				cv::resize(priorDepthMap, priorDepthMap, size, 0, 0, cv::INTER_LINEAR);
+			if (priorConfMap.size() != size)
+				cv::resize(priorConfMap, priorConfMap, size, 0, 0, cv::INTER_LINEAR);
+			ASSERT(priorDepthMap.isContinuous() && priorConfMap.isContinuous());
+			CUDA_CHECK(cudaMalloc((void**)&cudaPriorDepths, sizeof(float) * size.area()));
+			CUDA_CHECK(cudaMalloc((void**)&cudaPriorConfs, sizeof(float) * size.area()));
+			CUDA_CHECK(cudaMemcpy(cudaPriorDepths, priorDepthMap.ptr<float>(), sizeof(float) * size.area(), cudaMemcpyHostToDevice));
+			CUDA_CHECK(cudaMemcpy(cudaPriorConfs, priorConfMap.ptr<float>(), sizeof(float) * size.area(), cudaMemcpyHostToDevice));
+			params.fDepthPriorWeight = MINF(OPTDENSE::fDepthPriorWeight, 1.f);
+		}
+
 		// run CUDA patch-match
 		ASSERT(!depthData.viewsMap.empty());
 		RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
 		CUDA_CHECK(cudaGetLastError());
 		if (params.bLowResProcessed)
 			CUDA_CHECK(cudaFree(cudaLowDepths));
+		if (params.fDepthPriorWeight > 0) {
+			CUDA_CHECK(cudaFree(cudaPriorDepths));
+			CUDA_CHECK(cudaFree(cudaPriorConfs));
+		}
 
 		// load depth-map, normal-map and confidence-map from CUDA memory
 		for (int r = 0; r < depthData.depthMap.rows; ++r) {

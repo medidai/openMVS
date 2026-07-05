@@ -378,7 +378,7 @@ bool DepthMapsData::ImportInitDepthMap(DepthData& depthData)
 		DEBUG_EXTRA("warning: no init depth-map for image %3u (%s) at '%s'", viewRef.GetID(), Util::getFileName(viewRef.pImageData->name).c_str(), fileName.c_str());
 		return false;
 	}
-	// load the precomputed depth-map (depth values only)
+	// load the precomputed depth-map (depth values and optional confidence)
 	String imageFileName;
 	IIndexArr IDs;
 	cv::Size imageSize;
@@ -386,9 +386,10 @@ bool DepthMapsData::ImportInitDepthMap(DepthData& depthData)
 	Depth dMin, dMax;
 	DepthMap initDepthMap;
 	NormalMap normalMap;
-	ConfidenceMap confMap;
+	ConfidenceMap initConfMap;
 	ViewsMap viewsMap;
-	if (!ImportDepthDataRaw(fileName, imageFileName, IDs, imageSize, camera.K, camera.R, camera.C, dMin, dMax, initDepthMap, normalMap, confMap, viewsMap, 1) || initDepthMap.empty()) {
+	if (!ImportDepthDataRaw(fileName, imageFileName, IDs, imageSize, camera.K, camera.R, camera.C, dMin, dMax, initDepthMap, normalMap, initConfMap, viewsMap,
+			HeaderDepthDataRaw::HAS_DEPTH|HeaderDepthDataRaw::HAS_CONF) || initDepthMap.empty()) {
 		DEBUG("warning: could not read init depth-map %s", fileName.c_str());
 		return false;
 	}
@@ -397,6 +398,8 @@ bool DepthMapsData::ImportInitDepthMap(DepthData& depthData)
 	const bool bResized(srcSize != depthData.depthMap.size());
 	if (bResized)
 		cv::resize(initDepthMap, initDepthMap, depthData.depthMap.size(), 0, 0, cv::INTER_LINEAR);
+	if (!initConfMap.empty() && initConfMap.size() != depthData.depthMap.size())
+		cv::resize(initConfMap, initConfMap, depthData.depthMap.size(), 0, 0, cv::INTER_LINEAR);
 	// copy the valid depths over the current initialization and expand the depth-range accordingly
 	Depth newMin(depthData.dMin), newMax(depthData.dMax);
 	unsigned numValid(0);
@@ -416,13 +419,28 @@ bool DepthMapsData::ImportInitDepthMap(DepthData& depthData)
 		DEBUG("warning: init depth-map %s has no valid depths", fileName.c_str());
 		return false;
 	}
+	// keep the prior persistent for the cost-term blend (used across all PatchMatch
+	// iterations, gated by OPTDENSE::fDepthPriorWeight); when the file carries no
+	// confidence channel, assume full confidence where the prior depth is valid
+	if (OPTDENSE::fDepthPriorWeight > 0) {
+		depthData.priorDepthMap = initDepthMap;
+		if (!initConfMap.empty()) {
+			depthData.priorConfMap = initConfMap;
+		} else {
+			depthData.priorConfMap.create(initDepthMap.size());
+			for (int r=0; r<initDepthMap.rows; ++r)
+				for (int c=0; c<initDepthMap.cols; ++c)
+					depthData.priorConfMap(r,c) = (initDepthMap(r,c) > 0 && ISFINITE(initDepthMap(r,c))) ? 1.f : 0.f;
+		}
+	}
 	if (newMin < depthData.dMin) depthData.dMin = MAXF(newMin*0.9f, 1e-3f);
 	if (newMax > depthData.dMax) depthData.dMax = newMax*1.1f;
 	const unsigned numTotal((unsigned)depthData.depthMap.rows * depthData.depthMap.cols);
 	const float coverage(numTotal ? 100.f*numValid/numTotal : 0.f);
-	DEBUG_EXTRA("Depth-map %3u (%s) initialized from external prior %s (%u/%u valid depths, %.1f%%, dMin=%.4f dMax=%.4f%s)",
+	DEBUG_EXTRA("Depth-map %3u (%s) initialized from external prior %s (%u/%u valid depths, %.1f%%, dMin=%.4f dMax=%.4f, conf=%s, persistent=%s%s)",
 		viewRef.GetID(), Util::getFileName(viewRef.pImageData->name).c_str(), Util::getFileNameExt(fileName).c_str(),
 		numValid, numTotal, coverage, depthData.dMin, depthData.dMax,
+		initConfMap.empty() ? "no" : "yes", depthData.priorDepthMap.empty() ? "no" : "yes",
 		bResized ? String::FormatString(", resized %dx%d->%dx%d", srcSize.width, srcSize.height, depthData.depthMap.cols, depthData.depthMap.rows).c_str() : "");
 	return true;
 } // ImportInitDepthMap
@@ -451,13 +469,6 @@ void* STCALL DepthMapsData::ScoreDepthMapTmp(void* arg)
 			normal = estimator.RandomNormal(viewDir);
 		} else {
 			// valid initialization (sparse triangulation or external prior)
-			if (!OPTDENSE::strInitDepthDir.empty() && OPTDENSE::fInitDepthNoise > 0) {
-				// alpha-blend the prior depth toward a random depth: factor in [0,1],
-				// 0 => exact prior, 1 => same distribution as the default random init
-				const float f(MINF(OPTDENSE::fInitDepthNoise, 1.f));
-				const Depth dRand(estimator.RandomDepth(estimator.dMinSqr, estimator.dMaxSqr));
-				depth = MINF(MAXF((1.f - f) * depth + f * dRand, estimator.dMin), estimator.dMax);
-			}
 			if (normal.dot(viewDir) >= 0) {
 				// replace invalid normal with random values
 				normal = estimator.RandomNormal(viewDir);
@@ -550,6 +561,10 @@ DepthData DepthMapsData::ScaleDepthData(const DepthData& inputDeptData, float sc
 		cv::resize(rescaledDepthData.depthMap, rescaledDepthData.depthMap, cv::Size(), scale, scale, cv::INTER_NEAREST);
 	if (!rescaledDepthData.normalMap.empty())
 		cv::resize(rescaledDepthData.normalMap, rescaledDepthData.normalMap, cv::Size(), scale, scale, cv::INTER_NEAREST);
+	if (!rescaledDepthData.priorDepthMap.empty())
+		cv::resize(rescaledDepthData.priorDepthMap, rescaledDepthData.priorDepthMap, cv::Size(), scale, scale, cv::INTER_LINEAR);
+	if (!rescaledDepthData.priorConfMap.empty())
+		cv::resize(rescaledDepthData.priorConfMap, rescaledDepthData.priorConfMap, cv::Size(), scale, scale, cv::INTER_LINEAR);
 	return rescaledDepthData;
 }
 
@@ -575,9 +590,9 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 	}
 	#endif // _USE_CUDA
 
-	DEBUG_EXTRA("CPU PatchMatch image %3u: geomIter=%d, initDepthNoise=%.3f",
+	DEBUG_EXTRA("CPU PatchMatch image %3u: geomIter=%d, initDepthDir=%s",
 		arrDepthData[idxImage].images.front().GetID(), nGeometricIter,
-		OPTDENSE::strInitDepthDir.empty() ? 0.f : OPTDENSE::fInitDepthNoise);
+		OPTDENSE::strInitDepthDir.empty() ? "no" : "yes");
 
 	TD_TIMER_STARTD();
 
@@ -2174,8 +2189,8 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 			}
 		}
 
-		VERBOSE("Init depth priors: dir='%s', noise=%.3f, matched %u/%u selected images",
-			initDepthDir.c_str(), OPTDENSE::fInitDepthNoise, numMatched, data.images.GetSize());
+		VERBOSE("Init depth priors: dir='%s', prior-weight=%.3f, matched %u/%u selected images",
+			initDepthDir.c_str(), OPTDENSE::fDepthPriorWeight, numMatched, data.images.GetSize());
 	}
 	
 	VERBOSE("Depth-map estimation: photometric pass (iters=%u, geom-iters=%u, patch-match=%s)",

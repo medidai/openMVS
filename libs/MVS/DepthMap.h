@@ -148,7 +148,7 @@ extern float fRandomSmoothDepth;
 extern float fRandomSmoothNormal;
 extern float fRandomSmoothBonus;
 extern String strInitDepthDir;
-extern float fInitDepthNoise;
+extern float fDepthPriorWeight;
 } // namespace OPTDENSE
 /*----------------------------------------------------------------*/
 
@@ -225,6 +225,8 @@ struct MVS_API DepthData {
 	DepthMap depthMap; // depth-map
 	NormalMap normalMap; // normal-map in camera space
 	ConfidenceMap confMap; // confidence-map
+	DepthMap priorDepthMap; // persistent depth prior (e.g. DA3), aligned to MVS scale (optional)
+	ConfidenceMap priorConfMap; // confidence in [0,1] of the depth prior (optional)
 	ViewsMap viewsMap; // view-IDs map (indexing images vector starting after first view)
 	float dMin, dMax; // global depth range for this image
 	cv::Size size; // image size used to estimate this depth-map
@@ -244,6 +246,8 @@ struct MVS_API DepthData {
 		depthMap.release();
 		normalMap.release();
 		confMap.release();
+		priorDepthMap.release();
+		priorConfMap.release();
 		viewsMap.release();
 	}
 

@@ -64,7 +64,7 @@ public:
 		bool bGeomConsistency = false;
 		bool bLowResProcessed = false;
 		float fThresholdKeepCost = 0;
-		float fInitDepthNoise = 0.f;
+		float fDepthPriorWeight = 0.f;
 	};
 
 public:
@@ -101,6 +101,8 @@ public:
 	cudaTextureObject_t* cudaTextureDepths;
 	Point4* cudaDepthNormalEstimates;
 	float* cudaLowDepths;
+	float* cudaPriorDepths = NULL;
+	float* cudaPriorConfs = NULL;
 	float* cudaDepthNormalCosts;
 	curandState* cudaRandStates;
 	uint32_t* cudaSelectedViews;
