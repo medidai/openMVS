@@ -192,9 +192,10 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 	params.nInitTopK = std::min(params.nInitTopK, params.nNumViews);
 	params.fDepthMin = depthData.dMin;
 	params.fDepthMax = depthData.dMax;
-	DEBUG_EXTRA("CUDA PatchMatch image %3u: geomConsistency=%d, depthPriorWeight=%.3f (prior %s), depthRange=[%.4f,%.4f], subResLevels=%u",
+	DEBUG_EXTRA("CUDA PatchMatch image %3u: geomConsistency=%d, depthPriorWeight=%.3f (prior %s), normalPriorWeight=%.3f (prior %s), depthRange=[%.4f,%.4f], subResLevels=%u",
 		depthData.images.front().GetID(), params.bGeomConsistency, OPTDENSE::fDepthPriorWeight,
 		depthData.priorDepthMap.empty() ? "absent" : "present",
+		OPTDENSE::fNormalPriorWeight, depthData.priorNormalMap.empty() ? "absent" : "present",
 		params.fDepthMin, params.fDepthMax, params.bGeomConsistency ? 0u : OPTDENSE::nSubResolutionLevels);
 
 	if (prevNumImages < numImages) {
@@ -375,6 +376,21 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 			params.fDepthPriorWeight = MINF(OPTDENSE::fDepthPriorWeight, 1.f);
 		}
 
+		// load the persistent normal prior (e.g. MoGe) into CUDA memory; the prior
+		// biases ScorePlane and proposes refinement candidates on textureless patches,
+		// gated by fNormalPriorWeight; invalid prior normals are zero vectors
+		params.fNormalPriorWeight = 0.f;
+		if (OPTDENSE::fNormalPriorWeight > 0 && !depthData.priorNormalMap.empty()) {
+			NormalMap priorNormalMap(depthData.priorNormalMap);
+			if (priorNormalMap.size() != size)
+				cv::resize(priorNormalMap, priorNormalMap, size, 0, 0, cv::INTER_NEAREST);
+			ASSERT(priorNormalMap.isContinuous());
+			STATIC_ASSERT(sizeof(Point3) == sizeof(Normal));
+			CUDA_CHECK(cudaMalloc((void**)&cudaPriorNormals, sizeof(Point3) * size.area()));
+			CUDA_CHECK(cudaMemcpy(cudaPriorNormals, priorNormalMap.ptr<float>(), sizeof(Point3) * size.area(), cudaMemcpyHostToDevice));
+			params.fNormalPriorWeight = MINF(OPTDENSE::fNormalPriorWeight, 1.f);
+		}
+
 		// run CUDA patch-match
 		ASSERT(!depthData.viewsMap.empty());
 		RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
@@ -384,6 +400,12 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 		if (params.fDepthPriorWeight > 0) {
 			CUDA_CHECK(cudaFree(cudaPriorDepths));
 			CUDA_CHECK(cudaFree(cudaPriorConfs));
+			cudaPriorDepths = NULL;
+			cudaPriorConfs = NULL;
+		}
+		if (params.fNormalPriorWeight > 0) {
+			CUDA_CHECK(cudaFree(cudaPriorNormals));
+			cudaPriorNormals = NULL;
 		}
 
 		// load depth-map, normal-map and confidence-map from CUDA memory

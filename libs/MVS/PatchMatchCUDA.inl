@@ -65,6 +65,7 @@ public:
 		bool bLowResProcessed = false;
 		float fThresholdKeepCost = 0;
 		float fDepthPriorWeight = 0.f;
+		float fNormalPriorWeight = 0.f;
 	};
 
 public:
@@ -103,6 +104,7 @@ public:
 	float* cudaLowDepths;
 	float* cudaPriorDepths = NULL;
 	float* cudaPriorConfs = NULL;
+	Point3* cudaPriorNormals = NULL;
 	float* cudaDepthNormalCosts;
 	curandState* cudaRandStates;
 	uint32_t* cudaSelectedViews;

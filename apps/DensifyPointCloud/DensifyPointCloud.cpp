@@ -141,6 +141,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	bool bRemoveDmaps;
 	String strInitDepthDir;
 	float fDepthPriorWeight;
+	float fNormalPriorWeight;
 	boost::program_options::options_description config("Densify options");
 	config.add_options()
 		("input-file,i", boost::program_options::value<std::string>(&OPT::strInputFileName), "input filename containing camera poses and image list")
@@ -173,8 +174,9 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("estimate-roi", boost::program_options::value(&OPT::nEstimateROI)->default_value(2), "estimate and set region-of-interest (0 - disabled, 1 - enabled, 2 - adaptive)")
 		("crop-to-roi", boost::program_options::value(&OPT::bCrop2ROI)->default_value(true), "crop scene using the region-of-interest")
 		("remove-dmaps", boost::program_options::value(&bRemoveDmaps)->default_value(false), "remove depth-maps after fusion")
-		("init-depth-dir", boost::program_options::value<std::string>(&strInitDepthDir), "optional directory with precomputed per-view depth-maps ('{image-name}.dmap') used to initialize PatchMatch instead of random depths (empty - disabled)")
-		("depth-prior-weight", boost::program_options::value(&fDepthPriorWeight)->default_value(0.f), "weight in [0,1] of the persistent depth-prior term in the PatchMatch matching cost when --init-depth-dir is set; active only on textureless patches with confident prior (0 - disabled, init seeding only)")
+		("init-depth-dir", boost::program_options::value<std::string>(&strInitDepthDir), "optional directory with precomputed per-view depth/normal priors ('{image-name}.dmap') used as persistent guidance in the PatchMatch matching cost (empty - disabled)")
+		("depth-prior-weight", boost::program_options::value(&fDepthPriorWeight)->default_value(0.f), "weight in [0,1] of the persistent depth-prior term in the PatchMatch matching cost when --init-depth-dir is set; active only on textureless patches with confident prior (0 - disabled)")
+		("normal-prior-weight", boost::program_options::value(&fNormalPriorWeight)->default_value(0.f), "weight in [0,1] of the persistent normal-prior term in the PatchMatch matching cost when --init-depth-dir is set and the dmap files carry a normal channel; active only on textureless patches (0 - disabled)")
 		("tower-mode", boost::program_options::value(&OPT::nTowerMode)->default_value(4), "add a cylinder of points in the center of ROI; scene assume to be Z-up oriented (0 - disabled, 1 - replace, 2 - append, 3 - select neighbors, 4 - select neighbors & append, <0 - force tower mode)")
 		("normalize-coordinates", boost::program_options::value(&OPT::nNormalizeCoordinates)->default_value(0), "normalize scene coordinates and output the inverse transform to file (0 - disabled, 1 - center, 2 - center & scale)")
 		;
@@ -272,7 +274,8 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		Util::ensureValidPath(strInitDepthDir);
 		OPTDENSE::strInitDepthDir = strInitDepthDir;
 		OPTDENSE::fDepthPriorWeight = fDepthPriorWeight;
-		VERBOSE("Init depth priors enabled: dir='%s', prior-weight=%.3f (0=init seeding only)", strInitDepthDir.c_str(), fDepthPriorWeight);
+		OPTDENSE::fNormalPriorWeight = fNormalPriorWeight;
+		VERBOSE("Depth/normal priors enabled: dir='%s', depth-prior-weight=%.3f, normal-prior-weight=%.3f", strInitDepthDir.c_str(), fDepthPriorWeight, fNormalPriorWeight);
 	}
 	
 	if (!bValidConfig && !OPT::strDenseConfigFileName.empty())

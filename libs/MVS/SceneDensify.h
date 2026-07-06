@@ -60,7 +60,7 @@ public:
 	bool SelectViews(DepthData& depthData);
 	bool InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex numNeighbors, bool loadImages, int loadDepthMaps);
 	bool InitDepthMap(DepthData& depthData);
-	bool ImportInitDepthMap(DepthData& depthData);
+	bool ImportPriorDepthMap(DepthData& depthData);
 	bool EstimateDepthMap(IIndex idxImage, int nGeometricIter);
 
 	bool RemoveSmallSegments(DepthData& depthData);
