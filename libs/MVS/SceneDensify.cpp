@@ -2109,6 +2109,14 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 			data.depthMaps.pmCUDA->Init(true);
 		}
 		#endif // _USE_CUDA
+		// MVS_KEEP_DMAP_STAGES: when set, preserve the per-stage depth-maps for
+		// offline debugging (medida mvs_debug tool) instead of overwriting them.
+		// Normally the photometric ".dmap" is deleted and each ".geo.dmap" is
+		// renamed over it, so only the final map survives. With this flag we keep
+		// "<name>.photo.dmap" (pure photometric PatchMatch, before any geometric
+		// consistency) and "<name>.geo.dmap" (geometric-consistent, before the
+		// final confidence-adjust pass mutates ".dmap").
+		const bool bKeepStages(getenv("MVS_KEEP_DMAP_STAGES") != NULL);
 		while (++data.nEstimationGeometricIter < (int)OPTDENSE::nEstimationGeometricIters) {
 			// initialize the queue of images to be geometric processed
 			if (data.nEstimationGeometricIter+1 == (int)OPTDENSE::nEstimationGeometricIters)
@@ -2135,13 +2143,24 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 				return false;
 			data.progress.Release();
 			// replace raw depth-maps with the geometric-consistent ones
+			const bool bFirstGeometricIter(data.nEstimationGeometricIter == 0);
+			const bool bLastGeometricIter(data.nEstimationGeometricIter+1 == (int)OPTDENSE::nEstimationGeometricIters);
 			for (IIndex idx: data.images) {
 				const DepthData& depthData(data.depthMaps.arrDepthData[idx]);
 				if (!depthData.IsValid())
 					continue;
 				const String rawName(ComposeDepthFilePath(depthData.GetView().GetID(), "dmap"));
+				const String geoName(ComposeDepthFilePath(depthData.GetView().GetID(), "geo.dmap"));
+				if (bKeepStages && bFirstGeometricIter) {
+					// snapshot the pure photometric depth-map before geometric consistency overwrites it
+					File::copyFile(rawName, ComposeDepthFilePath(depthData.GetView().GetID(), "photo.dmap"));
+				}
 				File::deleteFile(rawName);
-				File::renameFile(ComposeDepthFilePath(depthData.GetView().GetID(), "geo.dmap"), rawName);
+				File::renameFile(geoName, rawName);
+				if (bKeepStages && bLastGeometricIter) {
+					// snapshot the geometric-consistent depth-map (the surviving ".dmap" may still be confidence-adjusted)
+					File::copyFile(rawName, geoName);
+				}
 			}
 		}
 		data.nEstimationGeometricIter = -1;
