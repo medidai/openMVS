@@ -470,6 +470,77 @@ DepthData DepthMapsData::ScaleDepthData(const DepthData& inputDeptData, float sc
 	return rescaledDepthData;
 }
 
+namespace {
+
+inline int WrapTexturelessCoord(int v, int size)
+{
+	v %= size;
+	return v < 0 ? v + size : v;
+}
+
+inline float ComputeTexturelessBilateralWeight(int xDist, int yDist, float pix, float centerPix)
+{
+	constexpr int nSizeHalfWindow = 4;
+	constexpr float sigmaSpatial = -1.f / (2.f * (nSizeHalfWindow-1)*(nSizeHalfWindow-1));
+	constexpr float sigmaColor = -1.f / (2.f * 25.f/255.f*25.f/255.f);
+	const float spatialDistSq = float(xDist * xDist + yDist * yDist);
+	const float colorDistSq = SQUARE(pix - centerPix);
+	return EXP(spatialDistSq * sigmaSpatial + colorDistSq * sigmaColor);
+}
+
+float ComputeTexturelessFactor(const Image32F& image, const ImageRef& p)
+{
+	constexpr int nSizeHalfWindow = 4;
+	constexpr int nSizeStep = 2;
+	constexpr float smoothSigmaDepth = -1.f / (1.f * 0.02f);
+
+	float sumRef = 0.f;
+	float sumRefRef = 0.f;
+	float bilateralWeightSum = 0.f;
+	const float refCenterPix = image(p.y, p.x);
+
+	for (int i = -nSizeHalfWindow; i <= nSizeHalfWindow; i += nSizeStep) {
+		for (int j = -nSizeHalfWindow; j <= nSizeHalfWindow; j += nSizeStep) {
+			const int x = WrapTexturelessCoord(p.x + j, image.width());
+			const int y = WrapTexturelessCoord(p.y + i, image.height());
+			const float refPix = image(y, x);
+			const float weight = ComputeTexturelessBilateralWeight(j, i, refPix, refCenterPix);
+			sumRef += weight * refPix;
+			sumRefRef += weight * refPix * refPix;
+			bilateralWeightSum += weight;
+		}
+	}
+
+	const float varRef = sumRefRef * bilateralWeightSum - sumRef * sumRef;
+	return EXP(varRef * smoothSigmaDepth);
+}
+
+void ExportTexturelessFactorMap(const DepthData& depthData)
+{
+	if (!OPTDENSE::bExportTexturelessMap)
+		return;
+
+	const DepthData::ViewData& image = depthData.GetView();
+	if (image.image.empty())
+		return;
+
+	const String texturelessFileName(ComposeDepthFilePath(image.GetID(), "textureless.jpg"));
+	if (File::access(texturelessFileName))
+		return;
+
+	ConfidenceMap texturelessFactors(image.image.size());
+	ASSERT(texturelessFactors.isContinuous());
+	for (int y = 0; y < image.image.height(); ++y)
+		for (int x = 0; x < image.image.width(); ++x)
+			texturelessFactors(y, x) = ComputeTexturelessFactor(image.image, ImageRef(x, y));
+
+	// Invert the depth-map display range so textureless=1 is bright and textured=0 is dark.
+	ExportDepthMap(texturelessFileName, texturelessFactors, 1.f, 0.f);
+	VERBOSE("Textureless map exported: %s", texturelessFileName.c_str());
+}
+
+} // namespace
+
 // estimate depth-map using propagation and random refinement with NCC score
 // as in: "Accurate Multiple View 3D Reconstruction Using Patch-Based Stereo for Large-Scale Scenes", S. Shen, 2013
 // The implementations follows closely the paper, although there are some changes/additions.
@@ -485,6 +556,8 @@ DepthData DepthMapsData::ScaleDepthData(const DepthData& inputDeptData, float sc
 //  - nGeometricIter: current geometric-consistent estimation iteration (-1 - normal patch-match)
 bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 {
+	ExportTexturelessFactorMap(arrDepthData[idxImage]);
+
 	#ifdef _USE_CUDA
 	if (pmCUDA) {
 		pmCUDA->EstimateDepthMap(arrDepthData[idxImage]);
