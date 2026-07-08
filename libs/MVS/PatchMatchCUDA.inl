@@ -40,6 +40,7 @@
 // OpenCV
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <string>
 
 
 // D E F I N E S ///////////////////////////////////////////////////
@@ -83,9 +84,16 @@ private:
 	void AllocatePatchMatchCUDA(const cv::Mat1f& image);
 	void AllocateImageCUDA(size_t i, const cv::Mat1f& image, bool bInitImage, bool bInitDepthMap);
 	void RunCUDA(float* ptrCostMap=NULL, uint32_t* ptrViewsMap=NULL);
+	void DumpCostMap(int iter);
 
 public:
 	Params params;
+	bool bDumpCostMap = false;
+	std::string dumpCostDir;
+	unsigned dumpCostViewID = 0;
+	unsigned dumpCostScale = 0;
+	int dumpCostGeomIter = -1;
+	unsigned dumpCostSeq = 0;
 
 	std::vector<cv::Mat1f> images;
 	std::vector<Camera> cameras;

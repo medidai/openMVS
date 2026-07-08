@@ -602,6 +602,7 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap)
 		cudaDeviceSynchronize();
 		RedPixelProcess<<<gridSizeCheckerboard, blockSize>>>(cudaTextureImages, cudaTextureDepths, cudaCameras, cudaDepthNormalEstimates, cudaLowDepths, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, params, iter);
 		cudaDeviceSynchronize();
+		DumpCostMap(iter);
 	}
 
 	if (params.fThresholdKeepCost > 0)

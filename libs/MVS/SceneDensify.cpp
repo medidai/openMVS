@@ -487,6 +487,7 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 {
 	#ifdef _USE_CUDA
 	if (pmCUDA) {
+		pmCUDA->dumpCostGeomIter = nGeometricIter;
 		pmCUDA->EstimateDepthMap(arrDepthData[idxImage]);
 		return true;
 	}

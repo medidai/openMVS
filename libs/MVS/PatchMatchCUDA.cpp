@@ -33,6 +33,10 @@
 #include "PatchMatchCUDA.h"
 #include "DepthMap.h"
 
+#include <cmath>
+#include <cstdlib>
+#include <opencv2/imgcodecs.hpp>
+
 #ifdef _USE_CUDA
 
 
@@ -174,6 +178,34 @@ void PatchMatch::AllocateImageCUDA(size_t i, const cv::Mat1f& image, bool bInitI
 	}
 }
 
+void PatchMatch::DumpCostMap(int iter)
+{
+	if (!bDumpCostMap || dumpCostDir.empty())
+		return;
+	const unsigned width = images[0].cols;
+	const unsigned height = images[0].rows;
+	std::vector<float> cost(width * height);
+	CUDA_CHECK(cudaMemcpy(cost.data(), cudaDepthNormalCosts, sizeof(float) * cost.size(), cudaMemcpyDeviceToHost));
+
+	cv::Mat_<uint16_t> image(height, width);
+	for (unsigned i = 0; i < cost.size(); ++i) {
+		float value = cost[i];
+		if (!std::isfinite(value))
+			value = 2.f;
+		value = CLAMP(value, 0.f, 2.f);
+		image(i / width, i % width) = (uint16_t)ROUND2INT(value * (65535.f / 2.f));
+	}
+
+	const unsigned geom = dumpCostGeomIter < 0 ? 0u : (unsigned)dumpCostGeomIter + 1u;
+	const unsigned seq = geom * 100u + (unsigned)iter;
+	const String path = String::FormatString(
+		"%s/%05u_v%04u_s%u_g%u_it%02d_thr%.3f.png",
+		dumpCostDir.c_str(), seq, dumpCostViewID, dumpCostScale, geom, iter,
+		params.fThresholdKeepCost
+	);
+	cv::imwrite(path, image);
+}
+
 void PatchMatch::EstimateDepthMap(DepthData& depthData)
 {
 	TD_TIMER_STARTD();
@@ -192,6 +224,35 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 	params.nInitTopK = std::min(params.nInitTopK, params.nNumViews);
 	params.fDepthMin = depthData.dMin;
 	params.fDepthMax = depthData.dMax;
+	const char* dumpDir = std::getenv("MVS_DUMP_COST_DIR");
+	bDumpCostMap = false;
+	dumpCostDir.clear();
+	dumpCostSeq = 0;
+	if (dumpDir != NULL && dumpDir[0] != '\0') {
+		const unsigned viewID = depthData.images.front().GetID();
+		bool dumpView = true;
+		const char* dumpViews = std::getenv("MVS_DUMP_COST_VIEWS");
+		if (dumpViews != NULL && dumpViews[0] != '\0') {
+			dumpView = false;
+			const char* ptr = dumpViews;
+			while (*ptr != '\0') {
+				char* end = NULL;
+				const unsigned parsed = (unsigned)std::strtoul(ptr, &end, 10);
+				if (end != ptr && parsed == viewID) {
+					dumpView = true;
+					break;
+				}
+				if (end == NULL || *end == '\0')
+					break;
+				ptr = end + 1;
+			}
+		}
+		if (dumpView) {
+			bDumpCostMap = true;
+			dumpCostDir = dumpDir;
+			dumpCostViewID = viewID;
+		}
+	}
 	if (prevNumImages < numImages) {
 		images.resize(numImages);
 		cameras.resize(numImages);
@@ -354,6 +415,9 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 
 		// run CUDA patch-match
 		ASSERT(!depthData.viewsMap.empty());
+		dumpCostScale = scaleNumber;
+		if (!params.bGeomConsistency)
+			dumpCostGeomIter = -1;
 		RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
 		CUDA_CHECK(cudaGetLastError());
 		if (params.bLowResProcessed)
