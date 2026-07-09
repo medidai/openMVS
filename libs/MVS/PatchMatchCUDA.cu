@@ -453,8 +453,11 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 		if (viewWeights[imgId])
 			SetBit(newSelectedViews, imgId);
 	float finalCosts[8];
-	for (int posId = 0; posId < 8; ++posId)
-		finalCosts[posId] = AggregateMultiViewScores(viewWeights, costArray[posId], params.nNumViews);
+	for (int posId = 0; posId < 8; ++posId) {
+		// costArray[posId] is uninitialized local memory for invalid directions (image edges). Scoring
+		// them would feed garbage into the argmin below and make results non-deterministic
+		finalCosts[posId] = valid[posId] ? AggregateMultiViewScores(viewWeights, costArray[posId], params.nNumViews) : FLT_MAX;
+	}
 	const int minCostIdx = FindMinIndex(finalCosts, 8);
 	float costVector[MAX_VIEWS];
 	MultiViewScorePlane(images, depthImages, cameras, p, plane, lowDepth, costVector, params);
