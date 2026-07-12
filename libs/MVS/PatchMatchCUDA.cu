@@ -462,7 +462,8 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	float costVector[MAX_VIEWS];
 	MultiViewScorePlane(images, depthImages, cameras, p, plane, lowDepth, costVector, params);
 	cost = AggregateMultiViewScores(viewWeights, costVector, params.nNumViews);
-	if (finalCosts[minCostIdx] < cost && valid[minCostIdx]) {
+	if (finalCosts[minCostIdx] < cost) {
+		ASSERT(valid[minCostIdx]);
 		plane = planes[positions[minCostIdx]];
 		plane.w() = neighborDepths[minCostIdx];
 		cost = finalCosts[minCostIdx];
