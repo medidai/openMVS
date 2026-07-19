@@ -469,6 +469,17 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 		{{ 3,0},{ 5,0},{ 7,0},{ 9,0},{ 11,0},{ 13,0},{ 15,0},{ 17,0},{ 19,0},{ 21,0},{ 23,0}}
 	};
 	static constexpr int numDirs[8] = {7, 7, 7, 7, 11, 11, 11, 11};
+	// extended same-axis reach used only for textureless segmented pixels: lets a distant
+	// confident hypothesis inside the same segment (e.g. across a wide blank wall) reach
+	// the current pixel in fewer iterations. Only the four far directions are extended.
+	static constexpr int2 dirsFar[8][8] = {
+		{{0,0}}, {{0,0}}, {{0,0}}, {{0,0}},
+		{{0,-27},{0,-31},{0,-35},{0,-39},{0,-43},{0,-47},{0,-51},{0,-55}},
+		{{0, 27},{0, 31},{0, 35},{0, 39},{0, 43},{0, 47},{0, 51},{0, 55}},
+		{{-27,0},{-31,0},{-35,0},{-39,0},{-43,0},{-47,0},{-51,0},{-55,0}},
+		{{ 27,0},{ 31,0},{ 35,0},{ 39,0},{ 43,0},{ 47,0},{ 51,0},{ 55,0}}
+	};
+	static constexpr int numDirsFar[8] = {0, 0, 0, 0, 8, 8, 8, 8};
 	const int neighborPositions[4] = {
 		idx - width,
 		idx + width,
@@ -481,22 +492,27 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	float costArray[8][MAX_VIEWS];
 
 	for (int posId=0; posId<8; ++posId) {
-		const int2* samples = dirs[posId];
 		Point2i bestNx; float bestConf(FLT_MAX);
-		for (int dirId=0; dirId<numDirs[posId]; ++dirId) {
-			const int2& offset = samples[dirId];
-			const Point2i np(p.x()+offset.x, p.y()+offset.y);
-			if (!(np.x()>=0 && np.y()>=0 && np.x()<width && np.y()<height))
-				continue;
-			const int nidx = Point2Idx(np, width);
-			// on textureless segmented pixels, only accept hypotheses from the same segment
-			if (segmentGated && priorSegments[nidx] != segment) {
-				continue;
-			}
-			const float nconf = costs[nidx];
-			if (bestConf > nconf) {
-				bestNx = np;
-				bestConf = nconf;
+		// pass 0: the base sample pattern; pass 1: extended far reach (segmented pixels only)
+		for (int pass=0; pass<2; ++pass) {
+			if (pass==1 && !segmentGated)
+				break;
+			const int2* samples = (pass==0) ? dirs[posId] : dirsFar[posId];
+			const int count = (pass==0) ? numDirs[posId] : numDirsFar[posId];
+			for (int dirId=0; dirId<count; ++dirId) {
+				const int2& offset = samples[dirId];
+				const Point2i np(p.x()+offset.x, p.y()+offset.y);
+				if (!(np.x()>=0 && np.y()>=0 && np.x()<width && np.y()<height))
+					continue;
+				const int nidx = Point2Idx(np, width);
+				// on textureless segmented pixels, only accept hypotheses from the same segment
+				if (segmentGated && priorSegments[nidx] != segment)
+					continue;
+				const float nconf = costs[nidx];
+				if (bestConf > nconf) {
+					bestNx = np;
+					bestConf = nconf;
+				}
 			}
 		}
 		if (bestConf < FLT_MAX) {
