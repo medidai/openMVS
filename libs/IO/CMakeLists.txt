@@ -1,7 +1,7 @@
 # Macro to check pkg-config modules and produce a full-path library list
 macro(pkg_check_modules_fullpath_libs PREFIX MODULE_NAME)
-	# Call pkg_check_modules
-	pkg_check_modules(${PREFIX} REQUIRED IMPORTED_TARGET ${MODULE_NAME})
+	# Call pkg_check_modules (optional: caller checks ${PREFIX}_FOUND)
+	pkg_check_modules(${PREFIX} QUIET IMPORTED_TARGET ${MODULE_NAME})
 	if(${PREFIX}_FOUND)
 		set(${PREFIX}_FULLPATH_LIBRARIES "" PARENT_SCOPE)
 		foreach(lib ${${PREFIX}_LIBRARIES})
