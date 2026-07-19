@@ -65,7 +65,11 @@ public:
 		bool bLowResProcessed = false;
 		float fThresholdKeepCost = 0;
 		bool bUseSegments = false;
+		int nSegments = 0; // number of planar-segment ids (max id + 1); 0 = segments unused
 	};
+
+	// per-segment plane-fit accumulator layout: sumX(3), sumXX(xx,yy,zz,xy,xz,yz), count(1)
+	static constexpr int SEGMENT_ACCUM_STRIDE = 10;
 
 public:
 	PatchMatch(int device=0);
@@ -102,6 +106,8 @@ public:
 	Point4* cudaDepthNormalEstimates;
 	float* cudaLowDepths;
 	uint16_t* cudaPriorSegments = NULL;
+	float* cudaSegmentAccum = NULL;   // nSegments * SEGMENT_ACCUM_STRIDE plane-fit accumulators
+	Point4* cudaSegmentPlanes = NULL; // nSegments fitted planes (normal + offset c); zero = invalid
 	float* cudaDepthNormalCosts;
 	curandState* cudaRandStates;
 	uint32_t* cudaSelectedViews;
