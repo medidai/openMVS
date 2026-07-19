@@ -36,6 +36,9 @@
 // JPEG-XL codec
 #cmakedefine _USE_JXL
 
+// OpenCV JPEG XL write-quality params (OpenCV >= 4.12)
+#cmakedefine _USE_OPENCV_JPEGXL_WRITE
+
 // PNG codec
 #cmakedefine _USE_PNG
 
