@@ -37,9 +37,6 @@
 #include <CGAL/Triangulation_vertex_base_with_info_3.h>
 #include <CGAL/Triangulation_cell_base_with_info_3.h>
 #include <CGAL/Spatial_sort_traits_adapter_3.h>
-#include <CGAL/AABB_tree.h>
-#include <CGAL/AABB_traits_3.h>
-#include <CGAL/AABB_triangle_primitive_3.h>
 #include <CGAL/Polyhedron_3.h>
 
 using namespace MVS;
