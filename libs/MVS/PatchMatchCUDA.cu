@@ -237,29 +237,6 @@ __device__ inline float ComputeBilateralWeight(int xDist, int yDist, float pix, 
 // 0.12: patch texture variance below 0.02 (0.12^2) is considered texture-less
 constexpr float smoothSigmaDepth = -1.f / (1.f * 0.02f);
 
-// compute the textureless gate factor for the reference patch: ~1 for textureless
-// patches (where NCC is unreliable and priors should guide), ~0 for textured ones;
-// uses the same window, bilateral weights and variance formulation as ScorePlane
-__device__ inline float ComputeTexturelessFactor(const ImagePixels refImage, const Point2i& p)
-{
-	float sumRef = 0.f;
-	float sumRefRef = 0.f;
-	float bilateralWeightSum = 0.f;
-	const float refCenterPix = tex2D<float>(refImage, p.x() + 0.5f, p.y() + 0.5f);
-
-	for (int i = -nSizeHalfWindow; i <= nSizeHalfWindow; i += nSizeStep) {
-		for (int j = -nSizeHalfWindow; j <= nSizeHalfWindow; j += nSizeStep) {
-			const float refPix = tex2D<float>(refImage, p.x() + j + 0.5f, p.y() + i + 0.5f);
-			const float weight = ComputeBilateralWeight(j, i, refPix, refCenterPix);
-			sumRef += weight * refPix;
-			sumRefRef += weight * refPix * refPix;
-			bilateralWeightSum += weight;
-		}
-	}
-	const float varRef = sumRefRef * bilateralWeightSum - sumRef * sumRef;
-	return exp(varRef * smoothSigmaDepth);
-}
-
 // compute the geometric consistency weight
 __device__ inline float GeometricConsistencyWeight(const ImagePixels depthImage, const CUDA::Camera& refCamera, const CUDA::Camera& trgCamera, const Point4& plane, const Point2i& p)
 {
@@ -279,12 +256,10 @@ __device__ inline float GeometricConsistencyWeight(const ImagePixels depthImage,
 }
 
 // compute photometric score using weighted ZNCC
-__device__ float ScorePlane(const ImagePixels refImage, const CUDA::Camera& refCamera, const ImagePixels trgImage, const CUDA::Camera& trgCamera, const Point2i& p, const Point4& plane, const float lowDepth, const float priorDepth, const float priorConf, const Point3& priorNormal, const PatchMatch::Params& params)
+__device__ float ScorePlane(const ImagePixels refImage, const CUDA::Camera& refCamera, const ImagePixels trgImage, const CUDA::Camera& trgCamera, const Point2i& p, const Point4& plane, const float lowDepth, const PatchMatch::Params& params)
 {
 	constexpr float maxCost = 1.2f;
-	const bool hasPrior(params.fDepthPriorWeight > 0.f && priorDepth > 0.f && priorConf > 0.f);
-	const bool hasNormalPrior(params.fNormalPriorWeight > 0.f && priorNormal.squaredNorm() > 0.5f);
-	
+
 	Matrix3 H = ComputeHomography(refCamera, trgCamera, p.cast<float>(), plane);
 	const Point2 pt = (H * p.cast<float>().homogeneous()).hnormalized();
 	if (pt.x() >= trgCamera.size.x() || pt.x() < 0.f || pt.y() >= trgCamera.size.y() || pt.y() < 0.f)
@@ -322,22 +297,14 @@ __device__ float ScorePlane(const ImagePixels refImage, const CUDA::Camera& refC
 	}
 
 	const float varRef = sumRefRef * bilateralWeightSum - sumRef * sumRef;
-	if (lowDepth <= 0 && !hasPrior && !hasNormalPrior && varRef < 1e-8f)
+	if (lowDepth <= 0 && varRef < 1e-8f)
 		return maxCost;
 	const float varTrg = sumTrgTrg * bilateralWeightSum - sumTrg * sumTrg;
 	const float varRefTrg = varRef * varTrg;
-	float ncc;
-	if (varRefTrg < 1e-16f) {
-		// degenerate (fully flat) patch: NCC is undefined; without guidance bail out
-		// with the max cost, otherwise keep it as the base score and let the low-res
-		// and prior terms below discriminate between the candidate planes
-		if (lowDepth <= 0 && !hasPrior && !hasNormalPrior)
-			return maxCost;
-		ncc = maxCost;
-	} else {
-		const float covarTrgRef = sumRefTrg * bilateralWeightSum - sumRef * sumTrg;
-		ncc = 1.f - covarTrgRef / sqrt(varRefTrg);
-	}
+	if (varRefTrg < 1e-16f)
+		return maxCost;
+	const float covarTrgRef = sumRefTrg * bilateralWeightSum - sumRef * sumTrg;
+	float ncc = 1.f - covarTrgRef / sqrt(varRefTrg);
 
 	// apply depth prior weight based on patch textureless
 	if (lowDepth > 0) {
@@ -346,43 +313,23 @@ __device__ float ScorePlane(const ImagePixels refImage, const CUDA::Camera& refC
 		const float factorDeltaDepth(exp(varRef * smoothSigmaDepth));
 		ncc = (1.f-factorDeltaDepth)*ncc + factorDeltaDepth*deltaDepth;
 	}
-	// blend the persistent priors (e.g. DA3 depth, MoGe normal) into the matching cost
-	// as a single convex combination, active only where the patch is textureless
-	// (varRef low => NCC unreliable); both delta terms are 0 on perfect agreement and
-	// saturate at 0.5; blending jointly (instead of sequentially) keeps each prior's
-	// influence proportional to its weight when both are enabled
-	if (hasPrior || hasNormalPrior) {
-		const float factorTextureless(exp(varRef * smoothSigmaDepth));
-		float wDepth(hasPrior ? params.fDepthPriorWeight * priorConf * factorTextureless : 0.f);
-		float wNormal(hasNormalPrior ? params.fNormalPriorWeight * factorTextureless : 0.f);
-		const float wSum(wDepth + wNormal);
-
-		if (wSum > 1.f) {
-			wDepth /= wSum;
-			wNormal /= wSum;
-		}
-
-		const float deltaDepth(hasPrior ? MIN((abs(priorDepth-plane.w()) / priorDepth), 0.5f) : 0.f);
-		const float deltaNormal(hasNormalPrior ? MIN(0.5f * (1.f - plane.topLeftCorner<3,1>().dot(priorNormal)), 0.5f) : 0.f);
-		ncc = (1.f-wDepth-wNormal)*ncc + wDepth*deltaDepth + wNormal*deltaNormal;
-	}
 	return max(0.f, min(2.f, ncc));
 }
 
 // compute photometric score for all neighbor images
-__device__ inline void MultiViewScorePlane(const ImagePixels *images, const ImagePixels* depthImages, const CUDA::Camera* cameras, const Point2i& p, const Point4& plane, const float lowDepth, const float priorDepth, const float priorConf, const Point3& priorNormal, float* costVector, const PatchMatch::Params& params)
+__device__ inline void MultiViewScorePlane(const ImagePixels *images, const ImagePixels* depthImages, const CUDA::Camera* cameras, const Point2i& p, const Point4& plane, const float lowDepth, float* costVector, const PatchMatch::Params& params)
 {
 	for (int imgId = 1; imgId <= params.nNumViews; ++imgId)
-		costVector[imgId-1] = ScorePlane(images[0], cameras[0], images[imgId], cameras[imgId], p, plane, lowDepth, priorDepth, priorConf, priorNormal, params);
+		costVector[imgId-1] = ScorePlane(images[0], cameras[0], images[imgId], cameras[imgId], p, plane, lowDepth, params);
 	if (params.bGeomConsistency)
 		for (int imgId = 0; imgId < params.nNumViews; ++imgId)
 			costVector[imgId] += 0.1f * GeometricConsistencyWeight(depthImages[imgId], cameras[0], cameras[imgId+1], plane, p);
 }
 // same as above, but interpolate the plane to current pixel position
-__device__ inline float MultiViewScoreNeighborPlane(const ImagePixels* images, const ImagePixels* depthImages, const CUDA::Camera* cameras, const Point2i& p, const Point2i& np, Point4 plane, const float lowDepth, const float priorDepth, const float priorConf, const Point3& priorNormal, float* costVector, const PatchMatch::Params& params)
+__device__ inline float MultiViewScoreNeighborPlane(const ImagePixels* images, const ImagePixels* depthImages, const CUDA::Camera* cameras, const Point2i& p, const Point2i& np, Point4 plane, const float lowDepth, float* costVector, const PatchMatch::Params& params)
 {
 	plane.w() = InterpolatePixel(cameras[0], p, np, plane.w(), plane.topLeftCorner<3,1>(), params);
-	MultiViewScorePlane(images, depthImages, cameras, p, plane, lowDepth, priorDepth, priorConf, priorNormal, costVector, params);
+	MultiViewScorePlane(images, depthImages, cameras, p, plane, lowDepth, costVector, params);
 	return plane.w();
 }
 
@@ -398,7 +345,7 @@ __device__ inline float AggregateMultiViewScores(const unsigned* viewWeights, co
 
 // propagate and refine the plane estimate for the current pixel employing the asymmetric approach described in:
 // "Multi-View Stereo with Asymmetric Checkerboard Propagation and Multi-Hypothesis Joint View Selection", 2018
-__device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depthImages, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, const float* priorDepths, const float* priorConfs, const Point3* priorNormals, float* costs, RandState* randStates, unsigned* selectedViews, const Point2i& p, const PatchMatch::Params& params, const int iter)
+__device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depthImages, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, const uint16_t* priorSegments, float* costs, RandState* randStates, unsigned* selectedViews, const Point2i& p, const PatchMatch::Params& params, const int iter)
 {
 	const int width = cameras[0].size.x();
 	const int height = cameras[0].size.y();
@@ -409,14 +356,9 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	float lowDepth = 0;
 	if (params.bLowResProcessed)
 		lowDepth = lowDepths[idx];
-	float priorDepth = 0, priorConf = 0;
-	if (params.fDepthPriorWeight > 0.f) {
-		priorDepth = priorDepths[idx];
-		priorConf = priorConfs[idx];
-	}
-	Point3 priorNormal = Point3::Zero();
-	if (params.fNormalPriorWeight > 0.f)
-		priorNormal = priorNormals[idx];
+	// priorSegments is uploaded and threaded here for segment-gated propagation; the
+	// kernel usage is added in a later phase (currently only the pointer is carried)
+	(void)priorSegments;
 
 	// adaptive sampling: 0 up-near, 1 down-near, 2 left-near, 3 right-near, 4 up-far, 5 down-far, 6 left-far, 7 right-far
 	static constexpr int2 dirs[8][11] = {
@@ -459,7 +401,7 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 		if (bestConf < FLT_MAX) {
 			valid[posId] = true;
 			positions[posId] = Point2Idx(bestNx, width);
-			neighborDepths[posId] = MultiViewScoreNeighborPlane(images, depthImages, cameras, p, bestNx, planes[positions[posId]], lowDepth, priorDepth, priorConf, priorNormal, costArray[posId], params);
+			neighborDepths[posId] = MultiViewScoreNeighborPlane(images, depthImages, cameras, p, bestNx, planes[positions[posId]], lowDepth, costArray[posId], params);
 		}
 	}
 
@@ -524,7 +466,7 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	}
 	const int minCostIdx = FindMinIndex(finalCosts, 8);
 	float costVector[MAX_VIEWS];
-	MultiViewScorePlane(images, depthImages, cameras, p, plane, lowDepth, priorDepth, priorConf, priorNormal, costVector, params);
+	MultiViewScorePlane(images, depthImages, cameras, p, plane, lowDepth, costVector, params);
 	cost = AggregateMultiViewScores(viewWeights, costVector, params.nNumViews);
 	if (finalCosts[minCostIdx] < cost) {
 		ASSERT(valid[minCostIdx]);
@@ -555,43 +497,13 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 		numValidPlanes = 4;
 	}
 	constexpr int numPlanes = 4;
-	constexpr int maxNumPriorPlanes = 3;
-	float depths[numPlanes+maxNumPriorPlanes] = {depthPerturbed, depth, depth, depth};
-	Point3 normals[numPlanes+maxNumPriorPlanes] = {plane.topLeftCorner<3,1>(), perturbedNormal, normalRand, surfaceNormal};
-	// propose prior-plane candidates (e.g. DA3 depth, MoGe normal), but only where the
-	// reference patch is textureless (NCC unreliable); on textured patches the candidate
-	// list is identical to the original algorithm, preserving unbiased exploration;
-	// candidates are appended at numValidPlanes, so the list stays contiguous even when
-	// the surface-gradient normal is invalid (its slot is simply reused)
-	const bool hasDepthPrior(params.fDepthPriorWeight > 0.f && priorDepth > 0.f && priorConf > 0.f);
-	const bool hasNormalPrior(params.fNormalPriorWeight > 0.f && priorNormal.squaredNorm() > 0.5f &&
-		priorNormal.dot(cameras[0].model.ViewDirection(p)) < 0.f);
-	if (hasDepthPrior || hasNormalPrior) {
-		constexpr float thTextureless = 0.5f;
-		if (ComputeTexturelessFactor(images[0], p) > thTextureless) {
-			if (hasNormalPrior) {
-				depths[numValidPlanes] = depth;
-				normals[numValidPlanes] = priorNormal;
-				++numValidPlanes;
-			}
-			if (hasDepthPrior) {
-				depths[numValidPlanes] = priorDepth;
-				normals[numValidPlanes] = plane.topLeftCorner<3,1>();
-				++numValidPlanes;
-			}
-			if (hasDepthPrior && hasNormalPrior) {
-				// the full prior plane: the most informative candidate on textureless patches
-				depths[numValidPlanes] = priorDepth;
-				normals[numValidPlanes] = priorNormal;
-				++numValidPlanes;
-			}
-		}
-	}
+	const float depths[numPlanes] = {depthPerturbed, depth, depth, depth};
+	const Point3 normals[numPlanes] = {plane.topLeftCorner<3,1>(), perturbedNormal, normalRand, surfaceNormal};
 	for (int i = 0; i < numValidPlanes; ++i) {
 		Point4 newPlane;
 		newPlane.topLeftCorner<3,1>() = normals[i];
 		newPlane.w() = depths[i];
-		MultiViewScorePlane(images, depthImages, cameras, p, newPlane, lowDepth, priorDepth, priorConf, priorNormal, costVector, params);
+		MultiViewScorePlane(images, depthImages, cameras, p, newPlane, lowDepth, costVector, params);
 		const float costPlane = AggregateMultiViewScores(viewWeights, costVector, params.nNumViews);
 		if (cost > costPlane) {
 			cost = costPlane;
@@ -601,7 +513,7 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 }
 
 // compute the score of the current plane estimate
-__device__ void InitializePixelScore(const ImagePixels *images, const ImagePixels* depthImages, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, const float* priorDepths, const float* priorConfs, const Point3* priorNormals, float* costs, RandState* randStates, unsigned* selectedViews, const Point2i& p, const PatchMatch::Params params)
+__device__ void InitializePixelScore(const ImagePixels *images, const ImagePixels* depthImages, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, float* costs, RandState* randStates, unsigned* selectedViews, const Point2i& p, const PatchMatch::Params params)
 {
 	const int width = cameras[0].size.x();
 	const int height = cameras[0].size.y();
@@ -611,14 +523,6 @@ __device__ void InitializePixelScore(const ImagePixels *images, const ImagePixel
 	float lowDepth = 0;
 	if (params.bLowResProcessed)
 		lowDepth = lowDepths[idx];
-	float priorDepth = 0, priorConf = 0;
-	if (params.fDepthPriorWeight > 0.f) {
-		priorDepth = priorDepths[idx];
-		priorConf = priorConfs[idx];
-	}
-	Point3 priorNormal = Point3::Zero();
-	if (params.fNormalPriorWeight > 0.f)
-		priorNormal = priorNormals[idx];
 	// initialize estimate randomly if not set
 	RandState* randState = &randStates[idx];
 	curand_init(1234/*threadIdx.x*/, p.y(), p.x(), randState);
@@ -634,7 +538,7 @@ __device__ void InitializePixelScore(const ImagePixels *images, const ImagePixel
 	}
 	// compute costs
 	float costVector[MAX_VIEWS];
-	MultiViewScorePlane(images, depthImages, cameras, p, plane, lowDepth, priorDepth, priorConf, priorNormal, costVector, params);
+	MultiViewScorePlane(images, depthImages, cameras, p, plane, lowDepth, costVector, params);
 	// select best views
 	float costVectorSorted[MAX_VIEWS];
 	Sort(costVector, costVectorSorted, params.nNumViews);
@@ -649,24 +553,24 @@ __device__ void InitializePixelScore(const ImagePixels *images, const ImagePixel
 			SetBit(selectedView, imgId);
 	costs[idx] = cost / params.nInitTopK;
 }
-__global__ void InitializeScore(const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, const float* priorDepths, const float* priorConfs, const Point3* priorNormals, float* costs, curandState* randStates, unsigned* selectedViews, const PatchMatch::Params params)
+__global__ void InitializeScore(const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, float* costs, curandState* randStates, unsigned* selectedViews, const PatchMatch::Params params)
 {
 	const Point2i p = GetThreadIndex2();
-	InitializePixelScore((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, cameras, planes, lowDepths, priorDepths, priorConfs, priorNormals, costs, (RandState*)randStates, selectedViews, p, params);
+	InitializePixelScore((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, cameras, planes, lowDepths, costs, (RandState*)randStates, selectedViews, p, params);
 }
 
 // traverse image in a back/red checkerboard pattern
-__global__ void BlackPixelProcess(const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, const float* priorDepths, const float* priorConfs, const Point3* priorNormals, float* costs, curandState* randStates, unsigned* selectedViews, const PatchMatch::Params params, const int iter)
+__global__ void BlackPixelProcess(const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, const uint16_t* priorSegments, float* costs, curandState* randStates, unsigned* selectedViews, const PatchMatch::Params params, const int iter)
 {
 	Point2i p = GetThreadIndex2();
 	p.y() = p.y() * 2 + (threadIdx.x % 2 == 0 ? 0 : 1);
-	ProcessPixel((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, cameras, planes, lowDepths, priorDepths, priorConfs, priorNormals, costs, (RandState*)randStates, selectedViews, p, params, iter);
+	ProcessPixel((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, cameras, planes, lowDepths, priorSegments, costs, (RandState*)randStates, selectedViews, p, params, iter);
 }
-__global__ void RedPixelProcess(const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, const float* priorDepths, const float* priorConfs, const Point3* priorNormals, float* costs, curandState* randStates, unsigned* selectedViews, const PatchMatch::Params params, const int iter)
+__global__ void RedPixelProcess(const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths, const CUDA::Camera* cameras, Point4* planes, const float* lowDepths, const uint16_t* priorSegments, float* costs, curandState* randStates, unsigned* selectedViews, const PatchMatch::Params params, const int iter)
 {
 	Point2i p = GetThreadIndex2();
 	p.y() = p.y() * 2 + (threadIdx.x % 2 == 0 ? 1 : 0);
-	ProcessPixel((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, cameras, planes, lowDepths, priorDepths, priorConfs, priorNormals, costs, (RandState*)randStates, selectedViews, p, params, iter);
+	ProcessPixel((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, cameras, planes, lowDepths, priorSegments, costs, (RandState*)randStates, selectedViews, p, params, iter);
 }
 
 // filter depth/normals
@@ -700,13 +604,13 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap)
 	const dim3 gridSizeFull((width + BLOCK_H - 1) / BLOCK_H, (height + BLOCK_H - 1) / BLOCK_H, 1);
 	const dim3 gridSizeCheckerboard((width + BLOCK_W - 1) / BLOCK_W, ((height / 2) + BLOCK_H - 1) / BLOCK_H, 1);
 
-	InitializeScore<<<gridSizeFull, blockSize>>>(cudaTextureImages, cudaTextureDepths, cudaCameras, cudaDepthNormalEstimates, cudaLowDepths, cudaPriorDepths, cudaPriorConfs, cudaPriorNormals, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, params);
+	InitializeScore<<<gridSizeFull, blockSize>>>(cudaTextureImages, cudaTextureDepths, cudaCameras, cudaDepthNormalEstimates, cudaLowDepths, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, params);
 	cudaDeviceSynchronize();
 
 	for (int iter = 0; iter < params.nEstimationIters; ++iter) {
-		BlackPixelProcess<<<gridSizeCheckerboard, blockSize>>>(cudaTextureImages, cudaTextureDepths, cudaCameras, cudaDepthNormalEstimates, cudaLowDepths, cudaPriorDepths, cudaPriorConfs, cudaPriorNormals, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, params, iter);
+		BlackPixelProcess<<<gridSizeCheckerboard, blockSize>>>(cudaTextureImages, cudaTextureDepths, cudaCameras, cudaDepthNormalEstimates, cudaLowDepths, cudaPriorSegments, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, params, iter);
 		cudaDeviceSynchronize();
-		RedPixelProcess<<<gridSizeCheckerboard, blockSize>>>(cudaTextureImages, cudaTextureDepths, cudaCameras, cudaDepthNormalEstimates, cudaLowDepths, cudaPriorDepths, cudaPriorConfs, cudaPriorNormals, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, params, iter);
+		RedPixelProcess<<<gridSizeCheckerboard, blockSize>>>(cudaTextureImages, cudaTextureDepths, cudaCameras, cudaDepthNormalEstimates, cudaLowDepths, cudaPriorSegments, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, params, iter);
 		cudaDeviceSynchronize();
 	}
 

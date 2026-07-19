@@ -122,9 +122,7 @@ MDEFVAR_OPTDENSE_float(fRandomAngle2Range, "Random Angle2 Range", "Angle 2 range
 MDEFVAR_OPTDENSE_float(fRandomSmoothDepth, "Random Smooth Depth", "Depth variance used during neighbor smoothness assignment (ratio)", "0.02")
 MDEFVAR_OPTDENSE_float(fRandomSmoothNormal, "Random Smooth Normal", "Normal variance used during neighbor smoothness assignment (degrees)", "13")
 MDEFVAR_OPTDENSE_float(fRandomSmoothBonus, "Random Smooth Bonus", "Score factor used to encourage smoothness (1 - disabled)", "0.93")
-DEFVAR_OPTDENSE_string(strInitDepthDir, "Init Depth Dir", "directory with precomputed per-view depth-maps ('{image-name}.dmap') used to initialize PatchMatch instead of random depths (empty - disabled)", "")
-MDEFVAR_OPTDENSE_float(fDepthPriorWeight, "Depth Prior Weight", "weight in [0,1] of the persistent depth-prior term in the PatchMatch matching cost when Init Depth Dir is set; active only on textureless patches with confident prior (0 - disabled)", "0")
-MDEFVAR_OPTDENSE_float(fNormalPriorWeight, "Normal Prior Weight", "weight in [0,1] of the persistent normal-prior term in the PatchMatch matching cost when Init Depth Dir is set and the dmap files carry a normal channel; active only on textureless patches (0 - disabled)", "0")
+DEFVAR_OPTDENSE_string(strSegmentMapDir, "Segment Map Dir", "directory with precomputed per-view planar-segment id maps ('{image-name}.seg.png', uint16) used to guide PatchMatch propagation (empty - disabled)", "")
 }
 
 
@@ -140,9 +138,7 @@ DepthData::DepthData(const DepthData& srcDepthData) :
 	depthMap(srcDepthData.depthMap),
 	normalMap(srcDepthData.normalMap),
 	confMap(srcDepthData.confMap),
-	priorDepthMap(srcDepthData.priorDepthMap),
-	priorConfMap(srcDepthData.priorConfMap),
-	priorNormalMap(srcDepthData.priorNormalMap),
+	priorSegmentMap(srcDepthData.priorSegmentMap),
 	dMin(srcDepthData.dMin),
 	dMax(srcDepthData.dMax),
 	size(srcDepthData.size),

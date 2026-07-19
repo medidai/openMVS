@@ -326,10 +326,10 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 			// compute rough estimates using the sparse point-cloud
 			InitDepthMap(depthData);
 		}
-		// optionally load external depth/normal priors used as persistent guidance in the
-		// PatchMatch matching cost; the initialization above is never modified by priors
-		if (!OPTDENSE::strInitDepthDir.empty() && (OPTDENSE::fDepthPriorWeight > 0 || OPTDENSE::fNormalPriorWeight > 0))
-			ImportPriorDepthMap(depthData);
+		// optionally load external planar-segment maps used to guide PatchMatch
+		// propagation; the initialization above is never modified by priors
+		if (!OPTDENSE::strSegmentMapDir.empty())
+			ImportPriors(depthData);
 	}
 	return true;
 } // InitViews
@@ -361,110 +361,59 @@ bool DepthMapsData::InitDepthMap(DepthData& depthData)
 } // InitDepthMap
 /*----------------------------------------------------------------*/
 
-// load externally precomputed depth/normal priors (e.g. DA3 depths, MoGe normals),
-// matched by image name, and keep them as persistent guidance for the PatchMatch
-// matching cost (gated by OPTDENSE::fDepthPriorWeight / fNormalPriorWeight);
-// the initialization (sparse triangulation + random noise) is NEVER modified here;
-// the priors are expected as OpenMVS raw '.dmap' files named '{image-name}.dmap'
-// inside OPTDENSE::strInitDepthDir; a file may carry depth only, normal only
-// (all-zero depth channel), or both; invalid prior normals are zero vectors
-bool DepthMapsData::ImportPriorDepthMap(DepthData& depthData)
+// load externally precomputed planar-segment id maps (e.g. from MoGe normals) used to
+// guide PatchMatch propagation; the maps are uint16 single-channel PNG files named
+// '{image-name}.seg.png' inside OPTDENSE::strSegmentMapDir (0 = unassigned), scaled to
+// the working resolution with nearest-neighbor so ids are never interpolated;
+// the initialization (sparse triangulation + random noise) is NEVER modified here
+bool DepthMapsData::ImportPriors(DepthData& depthData)
 {
-	ASSERT(!OPTDENSE::strInitDepthDir.empty());
+	ASSERT(!OPTDENSE::strSegmentMapDir.empty());
 	const DepthData::ViewData& viewRef = depthData.GetView();
-	String initDepthDir(OPTDENSE::strInitDepthDir);
-	Util::ensureFolderSlash(initDepthDir);
-	const String fileName(initDepthDir + Util::getFileName(viewRef.pImageData->name) + _T(".dmap"));
+	const String imageName(Util::getFileName(viewRef.pImageData->name));
+	const cv::Size refSize(depthData.depthMap.size());
+
+	String segmentMapDir(OPTDENSE::strSegmentMapDir);
+	Util::ensureFolderSlash(segmentMapDir);
+	const String fileName(segmentMapDir + imageName + _T(".seg.png"));
 	if (!File::access(fileName)) {
-		DEBUG_EXTRA("warning: no prior depth-map for image %3u (%s) at '%s'", viewRef.GetID(), Util::getFileName(viewRef.pImageData->name).c_str(), fileName.c_str());
+		DEBUG_EXTRA("warning: no segment map for image %3u (%s) at '%s'", viewRef.GetID(), imageName.c_str(), fileName.c_str());
 		return false;
 	}
-	// load the precomputed prior (depth values, optional normals and confidence)
-	String imageFileName;
-	IIndexArr IDs;
-	cv::Size imageSize;
-	Camera camera;
-	Depth dMin, dMax;
-	DepthMap priorDepthMap;
-	NormalMap priorNormalMap;
-	ConfidenceMap priorConfMap;
-	ViewsMap viewsMap;
-	if (!ImportDepthDataRaw(fileName, imageFileName, IDs, imageSize, camera.K, camera.R, camera.C, dMin, dMax, priorDepthMap, priorNormalMap, priorConfMap, viewsMap,
-			HeaderDepthDataRaw::HAS_DEPTH|HeaderDepthDataRaw::HAS_NORMAL|HeaderDepthDataRaw::HAS_CONF) || priorDepthMap.empty()) {
-		DEBUG("warning: could not read prior depth-map %s", fileName.c_str());
+	cv::Mat rawSeg(cv::imread(fileName, cv::IMREAD_UNCHANGED));
+	if (rawSeg.empty() || rawSeg.channels() != 1) {
+		DEBUG("warning: could not read segment map %s (empty or not single-channel)", fileName.c_str());
 		return false;
 	}
-	// resize to the working depth-map resolution
-	const cv::Size srcSize(priorDepthMap.size());
-	const bool bResized(srcSize != depthData.depthMap.size());
-	if (bResized)
-		cv::resize(priorDepthMap, priorDepthMap, depthData.depthMap.size(), 0, 0, cv::INTER_LINEAR);
-	if (!priorConfMap.empty() && priorConfMap.size() != depthData.depthMap.size())
-		cv::resize(priorConfMap, priorConfMap, depthData.depthMap.size(), 0, 0, cv::INTER_LINEAR);
-	if (!priorNormalMap.empty() && priorNormalMap.size() != depthData.depthMap.size())
-		cv::resize(priorNormalMap, priorNormalMap, depthData.depthMap.size(), 0, 0, cv::INTER_NEAREST);
-	// count valid prior depths and expand the depth-range accordingly, so prior-depth
-	// candidates proposed during PatchMatch fall inside the legal [dMin, dMax] range
-	Depth newMin(depthData.dMin), newMax(depthData.dMax);
-	unsigned numValidDepths(0);
-	for (int r=0; r<priorDepthMap.rows; ++r) {
-		for (int c=0; c<priorDepthMap.cols; ++c) {
-			const Depth d(priorDepthMap(r,c));
-			if (d > 0 && ISFINITE(d)) {
-				if (newMin > d) newMin = d;
-				if (newMax < d) newMax = d;
-				++numValidDepths;
+	SegmentMap priorSegmentMap;
+	if (rawSeg.depth() != CV_16U)
+		rawSeg.convertTo(priorSegmentMap, CV_16U);
+	else
+		rawSeg.copyTo(priorSegmentMap);
+	if (priorSegmentMap.size() != refSize)
+		cv::resize(priorSegmentMap, priorSegmentMap, refSize, 0, 0, cv::INTER_NEAREST);
+	unsigned numSegmentPixels(0);
+	Segment maxLabel(0);
+	for (int r=0; r<priorSegmentMap.rows; ++r) {
+		for (int c=0; c<priorSegmentMap.cols; ++c) {
+			const Segment s(priorSegmentMap(r,c));
+			if (s > 0) {
+				++numSegmentPixels;
+				if (maxLabel < s) maxLabel = s;
 			}
 		}
 	}
-	// keep the depth prior persistent for the cost-term blend and candidate proposal;
-	// when the file carries no confidence channel, assume full confidence where valid
-	if (OPTDENSE::fDepthPriorWeight > 0 && numValidDepths > 0) {
-		depthData.priorDepthMap = priorDepthMap;
-		if (!priorConfMap.empty()) {
-			depthData.priorConfMap = priorConfMap;
-		} else {
-			depthData.priorConfMap.create(priorDepthMap.size());
-			for (int r=0; r<priorDepthMap.rows; ++r)
-				for (int c=0; c<priorDepthMap.cols; ++c)
-					depthData.priorConfMap(r,c) = (priorDepthMap(r,c) > 0 && ISFINITE(priorDepthMap(r,c))) ? 1.f : 0.f;
-		}
-		if (newMin < depthData.dMin) depthData.dMin = MAXF(newMin*0.9f, 1e-3f);
-		if (newMax > depthData.dMax) depthData.dMax = newMax*1.1f;
-	}
-	// keep the normal prior persistent; normals are expected normalized, in camera
-	// space and camera-facing (enforced by the prior generator); sanitize non-finite
-	// or non-unit entries to the zero vector (= invalid)
-	unsigned numValidNormals(0);
-	if (OPTDENSE::fNormalPriorWeight > 0 && !priorNormalMap.empty()) {
-		for (int r=0; r<priorNormalMap.rows; ++r) {
-			for (int c=0; c<priorNormalMap.cols; ++c) {
-				Normal& n = priorNormalMap(r,c);
-				const float normSq(SQUARE(n.x)+SQUARE(n.y)+SQUARE(n.z));
-				if (!ISFINITE(normSq) || normSq < 0.9f || normSq > 1.1f) {
-					n = Normal::ZERO;
-				} else {
-					n *= RSQRT(normSq);
-					++numValidNormals;
-				}
-			}
-		}
-		if (numValidNormals > 0)
-			depthData.priorNormalMap = priorNormalMap;
-	}
-	if (depthData.priorDepthMap.empty() && depthData.priorNormalMap.empty()) {
-		DEBUG("warning: prior depth-map %s has no usable priors", fileName.c_str());
+	if (numSegmentPixels == 0) {
+		DEBUG("warning: segment map %s has no assigned pixels", fileName.c_str());
 		return false;
 	}
-	const unsigned numTotal((unsigned)priorDepthMap.rows * priorDepthMap.cols);
-	DEBUG_EXTRA("Depth-map %3u (%s) loaded prior %s (depths %u/%u %.1f%%, normals %u/%u %.1f%%, dMin=%.4f dMax=%.4f, conf=%s%s)",
-		viewRef.GetID(), Util::getFileName(viewRef.pImageData->name).c_str(), Util::getFileNameExt(fileName).c_str(),
-		numValidDepths, numTotal, numTotal ? 100.f*numValidDepths/numTotal : 0.f,
-		numValidNormals, numTotal, numTotal ? 100.f*numValidNormals/numTotal : 0.f,
-		depthData.dMin, depthData.dMax, priorConfMap.empty() ? "no" : "yes",
-		bResized ? String::FormatString(", resized %dx%d->%dx%d", srcSize.width, srcSize.height, depthData.depthMap.cols, depthData.depthMap.rows).c_str() : "");
+	depthData.priorSegmentMap = priorSegmentMap;
+	const unsigned numTotal((unsigned)refSize.area());
+	DEBUG_EXTRA("Depth-map %3u (%s) loaded segment map (%u px in %u regions, %.1f%%)",
+		viewRef.GetID(), imageName.c_str(), numSegmentPixels, (unsigned)maxLabel,
+		numTotal ? 100.f*numSegmentPixels/numTotal : 0.f);
 	return true;
-} // ImportPriorDepthMap
+} // ImportPriors
 /*----------------------------------------------------------------*/
 
 
@@ -579,12 +528,8 @@ DepthData DepthMapsData::ScaleDepthData(const DepthData& inputDeptData, float sc
 		cv::resize(rescaledDepthData.depthMap, rescaledDepthData.depthMap, cv::Size(), scale, scale, cv::INTER_NEAREST);
 	if (!rescaledDepthData.normalMap.empty())
 		cv::resize(rescaledDepthData.normalMap, rescaledDepthData.normalMap, cv::Size(), scale, scale, cv::INTER_NEAREST);
-	if (!rescaledDepthData.priorDepthMap.empty())
-		cv::resize(rescaledDepthData.priorDepthMap, rescaledDepthData.priorDepthMap, cv::Size(), scale, scale, cv::INTER_LINEAR);
-	if (!rescaledDepthData.priorConfMap.empty())
-		cv::resize(rescaledDepthData.priorConfMap, rescaledDepthData.priorConfMap, cv::Size(), scale, scale, cv::INTER_LINEAR);
-	if (!rescaledDepthData.priorNormalMap.empty())
-		cv::resize(rescaledDepthData.priorNormalMap, rescaledDepthData.priorNormalMap, cv::Size(), scale, scale, cv::INTER_NEAREST);
+	if (!rescaledDepthData.priorSegmentMap.empty())
+		cv::resize(rescaledDepthData.priorSegmentMap, rescaledDepthData.priorSegmentMap, cv::Size(), scale, scale, cv::INTER_NEAREST);
 	return rescaledDepthData;
 }
 
@@ -610,9 +555,9 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 	}
 	#endif // _USE_CUDA
 
-	DEBUG_EXTRA("CPU PatchMatch image %3u: geomIter=%d, initDepthDir=%s",
+	DEBUG_EXTRA("CPU PatchMatch image %3u: geomIter=%d, segmentMapDir=%s",
 		arrDepthData[idxImage].images.front().GetID(), nGeometricIter,
-		OPTDENSE::strInitDepthDir.empty() ? "no" : "yes");
+		OPTDENSE::strSegmentMapDir.empty() ? "no" : "yes");
 
 	TD_TIMER_STARTD();
 
@@ -2197,20 +2142,17 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 	}
 	#endif // _USE_CUDA
 
-	if (!OPTDENSE::strInitDepthDir.empty()) {
-		String initDepthDir(OPTDENSE::strInitDepthDir);
-		Util::ensureFolderSlash(initDepthDir);
+	if (!OPTDENSE::strSegmentMapDir.empty()) {
+		String segmentMapDir(OPTDENSE::strSegmentMapDir);
+		Util::ensureFolderSlash(segmentMapDir);
 		unsigned numMatched(0);
-
 		for (IIndex idx: data.images) {
-			const String fileName(initDepthDir + Util::getFileName(images[idx].name) + _T(".dmap"));
-			if (File::access(fileName)) {
+			const String fileName(segmentMapDir + Util::getFileName(images[idx].name) + _T(".seg.png"));
+			if (File::access(fileName))
 				++numMatched;
-			}
 		}
-
-		VERBOSE("Depth/normal priors: dir='%s', depth-prior-weight=%.3f, normal-prior-weight=%.3f, matched %u/%u selected images",
-			initDepthDir.c_str(), OPTDENSE::fDepthPriorWeight, OPTDENSE::fNormalPriorWeight, numMatched, data.images.GetSize());
+		VERBOSE("Segment maps: dir='%s', matched %u/%u selected images",
+			segmentMapDir.c_str(), numMatched, data.images.GetSize());
 	}
 	
 	VERBOSE("Depth-map estimation: photometric pass (iters=%u, geom-iters=%u, patch-match=%s)",
