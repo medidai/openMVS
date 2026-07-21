@@ -249,6 +249,7 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 		DepthData::ViewData& view = depthData.images[i];
 		if (loadDepthMaps > 0) {
 			// load known depth-map
+			const String neighborDmap(ComposeDepthFilePath(view.GetID(), "dmap"));
 			String imageFileName;
 			IIndexArr IDs;
 			cv::Size imageSize;
@@ -256,9 +257,10 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 			NormalMap normalMap;
 			ConfidenceMap confMap;
 			ViewsMap viewsMap;
-			ImportDepthDataRaw(ComposeDepthFilePath(view.GetID(), "dmap"),
+			if (!ImportDepthDataRaw(neighborDmap,
 				imageFileName, IDs, imageSize, view.cameraDepthMap.K, view.cameraDepthMap.R, view.cameraDepthMap.C,
-				dMin, dMax, view.depthMap, normalMap, confMap, viewsMap, 1);
+				dMin, dMax, view.depthMap, normalMap, confMap, viewsMap, 1))
+				DEBUG_EXTRA("warning: could not load neighbor depth-map for view %3u from '%s' (geometric-consistency pass)", view.GetID(), neighborDmap.c_str());
 			ASSERT(viewRef.image.size() == view.depthMap.size());
 		}
 		view.Init(viewRef.camera);
@@ -324,6 +326,10 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 			// compute rough estimates using the sparse point-cloud
 			InitDepthMap(depthData);
 		}
+		// optionally load external planar-segment maps used to guide PatchMatch
+		// propagation; the initialization above is never modified by priors
+		if (!OPTDENSE::strSegmentMapDir.empty())
+			ImportPriors(depthData);
 	}
 	return true;
 } // InitViews
@@ -353,6 +359,61 @@ bool DepthMapsData::InitDepthMap(DepthData& depthData)
 	DEBUG_ULTIMATE("Depth-map %3u roughly estimated from %u sparse points: %dx%d (%s)", image.GetID(), depthData.points.size(), image.image.width(), image.image.height(), TD_TIMER_GET_FMT().c_str());
 	return true;
 } // InitDepthMap
+/*----------------------------------------------------------------*/
+
+// load externally precomputed planar-segment id maps (e.g. from MoGe normals) used to
+// guide PatchMatch propagation; the maps are uint16 single-channel PNG files named
+// '{image-name}.seg.png' inside OPTDENSE::strSegmentMapDir (0 = unassigned), scaled to
+// the working resolution with nearest-neighbor so ids are never interpolated;
+// the initialization (sparse triangulation + random noise) is NEVER modified here
+bool DepthMapsData::ImportPriors(DepthData& depthData)
+{
+	ASSERT(!OPTDENSE::strSegmentMapDir.empty());
+	const DepthData::ViewData& viewRef = depthData.GetView();
+	const String imageName(Util::getFileName(viewRef.pImageData->name));
+	const cv::Size refSize(depthData.depthMap.size());
+
+	String segmentMapDir(OPTDENSE::strSegmentMapDir);
+	Util::ensureFolderSlash(segmentMapDir);
+	const String fileName(segmentMapDir + imageName + _T(".seg.png"));
+	if (!File::access(fileName)) {
+		DEBUG_EXTRA("warning: no segment map for image %3u (%s) at '%s'", viewRef.GetID(), imageName.c_str(), fileName.c_str());
+		return false;
+	}
+	cv::Mat rawSeg(cv::imread(fileName, cv::IMREAD_UNCHANGED));
+	if (rawSeg.empty() || rawSeg.channels() != 1) {
+		DEBUG("warning: could not read segment map %s (empty or not single-channel)", fileName.c_str());
+		return false;
+	}
+	SegmentMap priorSegmentMap;
+	if (rawSeg.depth() != CV_16U)
+		rawSeg.convertTo(priorSegmentMap, CV_16U);
+	else
+		rawSeg.copyTo(priorSegmentMap);
+	if (priorSegmentMap.size() != refSize)
+		cv::resize(priorSegmentMap, priorSegmentMap, refSize, 0, 0, cv::INTER_NEAREST);
+	unsigned numSegmentPixels(0);
+	Segment maxLabel(0);
+	for (int r=0; r<priorSegmentMap.rows; ++r) {
+		for (int c=0; c<priorSegmentMap.cols; ++c) {
+			const Segment s(priorSegmentMap(r,c));
+			if (s > 0) {
+				++numSegmentPixels;
+				if (maxLabel < s) maxLabel = s;
+			}
+		}
+	}
+	if (numSegmentPixels == 0) {
+		DEBUG("warning: segment map %s has no assigned pixels", fileName.c_str());
+		return false;
+	}
+	depthData.priorSegmentMap = priorSegmentMap;
+	const unsigned numTotal((unsigned)refSize.area());
+	DEBUG_EXTRA("Depth-map %3u (%s) loaded segment map (%u px in %u regions, %.1f%%)",
+		viewRef.GetID(), imageName.c_str(), numSegmentPixels, (unsigned)maxLabel,
+		numTotal ? 100.f*numSegmentPixels/numTotal : 0.f);
+	return true;
+} // ImportPriors
 /*----------------------------------------------------------------*/
 
 
@@ -467,6 +528,8 @@ DepthData DepthMapsData::ScaleDepthData(const DepthData& inputDeptData, float sc
 		cv::resize(rescaledDepthData.depthMap, rescaledDepthData.depthMap, cv::Size(), scale, scale, cv::INTER_NEAREST);
 	if (!rescaledDepthData.normalMap.empty())
 		cv::resize(rescaledDepthData.normalMap, rescaledDepthData.normalMap, cv::Size(), scale, scale, cv::INTER_NEAREST);
+	if (!rescaledDepthData.priorSegmentMap.empty())
+		cv::resize(rescaledDepthData.priorSegmentMap, rescaledDepthData.priorSegmentMap, cv::Size(), scale, scale, cv::INTER_NEAREST);
 	return rescaledDepthData;
 }
 
@@ -491,6 +554,10 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 		return true;
 	}
 	#endif // _USE_CUDA
+
+	DEBUG_EXTRA("CPU PatchMatch image %3u: geomIter=%d, segmentMapDir=%s",
+		arrDepthData[idxImage].images.front().GetID(), nGeometricIter,
+		OPTDENSE::strSegmentMapDir.empty() ? "no" : "yes");
 
 	TD_TIMER_STARTD();
 
@@ -2075,6 +2142,28 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 	}
 	#endif // _USE_CUDA
 
+	if (!OPTDENSE::strSegmentMapDir.empty()) {
+		String segmentMapDir(OPTDENSE::strSegmentMapDir);
+		Util::ensureFolderSlash(segmentMapDir);
+		unsigned numMatched(0);
+		for (IIndex idx: data.images) {
+			const String fileName(segmentMapDir + Util::getFileName(images[idx].name) + _T(".seg.png"));
+			if (File::access(fileName))
+				++numMatched;
+		}
+		VERBOSE("Segment maps: dir='%s', matched %u/%u selected images",
+			segmentMapDir.c_str(), numMatched, data.images.GetSize());
+	}
+	
+	VERBOSE("Depth-map estimation: photometric pass (iters=%u, geom-iters=%u, patch-match=%s)",
+		OPTDENSE::nEstimationIters, OPTDENSE::nEstimationGeometricIters,
+		#ifdef _USE_CUDA
+		(data.depthMaps.pmCUDA ? "CUDA" : "CPU")
+		#else
+		"CPU"
+		#endif
+	);
+
 	// initialize the queue of images to be processed
 	const int nOptimize(OPTDENSE::nOptimize);
 	if (OPTDENSE::nEstimationGeometricIters && data.nFusionMode >= 0)
@@ -2110,6 +2199,8 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 		}
 		#endif // _USE_CUDA
 		while (++data.nEstimationGeometricIter < (int)OPTDENSE::nEstimationGeometricIters) {
+			VERBOSE("Depth-map estimation: geometric-consistency pass %u/%u (loading neighbor depth-maps from working dir, init priors disabled)",
+				data.nEstimationGeometricIter+1, OPTDENSE::nEstimationGeometricIters);
 			// initialize the queue of images to be geometric processed
 			if (data.nEstimationGeometricIter+1 == (int)OPTDENSE::nEstimationGeometricIters)
 				OPTDENSE::nOptimize = nOptimize;

@@ -184,10 +184,13 @@ typedef MVS_API Point3f Normal;
 typedef MVS_API TImage<Depth> DepthMap;
 typedef MVS_API TImage<Normal> NormalMap;
 typedef MVS_API TImage<float> ConfidenceMap;
+typedef MVS_API uint16_t Segment; // planar-segment label id (0 - unassigned)
+typedef MVS_API TImage<Segment> SegmentMap;
 typedef MVS_API SEACAVE::cList<Depth,Depth,0> DepthArr;
 typedef MVS_API CLISTDEF2IDX(DepthMap,IIndex) DepthMapArr;
 typedef MVS_API CLISTDEF2IDX(NormalMap,IIndex) NormalMapArr;
 typedef MVS_API CLISTDEF2IDX(ConfidenceMap,IIndex) ConfidenceMapArr;
+typedef MVS_API CLISTDEF2IDX(SegmentMap,IIndex) SegmentMapArr;
 /*----------------------------------------------------------------*/
 
 } // namespace MVS

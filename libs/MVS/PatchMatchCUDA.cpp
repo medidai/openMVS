@@ -192,6 +192,11 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 	params.nInitTopK = std::min(params.nInitTopK, params.nNumViews);
 	params.fDepthMin = depthData.dMin;
 	params.fDepthMax = depthData.dMax;
+	DEBUG_EXTRA("CUDA PatchMatch image %3u: geomConsistency=%d, segments %s, depthRange=[%.4f,%.4f], subResLevels=%u",
+		depthData.images.front().GetID(), params.bGeomConsistency,
+		depthData.priorSegmentMap.empty() ? "absent" : "present",
+		params.fDepthMin, params.fDepthMax, params.bGeomConsistency ? 0u : OPTDENSE::nSubResolutionLevels);
+
 	if (prevNumImages < numImages) {
 		images.resize(numImages);
 		cameras.resize(numImages);
@@ -352,12 +357,42 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 			CUDA_CHECK(cudaMemcpy(cudaLowDepths, depthData.depthMap.ptr<float>(), sizeof(float) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice));
 		}
 
+		// load the persistent planar-segment id map (e.g. from MoGe normals) into CUDA
+		// memory; nearest-scaled so ids are never interpolated; used by ProcessPixel to
+		// gate propagation and to build per-segment plane hypotheses; id 0 = invalid.
+		// Also allocate the per-segment plane-fit accumulators and the fitted-plane buffer.
+		params.bUseSegments = false;
+		params.nSegments = 0;
+		if (!depthData.priorSegmentMap.empty()) {
+			SegmentMap priorSegmentMap(depthData.priorSegmentMap);
+			if (priorSegmentMap.size() != size)
+				cv::resize(priorSegmentMap, priorSegmentMap, size, 0, 0, cv::INTER_NEAREST);
+			ASSERT(priorSegmentMap.isContinuous());
+			CUDA_CHECK(cudaMalloc((void**)&cudaPriorSegments, sizeof(uint16_t) * size.area()));
+			CUDA_CHECK(cudaMemcpy(cudaPriorSegments, priorSegmentMap.ptr<uint16_t>(), sizeof(uint16_t) * size.area(), cudaMemcpyHostToDevice));
+			double maxSegId = 0;
+			cv::minMaxLoc(priorSegmentMap, NULL, &maxSegId);
+			params.nSegments = (int)maxSegId + 1;
+			CUDA_CHECK(cudaMalloc((void**)&cudaSegmentAccum, sizeof(float) * (size_t)params.nSegments * PatchMatch::SEGMENT_ACCUM_STRIDE));
+			CUDA_CHECK(cudaMalloc((void**)&cudaSegmentPlanes, sizeof(Point4) * (size_t)params.nSegments));
+			CUDA_CHECK(cudaMemset(cudaSegmentPlanes, 0, sizeof(Point4) * (size_t)params.nSegments));
+			params.bUseSegments = true;
+		}
+
 		// run CUDA patch-match
 		ASSERT(!depthData.viewsMap.empty());
 		RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
 		CUDA_CHECK(cudaGetLastError());
 		if (params.bLowResProcessed)
 			CUDA_CHECK(cudaFree(cudaLowDepths));
+		if (params.bUseSegments) {
+			CUDA_CHECK(cudaFree(cudaPriorSegments));
+			cudaPriorSegments = NULL;
+			CUDA_CHECK(cudaFree(cudaSegmentAccum));
+			cudaSegmentAccum = NULL;
+			CUDA_CHECK(cudaFree(cudaSegmentPlanes));
+			cudaSegmentPlanes = NULL;
+		}
 
 		// load depth-map, normal-map and confidence-map from CUDA memory
 		for (int r = 0; r < depthData.depthMap.rows; ++r) {

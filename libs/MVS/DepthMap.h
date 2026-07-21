@@ -147,6 +147,7 @@ extern float fRandomAngle2Range;
 extern float fRandomSmoothDepth;
 extern float fRandomSmoothNormal;
 extern float fRandomSmoothBonus;
+extern String strSegmentMapDir;
 } // namespace OPTDENSE
 /*----------------------------------------------------------------*/
 
@@ -223,6 +224,7 @@ struct MVS_API DepthData {
 	DepthMap depthMap; // depth-map
 	NormalMap normalMap; // normal-map in camera space
 	ConfidenceMap confMap; // confidence-map
+	SegmentMap priorSegmentMap; // persistent planar-segment ids (e.g. from MoGe normals), 0 = unassigned (optional)
 	ViewsMap viewsMap; // view-IDs map (indexing images vector starting after first view)
 	float dMin, dMax; // global depth range for this image
 	cv::Size size; // image size used to estimate this depth-map
@@ -242,6 +244,7 @@ struct MVS_API DepthData {
 		depthMap.release();
 		normalMap.release();
 		confMap.release();
+		priorSegmentMap.release();
 		viewsMap.release();
 	}
 

@@ -3119,8 +3119,10 @@ bool TImage<TYPE>::Save(const String& fileName) const
 	} else
 #ifdef _USE_OPENCV_JPEGXL_WRITE
 	if (ext == ".jxl") {
+		#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 12)
 		compression_params.push_back(cv::IMWRITE_JPEGXL_QUALITY);
 		compression_params.push_back(95);
+		#endif
 	} else
 #endif
 	if (ext == ".pfm") {
