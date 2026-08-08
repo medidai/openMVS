@@ -776,6 +776,7 @@ struct HeaderDepthDataRaw {
 		HAS_NORMAL = (1<<1),
 		HAS_CONF = (1<<2),
 		HAS_VIEWS = (1<<3),
+		DEPTH_FLOAT16 = (1<<4),
 	};
 	uint16_t name; // file type
 	uint8_t type; // content type

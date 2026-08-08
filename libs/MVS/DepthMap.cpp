@@ -90,6 +90,7 @@ MDEFVAR_OPTDENSE_uint32(nPointInsideROI, "Point Inside ROI", "consider a point s
 MDEFVAR_OPTDENSE_bool(bAddCorners, "Add Corners", "add support points at image corners with nearest neighbor disparities", "0")
 MDEFVAR_OPTDENSE_bool(bInitSparse, "Init Sparse", "init depth-map only with the sparse points (no interpolation)", "1")
 MDEFVAR_OPTDENSE_bool(bRemoveDmaps, "Remove Dmaps", "remove depth-maps after fusion", "0")
+MDEFVAR_OPTDENSE_bool(bSaveDmapsFloat16, "Save Dmaps Float16", "save depth-maps in 16-bit float format instead of 32-bit float for reduced file size", "0")
 MDEFVAR_OPTDENSE_float(fViewMinScore, "View Min Score", "Min score to consider a neighbor images (0 - disabled)", "2.0")
 MDEFVAR_OPTDENSE_float(fViewMinScoreRatio, "View Min Score Ratio", "Min score ratio to consider a neighbor images", "0.03")
 MDEFVAR_OPTDENSE_float(fMinArea, "Min Area", "Min shared area for accepting the depth triangulation", "0.05")
@@ -2056,6 +2057,8 @@ bool MVS::ExportDepthDataRaw(const String& fileName, const String& imageFileName
 		header.type |= HeaderDepthDataRaw::HAS_CONF;
 	if (!viewsMap.empty())
 		header.type |= HeaderDepthDataRaw::HAS_VIEWS;
+	if (OPTDENSE::bSaveDmapsFloat16)
+		header.type |= HeaderDepthDataRaw::DEPTH_FLOAT16;
 	fwrite(&header, sizeof(HeaderDepthDataRaw), 1, f.get());
 
 	// write image file name
@@ -2078,9 +2081,52 @@ bool MVS::ExportDepthDataRaw(const String& fileName, const String& imageFileName
 	fwrite(C.ptr(), sizeof(REAL), 3, f.get());
 
 	// write depth-map
-	if (fwrite(depthMap.getData(), sizeof(float), depthMap.area(), f.get()) != static_cast<size_t>(depthMap.area())) {
-		DEBUG("error: writing depth-data to file '%s'", fileName.c_str());
-		return false;
+	if (OPTDENSE::bSaveDmapsFloat16) {
+		// Convert to 16-bit float and write
+		const size_t numPixels = depthMap.area();
+		std::vector<uint16_t> depthMap16(numPixels);
+		const float* srcData = depthMap.getData();
+		for (size_t i = 0; i < numPixels; ++i) {
+			// Convert 32-bit float to 16-bit float (half precision)
+			// Use simple bit manipulation for IEEE 754 half precision
+			union { float f; uint32_t i; } value32;
+			value32.f = srcData[i];
+			
+			uint32_t sign = value32.i & 0x80000000u;
+			uint32_t exp = value32.i & 0x7F800000u;
+			uint32_t mantissa = value32.i & 0x007FFFFFu;
+			
+			if (exp == 0x7F800000u) {
+				// Infinity or NaN
+				depthMap16[i] = (uint16_t)((sign >> 16) | 0x7C00 | (mantissa ? 0x0200 : 0));
+			} else if (exp == 0) {
+				// Zero or denormalized
+				depthMap16[i] = (uint16_t)(sign >> 16);
+			} else {
+				// Normalized number
+				int32_t newExp = ((int32_t)(exp >> 23)) - 127 + 15;
+				if (newExp >= 31) {
+					// Overflow to infinity
+					depthMap16[i] = (uint16_t)((sign >> 16) | 0x7C00);
+				} else if (newExp <= 0) {
+					// Underflow to zero
+					depthMap16[i] = (uint16_t)(sign >> 16);
+				} else {
+					// Normal case
+					depthMap16[i] = (uint16_t)((sign >> 16) | (newExp << 10) | (mantissa >> 13));
+				}
+			}
+		}
+		if (fwrite(depthMap16.data(), sizeof(uint16_t), numPixels, f.get()) != numPixels) {
+			DEBUG("error: writing 16-bit depth-data to file '%s'", fileName.c_str());
+			return false;
+		}
+	} else {
+		// Write as 32-bit float (original behavior)
+		if (fwrite(depthMap.getData(), sizeof(float), depthMap.area(), f.get()) != static_cast<size_t>(depthMap.area())) {
+			DEBUG("error: writing depth-data to file '%s'", fileName.c_str());
+			return false;
+		}
 	}
 
 	// write normal-map
@@ -2150,12 +2196,65 @@ bool MVS::ImportDepthDataRaw(const String& fileName, String& imageFileName,
 	imageSize.height = header.imageHeight;
 	if ((flags & HeaderDepthDataRaw::HAS_DEPTH) != 0) {
 		depthMap.create(header.depthHeight, header.depthWidth);
-		if (fread(depthMap.getData(), sizeof(float), depthMap.area(), f.get()) != static_cast<size_t>(depthMap.area())) {
-			DEBUG("error: reading depth-data from file '%s'", fileName.c_str());
-			return false;
+		if ((header.type & HeaderDepthDataRaw::DEPTH_FLOAT16) != 0) {
+			// Read 16-bit float depth map
+			const size_t numPixels = depthMap.area();
+			std::vector<uint16_t> depthMap16(numPixels);
+			if (fread(depthMap16.data(), sizeof(uint16_t), numPixels, f.get()) != numPixels) {
+				DEBUG("error: reading 16-bit depth-data from file '%s'", fileName.c_str());
+				return false;
+			}
+			// Convert 16-bit float to 32-bit float
+			float* dstData = depthMap.getData();
+			for (size_t i = 0; i < numPixels; ++i) {
+				uint16_t half = depthMap16[i];
+				uint32_t sign = (half & 0x8000u) << 16;
+				uint32_t exp = (half & 0x7C00u) >> 10;
+				uint32_t mantissa = half & 0x03FFu;
+				
+				if (exp == 0) {
+					if (mantissa == 0) {
+						// Zero
+						union { float f; uint32_t i; } result;
+						result.i = sign;
+						dstData[i] = result.f;
+					} else {
+						// Denormalized number - convert to normalized
+						exp = 1;
+						while ((mantissa & 0x0400u) == 0) {
+							mantissa <<= 1;
+							exp--;
+						}
+						mantissa &= 0x03FFu;
+						union { float f; uint32_t i; } result;
+						result.i = sign | ((exp + 112) << 23) | (mantissa << 13);
+						dstData[i] = result.f;
+					}
+				} else if (exp == 31) {
+					// Infinity or NaN
+					union { float f; uint32_t i; } result;
+					result.i = sign | 0x7F800000u | (mantissa ? 0x00400000u : 0);
+					dstData[i] = result.f;
+				} else {
+					// Normalized number
+					union { float f; uint32_t i; } result;
+					result.i = sign | ((exp + 112) << 23) | (mantissa << 13);
+					dstData[i] = result.f;
+				}
+			}
+		} else {
+			// Read 32-bit float depth map (original behavior)
+			if (fread(depthMap.getData(), sizeof(float), depthMap.area(), f.get()) != static_cast<size_t>(depthMap.area())) {
+				DEBUG("error: reading depth-data from file '%s'", fileName.c_str());
+				return false;
+			}
 		}
 	} else {
-		fseek(f.get(), sizeof(float)*header.depthWidth*header.depthHeight, SEEK_CUR);
+		// Skip depth data
+		const size_t depthDataSize = (header.type & HeaderDepthDataRaw::DEPTH_FLOAT16) != 0 ? 
+			sizeof(uint16_t) * header.depthWidth * header.depthHeight :
+			sizeof(float) * header.depthWidth * header.depthHeight;
+		fseek(f.get(), depthDataSize, SEEK_CUR);
 	}
 
 	// read normal-map
