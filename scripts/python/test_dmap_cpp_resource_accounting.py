@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PATCHMATCH = REPO_ROOT / "libs" / "MVS" / "PatchMatchCUDA.cpp"
+PATCHMATCH_CUDA = REPO_ROOT / "libs" / "MVS" / "PatchMatchCUDA.cu"
+PATCHMATCH_INLINE = REPO_ROOT / "libs" / "MVS" / "PatchMatchCUDA.inl"
 SCENE_DENSIFY = REPO_ROOT / "libs" / "MVS" / "SceneDensify.cpp"
 ARCHITECTURE = REPO_ROOT / "docs" / "dmap_observability" / "02_architecture.md"
 
@@ -14,6 +17,8 @@ class CppResourceAccountingContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.patchmatch = PATCHMATCH.read_text(encoding="utf-8")
+        cls.patchmatch_cuda = PATCHMATCH_CUDA.read_text(encoding="utf-8")
+        cls.patchmatch_inline = PATCHMATCH_INLINE.read_text(encoding="utf-8")
         cls.scene_densify = SCENE_DENSIFY.read_text(encoding="utf-8")
         cls.architecture = ARCHITECTURE.read_text(encoding="utf-8")
 
@@ -25,6 +30,37 @@ class CppResourceAccountingContractTest(unittest.TestCase):
             self.patchmatch,
         )
         self.assertIn("DMAP_INSTRUMENT_FIXED_HOST_BYTES", self.patchmatch)
+
+    def test_reference_patch_layout_metadata_uses_kernel_source_of_truth(self) -> None:
+        def macro_value(source: str, name: str) -> int:
+            match = re.search(rf"^#define {name} (\d+)$", source, re.MULTILINE)
+            self.assertIsNotNone(match, f"missing integer macro {name}")
+            return int(match.group(1))
+
+        self.assertEqual(
+            macro_value(self.patchmatch_inline, "PATCHMATCHCUDA_PATCH_HALF_WINDOW"),
+            macro_value(self.patchmatch_cuda, "nSizeHalfWindow"),
+        )
+        self.assertEqual(
+            macro_value(self.patchmatch_inline, "PATCHMATCHCUDA_PATCH_STEP"),
+            macro_value(self.patchmatch_cuda, "nSizeStep"),
+        )
+        self.assertIn("texDesc.addressMode[0] = cudaAddressModeWrap;", self.patchmatch)
+        self.assertIn("texDesc.addressMode[1] = cudaAddressModeWrap;", self.patchmatch)
+        self.assertIn("texDesc.normalizedCoords = 0;", self.patchmatch)
+        self.assertIn("texDesc.filterMode = cudaFilterModeLinear;", self.patchmatch)
+        for field in (
+            '"openmvs.dmap.reference_patch_layout"',
+            '"sample_offsets_pixels"',
+            '"texture_address_mode_configured", "wrap"',
+            '"texture_address_mode_effective", "clamp"',
+            '"texture_coordinates_normalized", false',
+            '"texture_filter_mode", "linear"',
+            '"sample_locations_captured_by_kernel", false',
+            '"sample_values_captured_by_kernel", false',
+            '"source_view_footprints_captured_by_kernel", false',
+        ):
+            self.assertIn(field, self.patchmatch)
 
     def test_trace_resources_are_planned_before_materialization(self) -> None:
         estimate = self.patchmatch[self.patchmatch.index("void PatchMatch::EstimateDepthMap") :]

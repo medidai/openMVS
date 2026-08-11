@@ -95,6 +95,10 @@
           <summary>Visible signals</summary>
           <div id="signal-picker" class="signal-picker"></div>
         </details>
+        <label class="toggle-control" title="Show positions derived from the validated fixed reference-patch contract">
+          <input id="patch-layout-toggle" type="checkbox" checked>
+          <span>Derived patch grid</span>
+        </label>
         <button id="clear-crosshair" type="button">Clear crosshair</button>
       </div>
     </section>
@@ -178,6 +182,17 @@
       </div>
       <div id="drilldown-status" class="drilldown-status"></div>
       <div id="drilldown-detail" class="drilldown-detail"></div>
+      <section id="patch-inspector" class="patch-inspector" aria-labelledby="patch-inspector-heading" hidden>
+        <div class="patch-inspector-heading">
+          <div>
+            <p class="eyebrow">DERIVED REFERENCE SUPPORT</p>
+            <h3 id="patch-inspector-heading">Reference patch layout</h3>
+          </div>
+          <span id="patch-inspector-quality" class="quality derived_exact">derived_exact</span>
+        </div>
+        <p class="patch-inspector-note">Select a map pixel to inspect the validated fixed reference grid. This is visual context from the report thumbnail, not recorded CUDA sample values or a source-view footprint.</p>
+        <div id="patch-inspector-grid" class="patch-inspector-grid"></div>
+      </section>
       <div id="map-grid" class="map-grid"></div>
     </section>
 

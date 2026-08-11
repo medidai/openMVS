@@ -51,14 +51,25 @@ without mixing surfaces at edges or occlusions.
 
 Inspect reference RGB, reference variance or texture score, requested patch
 mode, activation, valid sample fraction, fallback reason, raw photometric cost,
-gap, and depth error proxies. Overlay the actual sampled support when available;
-a bounding square is not sufficient evidence for a deformable footprint.
+gap, and depth error proxies. For a declared fixed layout, enable **Derived
+patch grid** and inspect the baseline/variant loupes at the same pixel and
+pyramid level. These markers are derived from a validated observer layout
+contract, source-checked against the CUDA scoring constants, and the exact
+resource-plan extent; they are not CUDA-recorded sample values or warped
+source footprints. Overlay literal sampled support only when a validated patch
+trace supplies it. A bounding square is not sufficient evidence for a
+deformable footprint.
 
 Stratify metrics by texture band and distance to a depth or annotation edge.
 Improvement limited to interiors with stable boundary residuals supports the
 hypothesis. Better coverage paired with worse residuals, lower valid sample
 fraction, or frequent cross-surface support argues for a more selective shape
 or stronger reliability gate.
+
+See [Patch debugging: current capability and required extension](11_patch_debugging.md)
+for the exact fixed reference layout, the current trace boundary, the bounded
+final-state workaround, and the production requirements for literal source
+footprints and per-sample score reconstruction.
 
 ## View-selection change
 

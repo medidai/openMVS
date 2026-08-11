@@ -6943,7 +6943,23 @@ def cuda_resource_plan_row(
         "validation_errors_json": json.dumps(errors),
         "validation_warnings_json": json.dumps(warnings),
         "duplicate_count": duplicate_count,
+        "plan_identity_complete": all(
+            key in plan for key in (
+                "image_id", "estimation_stage", "geometric_iteration",
+                "pyramid_level", "width", "height",
+            )
+        ),
+        "plan_image_id": plan.get("image_id"),
+        "plan_estimation_stage": plan.get("estimation_stage"),
+        "plan_geometric_iteration": plan.get("geometric_iteration"),
+        "plan_pyramid_level": plan.get("pyramid_level"),
         "pyramid_level": plan.get("pyramid_level", context.get("pyramid_level")),
+        "grid_width": plan.get("width"),
+        "grid_height": plan.get("height"),
+        "compatibility_maps_requested": plan.get("compatibility_maps_requested"),
+        "compatibility_map_contract_json": json.dumps(
+            plan.get("compatibility_map_contract") or {}, sort_keys=True
+        ),
         "decision": plan.get("decision", "unavailable"),
         "reason": trace_unavailable_reason or nested_value(plan, "storage_preflight", "reason") or plan.get("exact_unavailable_reason") or (
             "resource plan unavailable" if not plan else ""

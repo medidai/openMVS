@@ -110,6 +110,10 @@ A complete development report includes:
 - repeat distributions, runtime, and resource use;
 - rich synchronized cost/view/update/patch/multiscale/filter maps when each
   signal is registered, captured, and validated as available;
+- per-arm fixed reference-patch markers and RGB loupes only when a validated
+  layout contract and exact selected-level extent are available; label the
+  positions `derived_exact`, distinguish configured wrap from effective clamp,
+  and mark clamp-addressed samples;
 - annotation overlays and residual distributions when available;
 - regression sorting and aggregate-to-frame links;
 - targeted trace navigation;
@@ -140,6 +144,8 @@ hide evidence absent from the model.
 - Do not add observer options to `DensifyPointCloud`.
 - Do not zero-fill missing values.
 - Do not call a post-pass attribution an exact winning candidate.
+- Do not call a layout-derived reference marker a kernel-recorded sample, a
+  sampled intensity, or a projected source-view footprint.
 - Do not expose black/red phases as separate mechanics iterations.
 - Do not silently drop failed scenes, malformed annotations, or partial maps.
 - Do not run full-corpus deep capture before summary evidence selects targets.

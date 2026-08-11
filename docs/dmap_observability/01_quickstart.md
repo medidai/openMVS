@@ -247,4 +247,5 @@ summary, and prefilter bit-exact parity checks.
    next immutable run.
 
 Continue with [capture profiles](03_capture_profiles.md), [report
-navigation](05_report_guide.md), and [debugging playbooks](06_debugging_playbooks.md).
+navigation](05_report_guide.md), [debugging playbooks](06_debugging_playbooks.md),
+and the [patch-debugging capability note](11_patch_debugging.md).

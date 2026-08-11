@@ -10,6 +10,7 @@ const TEMPLATE = readFileSync(join(UI_ROOT, "investigation.html"), "utf8");
 const CSS = readFileSync(join(UI_ROOT, "investigation.css"), "utf8");
 const JAVASCRIPT = readFileSync(join(UI_ROOT, "investigation.js"), "utf8");
 const PROFILE_ORDER = ["endpoint", "summary", "prefilter", "deep", "trace"];
+const TEST_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlYvWQAAAAASUVORK5CYII=";
 
 function browserBinary() {
   const candidates = [process.env.CHROME_BIN, "/usr/bin/google-chrome", "/snap/bin/chromium"].filter(Boolean);
@@ -77,6 +78,59 @@ function baseModel() {
   };
 }
 
+function patchLayout() {
+  const axis = [-4, -2, 0, 2, 4];
+  return {
+    schema_name: "openmvs.dmap.reference_patch_layout",
+    schema_version: 1,
+    kind: "fixed_cartesian_grid",
+    coordinate_domain: "reference_pyramid_pixels",
+    sample_position: "integer_offset_from_pixel_center",
+    texel_center_offset: 0.5,
+    texture_address_mode_configured: "wrap",
+    texture_address_mode_effective: "clamp",
+    texture_address_mode_effective_basis: "cuda_runtime_unnormalized_wrap_is_clamped",
+    texture_coordinates_normalized: false,
+    texture_filter_mode: "linear",
+    half_window_pixels: 4,
+    step_pixels: 2,
+    sample_count: 25,
+    sample_offsets_pixels: axis.flatMap((y) => axis.map((x) => [x, y])),
+    layout_provenance: "compiled_cuda_scoring_constants",
+    sample_locations_captured_by_kernel: false,
+    sample_values_captured_by_kernel: false,
+    source_view_footprints_captured_by_kernel: false,
+  };
+}
+
+function modelWithPatchEvidence() {
+  const model = baseModel();
+  model.signals = [{
+    id: "signal-reference-rgb", name: "reference_rgb", label: "reference RGB",
+    measurement_qualities: ["source"], available_artifacts: 1,
+    unavailable_artifacts: 0, default: true, mechanism: "input",
+    quantity: "reference_image", description: "Reference RGB image.",
+  }];
+  const frame = model.scenes[0].frames[0];
+  frame.reference = { available: true, path: TEST_PNG, unavailable_reason: null };
+  model.mechanics.reference_patch_layouts = ["baseline", "candidate"].map((run) => ({
+    run, repeat: 0, scene_id: "scene-a", estimation_stage: "photometric",
+    geometric_iteration: null, available: true, layout: patchLayout(),
+    measurement_quality: "exact", visualization_quality: "derived_exact",
+    unavailable_reason: null,
+  }));
+  model.mechanics.cuda_resource_plans = ["baseline", "candidate"].map((run) => ({
+    run, repeat: 0, scene_id: "scene-a", image_id: 17,
+    estimation_stage: "photometric", geometric_iteration: null,
+    pyramid_level: null,
+    grid_extent: {
+      available: true, width: 8, height: 6, measurement_quality: "exact",
+      measurement_basis: "resource_plan.width_height", unavailable_reason: null,
+    },
+  }));
+  return model;
+}
+
 function renderedHtml(model) {
   const embeddedModel = JSON.stringify(model).replaceAll("<", "\\u003c");
   return TEMPLATE
@@ -85,7 +139,7 @@ function renderedHtml(model) {
     .replace("__DMAP_REPORT_JS__", JAVASCRIPT);
 }
 
-function dumpDom(model) {
+function dumpDom(model, hash = "") {
   const browser = browserBinary();
   if (!browser) return null;
   const directory = mkdtempSync(join(tmpdir(), "dmap-profile-ui-"));
@@ -94,7 +148,7 @@ function dumpDom(model) {
     writeFileSync(report, renderedHtml(model));
     const result = spawnSync(browser, [
       "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-      `--user-data-dir=${join(directory, "browser")}`, "--virtual-time-budget=1500", "--dump-dom", `file://${report}`,
+      `--user-data-dir=${join(directory, "browser")}`, "--virtual-time-budget=1500", "--dump-dom", `file://${report}${hash}`,
     ], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
     assert.equal(result.status, 0, `headless browser failed:\n${result.stderr}`);
     return result.stdout;
@@ -102,6 +156,69 @@ function dumpDom(model) {
     rmSync(directory, { recursive: true, force: true });
   }
 }
+
+function mapSection(dom) {
+  return dom.match(/<section class="section-band map-section"[\s\S]*?<section class="section-band"/)?.[0] || "";
+}
+
+test("derived fixed reference grids render per arm with clamp-aware loupes", (context) => {
+  if (!browserBinary()) return context.skip("Chrome or Chromium is unavailable");
+  const section = mapSection(dumpDom(
+    modelWithPatchEvidence(), "#x=0.01&y=0.01&signals=reference_rgb",
+  ));
+  assert.equal((section.match(/data-patch-sample=/g) || []).length, 50);
+  assert.equal((section.match(/data-clamped="1"/g) || []).length, 32);
+  assert.match(section, /data-patch-role="baseline" data-patch-state="available" data-sample-count="25"/);
+  assert.match(section, /data-patch-role="variant" data-patch-state="available" data-sample-count="25"/);
+  assert.equal((section.match(/data-rendered="1"/g) || []).length, 2);
+  assert.equal((section.match(/data-clamped-samples="16"/g) || []).length, 2);
+  assert.match(section, /descriptor requests wrap but unnormalized CUDA coordinates make clamp effective/);
+  assert.match(section, /Derived from the validated fixed-layout contract plus exact resource-plan dimensions/);
+  assert.match(section, /not the CUDA grayscale pyramid texture/);
+  assert.match(section, /not recorded CUDA sample values or a source-view footprint/);
+
+  const sameRunSection = mapSection(dumpDom(
+    modelWithPatchEvidence(),
+    "#baseline=baseline&variant=baseline&x=0.4&y=0.4&signals=reference_rgb",
+  ));
+  assert.equal(
+    (sameRunSection.match(/class="patch-sample-marker baseline/g) || []).length,
+    25,
+  );
+  assert.equal(
+    (sameRunSection.match(/class="patch-sample-marker variant/g) || []).length,
+    25,
+  );
+});
+
+test("derived patch grid toggle and missing metadata remain explicit", (context) => {
+  if (!browserBinary()) return context.skip("Chrome or Chromium is unavailable");
+  const hidden = mapSection(dumpDom(
+    modelWithPatchEvidence(),
+    "#x=0.4&y=0.4&signals=reference_rgb&patchLayout=0",
+  ));
+  assert.doesNotMatch(hidden, /data-patch-sample=/);
+  assert.match(hidden, /id="patch-inspector"[^>]*hidden/);
+
+  const partialModel = modelWithPatchEvidence();
+  partialModel.mechanics.reference_patch_layouts = partialModel.mechanics.reference_patch_layouts.slice(0, 1);
+  const partial = mapSection(dumpDom(
+    partialModel, "#x=0.4&y=0.4&signals=reference_rgb",
+  ));
+  assert.match(partial, /id="patch-inspector-quality" class="quality partial">partial/);
+  assert.equal((partial.match(/data-patch-state="available"/g) || []).length, 1);
+  assert.equal((partial.match(/data-patch-state="unavailable"/g) || []).length, 1);
+
+  const missingModel = modelWithPatchEvidence();
+  missingModel.mechanics.reference_patch_layouts = [];
+  const missing = mapSection(dumpDom(
+    missingModel, "#x=0.4&y=0.4&signals=reference_rgb",
+  ));
+  assert.doesNotMatch(missing, /data-patch-sample=/);
+  assert.equal((missing.match(/data-patch-state="unavailable"/g) || []).length, 2);
+  assert.match(missing, /id="patch-inspector-quality" class="quality unavailable">unavailable/);
+  assert.match(missing, /reference patch layout was not declared/);
+});
 
 test("supported coverage renders five profiles and selected-frame evidence", (context) => {
   if (!browserBinary()) return context.skip("Chrome or Chromium is unavailable");

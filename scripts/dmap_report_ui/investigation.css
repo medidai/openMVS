@@ -261,6 +261,18 @@ select, input[type="search"] { width: 100%; min-width: 0; max-width: 100%; heigh
 .segmented input:checked + span { color: white; border-color: var(--teal); background: var(--teal); }
 .signal-menu { position: relative; }
 .signal-menu summary, #clear-crosshair { cursor: pointer; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--paper); }
+.toggle-control { display: inline-flex; align-items: center; gap: 7px; color: #304147; cursor: pointer; font-size: 12px; font-weight: 700; }
+.toggle-control input {
+  position: relative; width: 34px; height: 20px; margin: 0; appearance: none;
+  border: 1px solid var(--line-strong); border-radius: 10px; background: #dfe6e8; cursor: pointer;
+}
+.toggle-control input::before {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+  border-radius: 50%; background: white; box-shadow: 0 1px 3px rgb(23 33 38 / 28%); transition: transform 120ms ease;
+}
+.toggle-control input:checked { border-color: var(--teal); background: var(--teal); }
+.toggle-control input:checked::before { transform: translateX(14px); }
+.toggle-control input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .signal-picker { position: absolute; top: calc(100% + 5px); left: 0; z-index: 30; width: min(470px, 90vw); max-height: 360px; padding: 8px; overflow: auto; border: 1px solid var(--line-strong); background: var(--paper); box-shadow: 0 8px 24px rgb(23 33 38 / 16%); }
 .signal-picker label { display: grid; grid-template-columns: 18px 1fr auto; gap: 6px; align-items: start; padding: 6px; border-bottom: 1px solid #e8edee; }
 .quality-mini { color: var(--muted); font-size: 10px; text-transform: uppercase; }
@@ -358,6 +370,7 @@ tbody tr:hover { background: var(--blue-soft); }
 .quality { padding: 2px 5px; border-radius: 3px; text-transform: uppercase; font-weight: 750; }
 .quality.exact, .quality.derived_exact { color: var(--green); background: var(--green-soft); }
 .quality.proxy { color: var(--amber); background: var(--amber-soft); }
+.quality.partial { color: var(--amber); background: var(--amber-soft); }
 .quality.unavailable { color: var(--red); background: var(--red-soft); }
 .map-image-wrap { position: relative; min-height: 180px; background: #edf0ef; overflow: hidden; }
 .map-image { display: block; width: 100%; height: auto; min-height: 180px; object-fit: contain; cursor: crosshair; image-rendering: auto; }
@@ -365,6 +378,40 @@ tbody tr:hover { background: var(--blue-soft); }
 .crosshair-x { top: 0; bottom: 0; width: 1px; }
 .crosshair-y { left: 0; right: 0; height: 1px; }
 .has-crosshair .crosshair-x, .has-crosshair .crosshair-y { display: block; }
+.patch-sample-overlay { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+.patch-sample-marker {
+  position: absolute; width: 7px; height: 7px; transform: translate(-50%, -50%);
+  box-sizing: border-box;
+}
+.patch-sample-marker.baseline { border: 2px solid #1976d2; background: rgb(255 255 255 / 22%); }
+.patch-sample-marker.variant { border: 1px solid white; border-radius: 50%; background: #d81b60; box-shadow: 0 0 0 1px rgb(78 5 33 / 72%); }
+.patch-sample-marker.clamped { outline: 2px solid #f2c94c; outline-offset: 1px; }
+.patch-map-note { color: #304147; }
+.patch-inspector {
+  margin: 0 0 14px; padding: 13px 14px 15px; border: 1px solid var(--line-strong);
+  border-left: 4px solid var(--teal); background: #f8faf9;
+}
+.patch-inspector[hidden] { display: none; }
+.patch-inspector-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.patch-inspector-heading h3 { margin: 0; color: #304147; font-size: 16px; }
+.patch-inspector-heading .eyebrow { margin-bottom: 3px; }
+.patch-inspector-note { max-width: 1050px; margin: 8px 0 12px; color: var(--muted); font-size: 11px; }
+.patch-inspector-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.patch-loupe-card { min-width: 0; padding: 10px; border: 1px solid var(--line); background: white; }
+.patch-loupe-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.patch-loupe-head h4 { margin: 0; color: #304147; font-size: 13px; overflow-wrap: anywhere; }
+.patch-loupe-head small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.patch-loupe-canvas-wrap { display: grid; place-items: center; min-height: 260px; overflow: hidden; background: #20282b; }
+.patch-loupe-canvas { display: block; width: min(100%, 320px); height: auto; aspect-ratio: 1; image-rendering: pixelated; }
+.patch-loupe-legend { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 8px 0 0; color: #304147; font-size: 10px; }
+.patch-loupe-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.patch-legend-mark { display: inline-block; width: 8px; height: 8px; box-sizing: border-box; }
+.patch-legend-mark.baseline { border: 2px solid #1976d2; }
+.patch-legend-mark.variant { border: 1px solid white; border-radius: 50%; background: #d81b60; box-shadow: 0 0 0 1px #5d0a2c; }
+.patch-legend-mark.center { width: 9px; height: 2px; background: #00e5ff; box-shadow: 0 -3px 0 -1px #00e5ff, 0 3px 0 -1px #00e5ff; }
+.patch-legend-mark.clamped { border: 2px solid #f2c94c; }
+.patch-loupe-provenance { margin: 8px 0 0; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.patch-loupe-unavailable { display: grid; place-content: center; min-height: 260px; padding: 18px; color: var(--amber); background: var(--amber-soft); text-align: center; }
 .unavailable-tile { display: grid; place-content: center; min-height: 180px; padding: 16px; color: var(--red); background: var(--red-soft); border: 1px dashed #d9a3a0; text-align: center; }
 .provenance { margin: 6px 0 0; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .category-legend { margin: 6px 0 0; color: var(--ink); font-size: 10px; font-weight: 650; overflow-wrap: anywhere; }
@@ -514,6 +561,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .annotation-threshold-row { grid-template-columns: 54px minmax(0, 1fr); }
   .annotation-threshold-row > .annotation-threshold-value, .annotation-threshold-row > .annotation-delta { grid-column: 2; }
   .annotation-assets { grid-template-columns: minmax(0, 1fr); }
+  .patch-inspector-grid { grid-template-columns: minmax(0, 1fr); }
   .completed-trace > summary { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 520px) {

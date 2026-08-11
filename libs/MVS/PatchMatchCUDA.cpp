@@ -2595,6 +2595,16 @@ bool AppendInstrumentTimings(
 
 nlohmann::json ConfiguredPatchMatchCUDAParametersJson()
 {
+	nlohmann::json sampleOffsets(nlohmann::json::array());
+	for (int y = -PATCHMATCHCUDA_PATCH_HALF_WINDOW;
+		 y <= PATCHMATCHCUDA_PATCH_HALF_WINDOW;
+		 y += PATCHMATCHCUDA_PATCH_STEP) {
+		for (int x = -PATCHMATCHCUDA_PATCH_HALF_WINDOW;
+			 x <= PATCHMATCHCUDA_PATCH_HALF_WINDOW;
+			 x += PATCHMATCHCUDA_PATCH_STEP) {
+			sampleOffsets.push_back({x, y});
+		}
+	}
 	return {
 		{"geometric_weight", 0.1f},
 		{"refine_depth_ratio", 0.005f},
@@ -2602,7 +2612,28 @@ nlohmann::json ConfiguredPatchMatchCUDAParametersJson()
 		{"low_texture_variance_max", 0.0025f},
 		{"low_texture_decay_scale", 0.02f},
 		{"view_samples", 32},
-		{"init_top_k_configured", 3}
+		{"init_top_k_configured", 3},
+		{"reference_patch_layout", {
+			{"schema_name", "openmvs.dmap.reference_patch_layout"},
+			{"schema_version", 1},
+			{"kind", "fixed_cartesian_grid"},
+			{"coordinate_domain", "reference_pyramid_pixels"},
+			{"sample_position", "integer_offset_from_pixel_center"},
+			{"texel_center_offset", 0.5f},
+			{"texture_address_mode_configured", "wrap"},
+			{"texture_address_mode_effective", "clamp"},
+			{"texture_address_mode_effective_basis", "cuda_runtime_unnormalized_wrap_is_clamped"},
+			{"texture_coordinates_normalized", false},
+			{"texture_filter_mode", "linear"},
+			{"half_window_pixels", PATCHMATCHCUDA_PATCH_HALF_WINDOW},
+			{"step_pixels", PATCHMATCHCUDA_PATCH_STEP},
+			{"sample_count", sampleOffsets.size()},
+			{"sample_offsets_pixels", sampleOffsets},
+			{"layout_provenance", "observer_contract_source_checked_against_cuda_scoring_constants"},
+			{"sample_locations_captured_by_kernel", false},
+			{"sample_values_captured_by_kernel", false},
+			{"source_view_footprints_captured_by_kernel", false}
+		}}
 	};
 }
 
@@ -2669,7 +2700,11 @@ bool WriteDMapRunMetadata(const String& root, int geometricIteration)
 		{"exact_per_view_reliability", writeMaps && !OPTDENSE::strDMapInstrumentationDir.empty()},
 		{"exact_update_attribution", writeMaps && !OPTDENSE::strDMapInstrumentationDir.empty()},
 		{"exact_capability_subject_to_per_frame_budget", true},
-		{"cpu_neighbor_candidate_ranking", !OPTDENSE::strDMapInstrumentationDir.empty()}
+		{"cpu_neighbor_candidate_ranking", !OPTDENSE::strDMapInstrumentationDir.empty()},
+		{"reference_patch_layout_contract", true},
+		{"reference_patch_sample_locations", false},
+		{"reference_patch_sample_values", false},
+		{"source_view_patch_footprints", false}
 	};
 	metadata["reporting_contract"] = {
 		{"mechanics_granularity", "logical PatchMatch iteration"},
