@@ -52,6 +52,85 @@ struct MVS_API DenseDepthMapData;
 class MVS_API Scene
 {
 public:
+#ifdef _USE_DMAP_INSTRUMENTATION
+	// Optional host-side observability for sparse neighbor-view ranking. These
+	// records are populated only when explicitly requested by the caller; the
+	// normal selection path does not construct or allocate them.
+	struct NeighborViewCandidateObservation {
+		enum InitialDecision {
+			INITIAL_NOT_EVALUATED = 0,
+			INITIAL_REFERENCE_IMAGE,
+			INITIAL_INVALID_IMAGE,
+			INITIAL_INSUFFICIENT_SHARED_POINTS,
+			INITIAL_NO_PROJECTED_POINTS,
+			INITIAL_RANKED,
+			INITIAL_PRECOMPUTED_RANKED,
+		};
+		enum FilterDecision {
+			FILTER_NOT_EVALUATED = 0,
+			FILTER_REJECTED_THRESHOLD,
+			FILTER_RETAINED_MINIMUM_VIEW_GUARD,
+			FILTER_RETAINED_THRESHOLD_PASS,
+			FILTER_REJECTED_MAX_VIEW_TRUNCATION,
+		};
+
+		uint32_t ID{NO_ID};
+		bool imageValid{false};
+		InitialDecision initialDecision{INITIAL_NOT_EVALUATED};
+		FilterDecision filterDecision{FILTER_NOT_EVALUATED};
+		uint32_t sharedPoints{0};
+		uint32_t projectedPoints{0};
+		bool scoreComponentsAvailable{false};
+		float angleWeightSum{0};
+		float clippedAngleWeightSum{0};
+		float scaleWeightSum{0};
+		float roiWeightSum{0};
+		float scoreBeforeArea{0};
+		float avgScale{0};
+		float avgAngle{0};
+		float area{0};
+		float areaFactor{0};
+		float score{0};
+		int rawRank{-1};
+		int filterInputRank{-1};
+		int finalRank{-1};
+		bool belowMinArea{false};
+		bool belowMinScale{false};
+		bool atOrAboveMaxScale{false};
+		bool scaleNotFinite{false};
+		bool belowMinAngle{false};
+		bool atOrAboveMaxAngle{false};
+		bool angleNotFinite{false};
+	};
+	struct NeighborViewSelectionObservation {
+		enum Source {
+			SOURCE_COMPUTED_SPARSE_VISIBILITY = 0,
+			SOURCE_PRECOMPUTED_SCENE_NEIGHBORS,
+		};
+
+		Source source{SOURCE_COMPUTED_SPARSE_VISIBILITY};
+		uint32_t referenceID{NO_ID};
+		unsigned requiredMinViews{0};
+		unsigned requiredMinPointViews{0};
+		unsigned effectiveMinViews{0};
+		unsigned effectiveMinPointViews{0};
+		float optimalAngle{0};
+		float roiWeight{0};
+		unsigned eligibleReferencePoints{0};
+		unsigned scoredReferencePoints{0};
+		unsigned filterInputCount{0};
+		unsigned filterMinimumRetained{0};
+		unsigned filterMaximumViews{0};
+		float filterMinArea{0};
+		float filterMinScale{0};
+		float filterMaxScale{0};
+		float filterMinAngle{0};
+		float filterMaxAngle{0};
+		bool rankingSucceeded{false};
+		bool filterSucceeded{false};
+		std::vector<NeighborViewCandidateObservation> candidates;
+	};
+#endif
 	PlatformArr platforms; // camera platforms, each containing the mounted cameras and all known poses
 	ImageArr images; // images, each referencing a platform's camera pose
 	PointCloud pointcloud; // point-cloud (sparse or dense), each containing the point position and the views seeing it
@@ -99,8 +178,14 @@ public:
 	bool ExportMeshToDepthMaps(const String& baseName);
 
 	bool SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews=3, unsigned nMinPointViews=2, float fOptimAngle=D2R(12.f), float fWeightPointInsideROI=0.7f);
+#ifdef _USE_DMAP_INSTRUMENTATION
+	bool SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI, NeighborViewSelectionObservation* observation);
+#endif
 	void SelectNeighborViews(unsigned nMinViews=3, unsigned nMinPointViews=2, float fOptimAngle=D2R(12.f), float fWeightPointInsideROI=0.7f);
 	static bool FilterNeighborViews(ViewScoreArr& neighbors, float fMinArea=0.1f, float fMinScale=0.2f, float fMaxScale=2.4f, float fMinAngle=D2R(3.f), float fMaxAngle=D2R(45.f), unsigned nMaxViews=12);
+#ifdef _USE_DMAP_INSTRUMENTATION
+	static bool FilterNeighborViews(ViewScoreArr& neighbors, float fMinArea, float fMinScale, float fMaxScale, float fMinAngle, float fMaxAngle, unsigned nMaxViews, NeighborViewSelectionObservation* observation);
+#endif
 
 	bool ExportCamerasMLP(const String& fileName, const String& fileNameScene) const;
 	static bool ExportLinesPLY(const String& fileName, const CLISTDEF0IDX(Line3f,uint32_t)& lines, const Pixel8U* colors=NULL, bool bBinary=true);
@@ -192,6 +277,13 @@ public:
 		ar & transform;
 	}
 	#endif
+#ifdef _USE_DMAP_INSTRUMENTATION
+private:
+	template <bool OBSERVE>
+	bool SelectNeighborViewsImpl(uint32_t ID, IndexArr& points, unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI, NeighborViewSelectionObservation* observation);
+	template <bool OBSERVE>
+	static bool FilterNeighborViewsImpl(ViewScoreArr& neighbors, float fMinArea, float fMinScale, float fMaxScale, float fMinAngle, float fMaxAngle, unsigned nMaxViews, NeighborViewSelectionObservation* observation);
+#endif
 };
 /*----------------------------------------------------------------*/
 

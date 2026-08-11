@@ -1,0 +1,224 @@
+{
+  "schema_name": "openmvs.dmap.public_capabilities",
+  "schema_version": 1,
+  "scope": {
+    "included": [
+      "cuda_depth_map_estimation",
+      "source_view_preparation",
+      "depth_map_postprocessing",
+      "depth_map_filtering"
+    ],
+    "excluded": [
+      "point_cloud_fusion",
+      "mesh_reconstruction",
+      "mesh_refinement",
+      "texturing"
+    ]
+  },
+  "build": {
+    "cmake_option": "OpenMVS_DMAP_INSTRUMENTATION",
+    "default": "OFF",
+    "production_target": "DensifyPointCloud",
+    "observer_target": "DensifyPointCloudDMapObserve",
+    "resource_authority": "instrumentation_off_production_binary",
+    "observer_process_false_resource_equivalent": false,
+    "qualification_note": "Process<false> output parity does not imply identical registers, stack, occupancy, or timing across the separate binaries"
+  },
+  "entrypoint": "tools/dmap_observability.sh",
+  "commands": [
+    "doctor",
+    "build",
+    "init",
+    "capture",
+    "array-store",
+    "report",
+    "validate",
+    "serve",
+    "drilldown",
+    "package",
+    "demo"
+  ],
+  "profiles": {
+    "endpoint": {
+      "process_specialization": "Process<false>",
+      "quality_authority": true,
+      "purpose": "production output without observer code"
+    },
+    "summary": {
+      "process_specialization": "Process<false>",
+      "quality_authority": "after_endpoint_parity",
+      "purpose": "storage-light counters, metadata, and timings"
+    },
+    "prefilter": {
+      "process_specialization": "Process<false>",
+      "quality_authority": "after_endpoint_parity",
+      "purpose": "bounded production-path depth state before filtering"
+    },
+    "deep": {
+      "process_specialization": "Process<true>",
+      "quality_authority": false,
+      "purpose": "full-frame exact mechanics maps"
+    },
+    "trace": {
+      "process_specialization": "Process<true>",
+      "quality_authority": false,
+      "purpose": "selected-pixel or bounded-ROI trajectories from an exact selected-frame capture",
+      "capture_allocation_scope": "full_selected_frame",
+      "compact_exact_pixel_allocation": false
+    }
+  },
+  "mechanisms": [
+    "input",
+    "state",
+    "cost",
+    "texture",
+    "patch",
+    "candidate_update",
+    "propagation",
+    "view_selection",
+    "multiscale",
+    "filtering",
+    "geometry",
+    "runtime"
+  ],
+  "availability_notes": {
+    "multiscale": {
+      "public_v1_available": [
+        "per_level_iteration_counters",
+        "per_level_timings",
+        "per_level_resource_plans",
+        "coarse_level_candidate_source_compatibility_proxy",
+        "level_0_low_depth_prior",
+        "level_0_terminal_depth_and_cost_maps"
+      ],
+      "coarse_level_candidate_source": {
+        "signal": "candidate_source",
+        "fidelity": "proxy",
+        "measurement_basis": "post_pass_change_detection",
+        "proxy_target": "exact_update_attribution",
+        "limitation": "post-pass state changes do not identify the exact winning candidate"
+      },
+      "coarse_level_cost_component_maps": {
+        "status": "unavailable",
+        "reason": "public_v1_does_not_retain_exact_cost_component_maps_above_pyramid_level_0"
+      },
+      "full_coarse_transfer_map_family": false,
+      "extension_signals": [
+        "coarse_entry_depth_and_cost",
+        "transferred_depth",
+        "nearest_depth_alternative",
+        "transfer_delta",
+        "fallback_status",
+        "hierarchy_proposal",
+        "improvement_margin"
+      ]
+    },
+    "publication": {
+      "core_marker_attests": [
+        "patchmatch_map_manifest",
+        "frame_summary",
+        "scene_summary",
+        "keep_cost_filtering_summary",
+        "view_support_summary"
+      ],
+      "independently_validated_later_sidecars": [
+        "postprocess_filters",
+        "confidence_adjustment",
+        "filter_resource_plan"
+      ]
+    }
+  },
+  "integrity": {
+    "experiment_lock_schema_version": 4,
+    "report_policy_schema_version": 3,
+    "input_snapshot": {
+      "schema_name": "openmvs.dmap.staged_input_snapshot",
+      "schema_version": 1,
+      "identities": ["relative_path", "bytes", "sha256"],
+      "default_max_files": 250000,
+      "default_max_bytes": 1099511627776,
+      "revalidated_before_every_profile": true,
+      "rejects_symlinks_special_files_and_concurrent_mutation": true
+    },
+    "capture_closure": {
+      "schema_name": "openmvs.dmap.capture_artifact_closure",
+      "schema_version": 1,
+      "identities": ["relative_path", "bytes", "mode", "sha256"],
+      "required_for_new_captures": true,
+      "legacy_status": "legacy-unverified",
+      "excluded_paths": ["capture_artifact_closure.json", "work/"]
+    },
+    "report_closure": {
+      "schema_name": "openmvs.dmap.report_tree_closure",
+      "schema_version": 1,
+      "identities": ["relative_path", "bytes", "mode", "sha256"],
+      "required_for_new_reports": true,
+      "enforced_at": ["validate", "reuse", "portable_stage", "package"],
+      "excluded_paths": [
+        "report_tree_closure.json",
+        "01_development_report.validation.json"
+      ]
+    },
+    "portable_bundle": {
+      "sanitizes_host_references": true,
+      "rejects_credential_bearing_urls": true,
+      "rejects_common_high_confidence_secret_formats": true,
+      "validation_echoes_detected_credentials": false
+    },
+    "hashing_cost": "linear_sequential_read_of_retained_bytes_at_orchestration_boundaries",
+    "authenticity": "not_provided_without_external_trusted_signature_or_checksum_channel"
+  },
+  "code_ownership": {
+    "cuda_producer": [
+      "libs/MVS/PatchMatchCUDA.cu",
+      "libs/MVS/PatchMatchCUDA.cpp",
+      "libs/MVS/PatchMatchCUDA.inl"
+    ],
+    "host_capture": [
+      "libs/MVS/SceneDensify.cpp",
+      "libs/MVS/DepthMap.cpp",
+      "libs/MVS/Scene.cpp"
+    ],
+    "cli": "apps/DensifyPointCloud/DensifyPointCloud.cpp",
+    "orchestration": "scripts/python/dmap_dev.py",
+    "artifact_integrity": "scripts/python/dmap_observability/integrity.py",
+    "signal_registry": "scripts/python/dmap_observability/component_registry.py",
+    "validator": "scripts/python/validate_dmap_instrumentation.py",
+    "report_model": "scripts/python/dmap_report_model.py",
+    "report_builder": "scripts/python/dmap_dev.py",
+    "investigation_ui": "scripts/dmap_report_ui"
+  },
+  "canonical_outputs": {
+    "human": "Markdown",
+    "structured": ["JSON", "CSV", "Parquet"],
+    "maps": ["PFM", "PNG", "Zarr_v3"],
+    "interactive": "HTML"
+  },
+  "invariants": [
+    "instrumentation_disabled_by_default",
+    "disabled_build_has_no_observer_surface",
+    "empty_runtime_output_path_disables_capture",
+    "unavailable_is_not_zero",
+    "mechanics_use_complete_logical_iterations",
+    "checkerboard_phases_are_timing_only",
+    "deep_and_trace_are_diagnostic_only_without_parity",
+    "process_false_parity_does_not_imply_resource_equivalence",
+    "core_completion_does_not_attest_later_optional_filter_sidecars",
+    "new_captures_and_reports_require_exact_artifact_closure",
+    "legacy_artifacts_without_closure_are_explicitly_unverified",
+    "generated_evidence_stays_outside_git"
+  ],
+  "documentation": {
+    "quickstart": "docs/dmap_observability/01_quickstart.md",
+    "architecture": "docs/dmap_observability/02_architecture.md",
+    "profiles": "docs/dmap_observability/03_capture_profiles.md",
+    "configuration": "docs/dmap_observability/04_experiment_configuration.md",
+    "report_guide": "docs/dmap_observability/05_report_guide.md",
+    "playbooks": "docs/dmap_observability/06_debugging_playbooks.md",
+    "annotations": "docs/dmap_observability/07_annotation_metrics.md",
+    "schemas": "docs/dmap_observability/08_schema_reference.md",
+    "extension": "docs/dmap_observability/09_extension_guide.md",
+    "troubleshooting": "docs/dmap_observability/10_troubleshooting.md",
+    "agents": "docs/dmap_observability/agent_guide.md"
+  }
+}

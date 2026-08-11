@@ -34,6 +34,10 @@ CMakeSettings.json
 .vs/
 .idea/
 .venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
 .vscode/
 .claude/
 out/

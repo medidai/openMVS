@@ -1,0 +1,11 @@
+pyyaml
+numpy
+pandas
+pyarrow
+matplotlib
+pillow
+tyro
+rich
+plotly
+jinja2
+zstandard

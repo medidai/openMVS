@@ -139,6 +139,21 @@ extern MVS_API float fNCCThresholdKeep;
 extern MVS_API unsigned nEstimationIters;
 extern MVS_API unsigned nEstimationGeometricIters;
 extern MVS_API unsigned nPatchMatchCUDAInstances;
+#ifdef _USE_DMAP_INSTRUMENTATION
+extern MVS_API unsigned nPatchMatchInstrumentLevel;
+extern MVS_API String strPatchMatchInstrumentConfig;
+extern MVS_API String strPatchMatchInstrumentOutput;
+extern MVS_API String strDMapInstrumentationDir;
+extern MVS_API String strDMapInstrumentationLevel;
+extern MVS_API float fDMapInstrumentationSampleRate;
+extern MVS_API unsigned nDMapInstrumentationSampleSeed;
+extern MVS_API String strDMapInstrumentationImageList;
+extern MVS_API bool bDMapInstrumentationWriteMaps;
+extern MVS_API unsigned nDMapInstrumentationMaxDeviceMB;
+extern MVS_API unsigned nDMapInstrumentationMaxHostMB;
+extern MVS_API unsigned nDMapInstrumentationMaxFrameStorageMB;
+extern MVS_API String strDMapInstrumentationBudgetPolicy;
+#endif
 extern MVS_API float fEstimationGeometricWeight;
 extern MVS_API unsigned nRandomIters;
 extern MVS_API unsigned nRandomMaxScale;

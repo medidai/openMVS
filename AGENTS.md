@@ -242,6 +242,43 @@ ctest                    # Run all tests
 The task files in `.github/instructions/` define step-by-step
 workflows. Read and follow the relevant one when the context matches a defined workflow.
 
+## Depth-map observability
+
+Depth-map observability is an optional CUDA development facility. Its scope is
+depth-map estimation, view preparation, depth-map postprocessing, and filtering.
+Do not extend it into fusion, mesh reconstruction, mesh refinement, or texturing.
+
+Before changing this subsystem, read
+[`docs/dmap_observability/agent_guide.md`](docs/dmap_observability/agent_guide.md)
+and [`.github/instructions/dmap-observability.instructions.md`](.github/instructions/dmap-observability.instructions.md).
+The machine-readable capability index is
+[`docs/dmap_observability/capabilities.json`](docs/dmap_observability/capabilities.json).
+
+The non-negotiable contracts are:
+
+- `OpenMVS_DMAP_INSTRUMENTATION` defaults to `OFF`.
+- The `OFF` production build has no observer CLI, allocations, output,
+  diagnostic kernels, or device-state changes.
+- Runtime capture is disabled unless `--dmap-instrumentation-dir` is nonempty.
+- Endpoint, summary, and prefilter captures use `Process<false>` and are quality
+  evidence only after parity validation. Deep maps and admitted traces use
+  `Process<true>` and are diagnostic-only unless separately proven otherwise.
+  Public-v1 exact traces target selected pixels for analysis but still admit and
+  retain the selected frame's full deep-map buffers; compact exact pixel-only
+  allocation is not implemented.
+- Missing signals are recorded as unavailable with a reason. Never replace
+  missing observations with zeroes.
+- Report algorithm mechanics by complete logical PatchMatch iteration.
+  Checkerboard black/red phases are exposed only in timing data.
+- Every new signal needs a versioned schema entry, resource accounting,
+  validation, report presentation, and focused tests.
+- Generated captures, reports, annotations, receipts, arrays, and archives must
+  stay outside the repository. Use `/tmp` for tests and demos.
+
+Use `tools/dmap_observability.sh` as the stable human-facing entry point. Run
+`tools/dmap_observability.sh doctor` before a capture and validate a report
+before opening or packaging it.
+
 # Use the analyze-codebase agent to document this codebase using the full orchestrated analysis
 claude --agent analyze-codebase
 # Or run individual agents directly

@@ -34,6 +34,7 @@ OPTION(OpenMVS_USE_BREAKPAD "Enable BreakPad library" ON)
 OPTION(OpenMVS_USE_PYTHON "Enable Python library bindings" ON)
 OPTION(OpenMVS_USE_CERES "Enable CERES optimization library" OFF)
 OPTION(OpenMVS_USE_CUDA "Enable CUDA library" ON)
+OPTION(OpenMVS_DMAP_INSTRUMENTATION "Build depth-map estimation/filtering observability support" OFF)
 OPTION(OpenMVS_USE_SIFTGPU "Enable SIFTGPU library" ON)
 OPTION(OpenMVS_USE_FAST_FLOAT2INT "Use an optimized code to convert real numbers to int" OFF)
 OPTION(OpenMVS_USE_FAST_INVSQRT "Use an optimized code to compute the inverse square root (slower in fact on modern compilers)" OFF)
@@ -44,6 +45,16 @@ OPTION(OpenMVS_ENABLE_IPO "Whether to enable interprocedural optimization" ON)
 OPTION(OpenMVS_ENABLE_TESTS "Enable test code" ON)
 OPTION(OpenMVS_HEADLESS_DEBUG "Print asserts to stderr and continue; do not redirect cout/cerr or pop modal dialogs (for CI / non-interactive debug runs)" OFF)
 OPTION(OpenMVS_MSVC_FAST_RELEASE "Compile MVS Camera.cpp and Scene.cpp without optimization in MSVC Release builds" OFF)
+
+# Bind the generated source guard to the public option. Keep this as a normal
+# variable so a same-named cache entry cannot enable observer code in an OFF
+# production build.
+SET(OPENMVS_DMAP_INSTRUMENTATION_ENABLED "${OpenMVS_DMAP_INSTRUMENTATION}")
+IF(OpenMVS_DMAP_INSTRUMENTATION)
+	SET(OpenMVS_DENSIFY_TARGET DensifyPointCloudDMapObserve)
+ELSE()
+	SET(OpenMVS_DENSIFY_TARGET DensifyPointCloud)
+ENDIF()
 
 # Disable CUDA on MacOS
 IF(APPLE)
@@ -282,6 +293,12 @@ if(OpenMVS_USE_CUDA)
 	else()
 		MESSAGE(STATUS "Can't find CUDA. Continuing without it.")
 	endif()
+endif()
+
+if(OpenMVS_DMAP_INSTRUMENTATION AND NOT _USE_CUDA)
+	message(FATAL_ERROR
+		"OpenMVS_DMAP_INSTRUMENTATION requires a detected CUDA toolchain; "
+		"configure with OpenMVS_USE_CUDA=ON and a working CUDA compiler")
 endif()
 
 # Metal compute backend on Apple (replaces CUDA, which is disabled on macOS above)

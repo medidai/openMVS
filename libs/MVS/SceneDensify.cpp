@@ -35,6 +35,9 @@
 #include "PatchMatchCUDA.h"
 #include "PatchMatchMetal.h"
 #include "DMapCache.h"
+#ifdef _USE_DMAP_INSTRUMENTATION
+#include "../IO/json.hpp"
+#endif
 
 using namespace MVS;
 
@@ -54,6 +57,1979 @@ using namespace MVS;
 // S T R U C T S ///////////////////////////////////////////////////
 
 DEFINE_LOG_NAME(lt, _T("ScnDense"));
+#ifdef _USE_DMAP_INSTRUMENTATION
+namespace {
+
+enum CPUViewSelectionStopReason {
+	CPU_VIEW_STOP_NONE = 0,
+	CPU_VIEW_STOP_EXPLICIT_PAIR,
+	CPU_VIEW_STOP_NUM_NEIGHBORS,
+	CPU_VIEW_STOP_SCORE_THRESHOLD,
+};
+
+String TrimDMapInstrumentToken(const String& token)
+{
+	size_t begin(0), end(token.size());
+	while (begin < end && std::isspace((unsigned char)token[begin]))
+		++begin;
+	while (end > begin && std::isspace((unsigned char)token[end-1]))
+		--end;
+	return token.substr(begin, end-begin);
+}
+
+bool DMapInstrumentImageListed(const Image& image)
+{
+	if (OPTDENSE::strDMapInstrumentationImageList.empty())
+		return true;
+	const String fileName(Util::getFileNameExt(image.name));
+	const String stem(Util::getFileName(image.name));
+	const String imageIDText(std::to_string(image.ID).c_str());
+	size_t start(0);
+	while (start <= OPTDENSE::strDMapInstrumentationImageList.size()) {
+		const size_t comma(OPTDENSE::strDMapInstrumentationImageList.find(',', start));
+		const size_t end(comma == String::npos ? OPTDENSE::strDMapInstrumentationImageList.size() : comma);
+		const String token(TrimDMapInstrumentToken(OPTDENSE::strDMapInstrumentationImageList.substr(start, end-start)));
+		if (!token.empty() &&
+			(token == imageIDText || token == image.name || token == fileName || token == stem))
+			return true;
+		if (comma == String::npos)
+			break;
+		start = comma + 1;
+	}
+	return false;
+}
+
+bool DMapInstrumentImageEnabled(const Image& image)
+{
+	if (OPTDENSE::strDMapInstrumentationDir.empty())
+		return false;
+	if (!DMapInstrumentImageListed(image))
+		return false;
+	const float sampleRate(OPTDENSE::fDMapInstrumentationSampleRate);
+	if (sampleRate >= 1.f)
+		return true;
+	if (sampleRate <= 0.f)
+		return false;
+	uint32_t hash(image.ID ^ (OPTDENSE::nDMapInstrumentationSampleSeed + 0x9e3779b9u));
+	hash ^= hash >> 16;
+	hash *= 0x7feb352du;
+	hash ^= hash >> 15;
+	hash *= 0x846ca68bu;
+	hash ^= hash >> 16;
+	return float(hash % 1000000u) / 1000000.f < sampleRate;
+}
+
+String DMapInstrumentSafeName(const String& imageName)
+{
+	String safe(Util::getFileName(imageName));
+	if (safe.empty())
+		safe = Util::getFileNameExt(imageName);
+	for (char& ch: safe)
+		if (!std::isalnum((unsigned char)ch) && ch != '-' && ch != '_')
+			ch = '_';
+	if (safe.empty())
+		safe = _T("image");
+	if (safe.size() > 80)
+		safe.resize(80);
+	return safe;
+}
+
+String DMapInstrumentFrameName(const Image& image)
+{
+	return String::FormatString(_T("%04u_%s"), image.ID, DMapInstrumentSafeName(image.name).c_str());
+}
+
+String DMapInstrumentFrameDir(const Image& image, int geometricIteration=-1)
+{
+	String root(OPTDENSE::strDMapInstrumentationDir);
+	Util::ensureFolderSlash(root);
+	Util::ensureFolder(root);
+	if (geometricIteration >= 0) {
+		root += String::FormatString(_T("geometric_iterations/iteration%02d/"), geometricIteration);
+		Util::ensureFolder(root);
+	}
+	const String depthmapsDir(root + _T("depthmaps/"));
+	const String frameDir(depthmapsDir + DMapInstrumentFrameName(image) + _T("/"));
+	Util::ensureFolder(depthmapsDir);
+	Util::ensureFolder(frameDir);
+	return frameDir;
+}
+
+String DMapCsvEscape(const String& value)
+{
+	bool quote(false);
+	String out;
+	for (const char ch: value) {
+		if (ch == '"' || ch == ',' || ch == '\n' || ch == '\r')
+			quote = true;
+		if (ch == '"')
+			out += _T("\"\"");
+		else
+			out += ch;
+	}
+	return quote ? _T("\"") + out + _T("\"") : out;
+}
+
+bool WriteDMapJson(const String& fileName, const nlohmann::json& data)
+{
+	const String temporary(fileName + _T(".tmp"));
+	bool success(false);
+	{
+		std::ofstream fs(temporary.c_str(), std::ios::trunc);
+		if (!fs)
+			return false;
+		fs << data.dump(2) << '\n';
+		fs.flush();
+		success = (bool)fs;
+	}
+	if (!success || !File::renameFile(temporary, fileName)) {
+		File::deleteFile(temporary);
+		return false;
+	}
+	return true;
+}
+
+const char* InitialViewDecisionName(Scene::NeighborViewCandidateObservation::InitialDecision decision)
+{
+	switch (decision) {
+	case Scene::NeighborViewCandidateObservation::INITIAL_REFERENCE_IMAGE: return "reference_image";
+	case Scene::NeighborViewCandidateObservation::INITIAL_INVALID_IMAGE: return "rejected_invalid_image";
+	case Scene::NeighborViewCandidateObservation::INITIAL_INSUFFICIENT_SHARED_POINTS: return "rejected_insufficient_shared_points";
+	case Scene::NeighborViewCandidateObservation::INITIAL_NO_PROJECTED_POINTS: return "rejected_no_projected_points";
+	case Scene::NeighborViewCandidateObservation::INITIAL_RANKED: return "ranked";
+	case Scene::NeighborViewCandidateObservation::INITIAL_PRECOMPUTED_RANKED: return "precomputed_ranked";
+	default: return "not_evaluated";
+	}
+}
+
+const char* FilterViewDecisionName(Scene::NeighborViewCandidateObservation::FilterDecision decision)
+{
+	switch (decision) {
+	case Scene::NeighborViewCandidateObservation::FILTER_REJECTED_THRESHOLD: return "rejected_threshold";
+	case Scene::NeighborViewCandidateObservation::FILTER_RETAINED_MINIMUM_VIEW_GUARD: return "retained_minimum_view_guard";
+	case Scene::NeighborViewCandidateObservation::FILTER_RETAINED_THRESHOLD_PASS: return "retained_threshold_pass";
+	case Scene::NeighborViewCandidateObservation::FILTER_REJECTED_MAX_VIEW_TRUNCATION: return "rejected_max_view_truncation";
+	default: return "not_evaluated";
+	}
+}
+
+const char* CPUViewStopReasonName(CPUViewSelectionStopReason reason)
+{
+	switch (reason) {
+	case CPU_VIEW_STOP_EXPLICIT_PAIR: return "explicit_neighbor_pair";
+	case CPU_VIEW_STOP_NUM_NEIGHBORS: return "requested_neighbor_limit";
+	case CPU_VIEW_STOP_SCORE_THRESHOLD: return "score_threshold";
+	default: return "none";
+	}
+}
+
+void InitPrecomputedViewObservation(
+	const Scene& scene,
+	IIndex idxImage,
+	Scene::NeighborViewSelectionObservation& observation)
+{
+	observation = Scene::NeighborViewSelectionObservation();
+	observation.source = Scene::NeighborViewSelectionObservation::SOURCE_PRECOMPUTED_SCENE_NEIGHBORS;
+	observation.referenceID = idxImage;
+	observation.requiredMinViews = OPTDENSE::nMinViews;
+	observation.requiredMinPointViews = OPTDENSE::nMinViewsTrustPoint > 1 ? OPTDENSE::nMinViewsTrustPoint : 2;
+	observation.effectiveMinViews = MINF(observation.requiredMinViews, scene.nCalibratedImages-1);
+	observation.effectiveMinPointViews = MINF(observation.requiredMinPointViews, scene.nCalibratedImages);
+	observation.optimalAngle = D2R(OPTDENSE::fOptimAngle);
+	observation.roiWeight = OPTDENSE::fWeightPointInsideROI;
+	const ViewScoreArr& neighbors(scene.images[idxImage].neighbors);
+	observation.rankingSucceeded = !neighbors.empty();
+	observation.candidates.reserve(neighbors.size());
+	FOREACH(rank, neighbors) {
+		const ViewScore& neighbor(neighbors[rank]);
+		Scene::NeighborViewCandidateObservation candidate;
+		candidate.ID = neighbor.ID;
+		candidate.imageValid = neighbor.ID < scene.images.size() && scene.images[neighbor.ID].IsValid();
+		candidate.initialDecision = Scene::NeighborViewCandidateObservation::INITIAL_PRECOMPUTED_RANKED;
+		candidate.sharedPoints = neighbor.points;
+		candidate.avgScale = neighbor.scale;
+		candidate.avgAngle = neighbor.angle;
+		candidate.area = neighbor.area;
+		candidate.areaFactor = MAXF(neighbor.area, 0.01f);
+		candidate.score = neighbor.score;
+		candidate.rawRank = rank;
+		observation.candidates.emplace_back(candidate);
+	}
+}
+
+nlohmann::json ViewThresholdReasons(const Scene::NeighborViewCandidateObservation& candidate)
+{
+	nlohmann::json reasons(nlohmann::json::array());
+	if (candidate.belowMinArea)
+		reasons.push_back("area_below_minimum");
+	if (candidate.belowMinScale)
+		reasons.push_back("scale_below_minimum");
+	if (candidate.atOrAboveMaxScale)
+		reasons.push_back("scale_at_or_above_maximum");
+	if (candidate.scaleNotFinite)
+		reasons.push_back("scale_not_finite");
+	if (candidate.belowMinAngle)
+		reasons.push_back("angle_below_minimum");
+	if (candidate.atOrAboveMaxAngle)
+		reasons.push_back("angle_at_or_above_maximum");
+	if (candidate.angleNotFinite)
+		reasons.push_back("angle_not_finite");
+	return reasons;
+}
+
+bool WriteDMapText(const String& fileName, const std::string& text)
+{
+	const String temporary(fileName + _T(".tmp"));
+	bool success(false);
+	{
+		std::ofstream fs(temporary.c_str(), std::ios::trunc);
+		if (!fs)
+			return false;
+		fs << text;
+		fs.flush();
+		success = (bool)fs;
+	}
+	if (!success || !File::renameFile(temporary, fileName)) {
+		File::deleteFile(temporary);
+		return false;
+	}
+	return true;
+}
+
+bool DMapInstrumentWriteMaps()
+{
+	return OPTDENSE::bDMapInstrumentationWriteMaps ||
+		OPTDENSE::strDMapInstrumentationLevel.ToLower() == _T("maps");
+}
+
+const char* DMapEstimationStageName(int geometricIteration)
+{
+	return geometricIteration >= 0 ? "geometric_consistency" : "photometric";
+}
+
+int DMapFinalActiveGeometricIteration(const DenseDepthMapData& data)
+{
+	return data.nFusionMode >= 0 && OPTDENSE::nEstimationGeometricIters > 0 ?
+		(int)OPTDENSE::nEstimationGeometricIters-1 : -1;
+}
+
+uint64_t DMapSaturatingAdd(uint64_t first, uint64_t second)
+{
+	return first > std::numeric_limits<uint64_t>::max()-second ?
+		std::numeric_limits<uint64_t>::max() : first+second;
+}
+
+uint64_t DMapSaturatingMul(uint64_t first, uint64_t second)
+{
+	return first && second > std::numeric_limits<uint64_t>::max()/first ?
+		std::numeric_limits<uint64_t>::max() : first*second;
+}
+
+bool DMapResourceFits(uint64_t bytes, unsigned limitMB)
+{
+	return limitMB == 0 || bytes <= DMapSaturatingMul((uint64_t)limitMB, 1024u*1024u);
+}
+
+std::mutex g_dmapFilterResourceMutex;
+std::unordered_map<std::string, uint64_t> g_dmapFilterStorageReservations;
+
+struct DMapFilterStorageLease {
+	DMapFilterStorageLease() = default;
+	DMapFilterStorageLease(const DMapFilterStorageLease&) = delete;
+	DMapFilterStorageLease& operator=(const DMapFilterStorageLease&) = delete;
+	~DMapFilterStorageLease() { Release(); }
+
+	void Release()
+	{
+		if (!active)
+			return;
+		std::lock_guard<std::mutex> lock(g_dmapFilterResourceMutex);
+		const auto it(g_dmapFilterStorageReservations.find(key));
+		if (it != g_dmapFilterStorageReservations.end()) {
+			if (it->second <= bytes)
+				g_dmapFilterStorageReservations.erase(it);
+			else
+				it->second -= bytes;
+		}
+		active = false;
+		bytes = 0;
+	}
+
+	std::string key;
+	uint64_t bytes{0};
+	bool active{false};
+};
+
+struct DMapFilterResourcePlan {
+	String component;
+	uint64_t pixels{0};
+	unsigned postprocessStageCount{0};
+	bool postprocessRequested{false};
+	bool confidenceRequested{false};
+	bool componentRequested{false};
+	bool mapsRequested{false};
+	bool summaryAvailable{true};
+	bool mapsAvailable{false};
+	bool fatal{false};
+	uint64_t postprocessSummaryHostBytes{0};
+	uint64_t confidenceSummaryHostBytes{0};
+	uint64_t summaryHostPeakBytes{0};
+	uint64_t postprocessMapsHostPeakBytes{0};
+	uint64_t confidenceMapsHostPeakBytes{0};
+	uint64_t mapsHostPeakBytes{0};
+	uint64_t postprocessMapStorageBytes{0};
+	uint64_t confidenceMapStorageBytes{0};
+	uint64_t totalMapStorageBytes{0};
+	uint64_t effectiveHostBytes{0};
+	uint64_t effectiveStorageBytes{0};
+	bool storageQueryAttempted{false};
+	bool storageQuerySucceeded{false};
+	uint64_t storageAvailableBytes{0};
+	uint64_t storageReservedBeforeBytes{0};
+	uint64_t storageEffectiveAvailableBytes{0};
+	uint64_t storageLeasedBytes{0};
+	uint64_t storageReservedAfterAdmissionBytes{0};
+	uint64_t storageReservedAfterReleaseBytes{0};
+	bool leaseReleased{false};
+	String reservationKey;
+	String decision{_T("pending")};
+	String reason;
+};
+
+struct DMapArtifactUsage {
+	uint64_t mapCount{0};
+	uint64_t declaredBytes{0};
+	uint64_t fileBytes{0};
+};
+
+DMapArtifactUsage DMapArtifactUsageFromMaps(const nlohmann::json& maps)
+{
+	DMapArtifactUsage usage;
+	if (!maps.is_array())
+		return usage;
+	usage.mapCount = maps.size();
+	for (const nlohmann::json& map: maps) {
+		usage.declaredBytes = DMapSaturatingAdd(usage.declaredBytes, map.value("declared_bytes", 0ull));
+		usage.fileBytes = DMapSaturatingAdd(usage.fileBytes, map.value("file_bytes", 0ull));
+	}
+	return usage;
+}
+
+DMapFilterResourcePlan PlanDMapFilterResources(uint64_t pixels, const char* component)
+{
+	DMapFilterResourcePlan plan;
+	plan.component = component;
+	plan.pixels = pixels;
+	const unsigned postprocessStages(
+		((OPTDENSE::nOptimize & OPTDENSE::REMOVE_SPECKLES) != 0 ? 1u : 0u) +
+		((OPTDENSE::nOptimize & OPTDENSE::FILL_GAPS) != 0 ? 1u : 0u));
+	plan.postprocessStageCount = postprocessStages;
+	plan.postprocessRequested = postprocessStages > 0;
+	plan.confidenceRequested =
+		(OPTDENSE::nOptimize & (OPTDENSE::ADJUST_CONFIDENCE_FAST | OPTDENSE::ADJUST_CONFIDENCE)) != 0;
+	const bool isPostprocess(plan.component == _T("postprocess_filters"));
+	plan.componentRequested = isPostprocess ? plan.postprocessRequested : plan.confidenceRequested;
+	plan.mapsRequested = DMapInstrumentWriteMaps() && plan.componentRequested;
+	const uint64_t fixedSummaryBytes(256u*1024u);
+	// Each active stage snapshot retains depth, confidence, and float3 normal state.
+	// Both snapshots remain live when speckle removal and gap filling are enabled.
+	plan.postprocessSummaryHostBytes = plan.postprocessRequested ?
+		DMapSaturatingAdd(
+			DMapSaturatingMul(pixels, DMapSaturatingMul(postprocessStages, 20u)),
+			fixedSummaryBytes) : fixedSummaryBytes;
+	const unsigned confidenceSummaryBytesPerPixel(
+		plan.confidenceRequested ?
+			(((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE_FAST) != 0 &&
+			  (OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE) != 0) ? 12u : 8u) : 0u);
+	plan.confidenceSummaryHostBytes = plan.confidenceRequested ?
+		DMapSaturatingAdd(DMapSaturatingMul(pixels, confidenceSummaryBytesPerPixel), fixedSummaryBytes) : fixedSummaryBytes;
+	plan.summaryHostPeakBytes = isPostprocess ?
+		plan.postprocessSummaryHostBytes : plan.confidenceSummaryHostBytes;
+	// Map export additionally retains depth delta plus validity transition (5 B/pixel),
+	// then confidence delta plus transition (5 B/pixel); the peak transient is 10 B/pixel.
+	plan.postprocessMapsHostPeakBytes = plan.postprocessRequested ?
+		DMapSaturatingAdd(
+			DMapSaturatingMul(pixels,
+				DMapSaturatingAdd(DMapSaturatingMul(postprocessStages, 20u), 10u)),
+			fixedSummaryBytes) : fixedSummaryBytes;
+	plan.confidenceMapsHostPeakBytes = plan.confidenceRequested ?
+		DMapSaturatingAdd(DMapSaturatingMul(pixels, 24u), fixedSummaryBytes) : fixedSummaryBytes;
+	plan.mapsHostPeakBytes = isPostprocess ?
+		plan.postprocessMapsHostPeakBytes : plan.confidenceMapsHostPeakBytes;
+	// Per stage: depth before/after/delta (12 B), validity transition (1 B), confidence
+	// before/after/delta (12 B), confidence transition (1 B), normal before/after
+	// (24 B), and normal-angle delta (4 B), for 54 B/pixel and 11 maps.
+	plan.postprocessMapStorageBytes = DMapSaturatingMul(pixels, DMapSaturatingMul(postprocessStages, 54u));
+	// Confidence adjustment conservatively allows input/depth-validity plus fast, full, and final output/delta/transition triplets.
+	plan.confidenceMapStorageBytes = plan.confidenceRequested ? DMapSaturatingMul(pixels, 32u) : 0;
+	const uint64_t postprocessPotentialMaps((uint64_t)postprocessStages*11u);
+	const uint64_t confidencePotentialMaps(plan.confidenceRequested ? 11u : 0u);
+	plan.postprocessMapStorageBytes = DMapSaturatingAdd(plan.postprocessMapStorageBytes,
+		DMapSaturatingMul(postprocessPotentialMaps, 4096u));
+	plan.confidenceMapStorageBytes = DMapSaturatingAdd(plan.confidenceMapStorageBytes,
+		DMapSaturatingMul(confidencePotentialMaps, 4096u));
+	plan.totalMapStorageBytes = DMapSaturatingAdd(plan.postprocessMapStorageBytes, plan.confidenceMapStorageBytes);
+
+	const bool summaryFits(DMapResourceFits(plan.summaryHostPeakBytes, OPTDENSE::nDMapInstrumentationMaxHostMB));
+	const bool mapsFitBudgets(
+		DMapResourceFits(plan.mapsHostPeakBytes, OPTDENSE::nDMapInstrumentationMaxHostMB) &&
+		DMapResourceFits(plan.totalMapStorageBytes, OPTDENSE::nDMapInstrumentationMaxFrameStorageMB));
+	const bool errorPolicy(OPTDENSE::strDMapInstrumentationBudgetPolicy.ToLower() == _T("error"));
+	plan.summaryAvailable = summaryFits;
+	if (!summaryFits) {
+		plan.decision = errorPolicy ? _T("error_summary_host_budget") : _T("unavailable_summary_host_budget");
+		plan.reason = String::FormatString(_T("summary observer needs %llu host bytes"),
+			(unsigned long long)plan.summaryHostPeakBytes);
+		plan.fatal = errorPolicy;
+		return plan;
+	}
+	if (!plan.mapsRequested) {
+		plan.decision = _T("summary");
+		plan.reason = _T("filter maps were not requested or no optional filter is active");
+		plan.effectiveHostBytes = plan.summaryHostPeakBytes;
+		return plan;
+	}
+	if (!mapsFitBudgets) {
+		plan.decision = errorPolicy ? _T("error_map_budget") : _T("summary_budget_degraded");
+		plan.reason = String::FormatString(
+			_T("map observer needs %llu host bytes and %llu uncompressed storage bytes"),
+			(unsigned long long)plan.mapsHostPeakBytes,
+			(unsigned long long)plan.totalMapStorageBytes);
+		plan.fatal = errorPolicy;
+		plan.effectiveHostBytes = plan.summaryHostPeakBytes;
+		return plan;
+	}
+	plan.mapsAvailable = true;
+	plan.decision = _T("maps_pending_storage_preflight");
+	plan.reason = _T("configured host and frame-storage budgets admit filter maps");
+	plan.effectiveHostBytes = plan.mapsHostPeakBytes;
+	plan.effectiveStorageBytes = isPostprocess ?
+		plan.postprocessMapStorageBytes : plan.confidenceMapStorageBytes;
+	return plan;
+}
+
+std::string DMapFilterReservationKey()
+{
+	std::filesystem::path keyPath(OPTDENSE::strDMapInstrumentationDir.c_str());
+	std::error_code pathError;
+	const std::filesystem::path canonicalPath(std::filesystem::weakly_canonical(keyPath, pathError));
+	if (!pathError)
+		keyPath = canonicalPath;
+	else {
+		pathError.clear();
+		const std::filesystem::path absolutePath(std::filesystem::absolute(keyPath, pathError));
+		keyPath = pathError ? keyPath.lexically_normal() : absolutePath.lexically_normal();
+	}
+	return keyPath.generic_string();
+}
+
+void ApplyDMapFilterStoragePreflight(
+	const String& frameDir,
+	DMapFilterResourcePlan& plan,
+	DMapFilterStorageLease& lease)
+{
+	if (!plan.mapsRequested || !plan.mapsAvailable)
+		return;
+	plan.storageQueryAttempted = true;
+	const bool errorPolicy(OPTDENSE::strDMapInstrumentationBudgetPolicy.ToLower() == _T("error"));
+	std::lock_guard<std::mutex> lock(g_dmapFilterResourceMutex);
+	const std::string reservationKey(DMapFilterReservationKey());
+	plan.reservationKey = reservationKey.c_str();
+	std::error_code spaceError;
+	const std::filesystem::space_info spaceInfo(
+		std::filesystem::space(std::filesystem::path(frameDir.c_str()), spaceError));
+	if (spaceError) {
+		plan.storageQuerySucceeded = false;
+		plan.mapsAvailable = false;
+		plan.effectiveHostBytes = plan.summaryAvailable ? plan.summaryHostPeakBytes : 0;
+		plan.effectiveStorageBytes = 0;
+		plan.decision = errorPolicy ? _T("error_storage_query") : _T("summary_storage_query_degraded");
+		plan.reason = String::FormatString(_T("std::filesystem::space failed: %s"),
+			spaceError.message().c_str());
+		plan.fatal = errorPolicy;
+		return;
+	}
+	plan.storageQuerySucceeded = true;
+	plan.storageAvailableBytes = (uint64_t)spaceInfo.available;
+	const auto existing(g_dmapFilterStorageReservations.find(reservationKey));
+	plan.storageReservedBeforeBytes = existing == g_dmapFilterStorageReservations.end() ? 0 : existing->second;
+	plan.storageEffectiveAvailableBytes = plan.storageAvailableBytes > plan.storageReservedBeforeBytes ?
+		plan.storageAvailableBytes-plan.storageReservedBeforeBytes : 0;
+	if (plan.storageEffectiveAvailableBytes < plan.effectiveStorageBytes) {
+		plan.mapsAvailable = false;
+		plan.effectiveHostBytes = plan.summaryAvailable ? plan.summaryHostPeakBytes : 0;
+		const uint64_t requestedBytes(plan.effectiveStorageBytes);
+		plan.effectiveStorageBytes = 0;
+		plan.decision = errorPolicy ? _T("error_insufficient_storage") : _T("summary_storage_degraded");
+		plan.reason = String::FormatString(
+			_T("component needs %llu bytes, but only %llu bytes remain after %llu in-process reserved bytes"),
+			(unsigned long long)requestedBytes,
+			(unsigned long long)plan.storageEffectiveAvailableBytes,
+			(unsigned long long)plan.storageReservedBeforeBytes);
+		plan.fatal = errorPolicy;
+		return;
+	}
+	plan.storageLeasedBytes = plan.effectiveStorageBytes;
+	g_dmapFilterStorageReservations[reservationKey] =
+		DMapSaturatingAdd(plan.storageReservedBeforeBytes, plan.storageLeasedBytes);
+	plan.storageReservedAfterAdmissionBytes = g_dmapFilterStorageReservations[reservationKey];
+	lease.key = reservationKey;
+	lease.bytes = plan.storageLeasedBytes;
+	lease.active = plan.storageLeasedBytes > 0;
+	plan.decision = _T("maps_admitted");
+	plan.reason = _T("configured budgets and concurrent-aware filesystem capacity admit component maps");
+}
+
+void ReleaseDMapFilterStorageLease(
+	DMapFilterResourcePlan& plan,
+	DMapFilterStorageLease& lease)
+{
+	lease.Release();
+	plan.leaseReleased = true;
+	std::lock_guard<std::mutex> lock(g_dmapFilterResourceMutex);
+	const auto existing(g_dmapFilterStorageReservations.find(plan.reservationKey.c_str()));
+	plan.storageReservedAfterReleaseBytes = existing == g_dmapFilterStorageReservations.end() ? 0 : existing->second;
+}
+
+std::mutex g_dmapFilterPlanMutex;
+
+void WriteDMapFilterResourcePlan(
+	const Scene& scene,
+	IIndex idxImage,
+	int geometricIteration,
+	const DMapFilterResourcePlan& plan,
+	const DMapArtifactUsage* usage=NULL)
+{
+	const Image& reference(scene.images[idxImage]);
+	const String frameDir(DMapInstrumentFrameDir(reference, geometricIteration));
+	const String fileName(frameDir + _T("filter_resource_plan.json"));
+	std::lock_guard<std::mutex> lock(g_dmapFilterPlanMutex);
+	nlohmann::json artifact;
+	{
+		std::ifstream fs(fileName.c_str());
+		if (fs) {
+			try { fs >> artifact; }
+			catch (...) { artifact = nlohmann::json(); }
+		}
+	}
+	if (!artifact.is_object() || artifact.value("schema_name", "") != "openmvs.dmap.filter_resource_plan" ||
+		artifact.value("schema_version", 0) != 2)
+	{
+		artifact = {
+			{"schema_name", "openmvs.dmap.filter_resource_plan"},
+			{"schema_version", 2},
+			{"scope", "depth-map optional postprocess and confidence adjustment"},
+			{"estimation_stage", DMapEstimationStageName(geometricIteration)},
+			{"geometric_iteration", geometricIteration >= 0 ? nlohmann::json(geometricIteration) : nlohmann::json(nullptr)},
+			{"reference_scene_image_index", idxImage},
+			{"reference_image_id", reference.ID},
+			{"reference_image_name", reference.name.c_str()},
+			{"width", reference.image.width()},
+			{"height", reference.image.height()},
+			{"pixels", plan.pixels},
+			{"optimize_flags", OPTDENSE::nOptimize},
+			{"budget_policy", OPTDENSE::strDMapInstrumentationBudgetPolicy.c_str()},
+			{"limits_mib", {
+				{"host", OPTDENSE::nDMapInstrumentationMaxHostMB},
+				{"frame_storage", OPTDENSE::nDMapInstrumentationMaxFrameStorageMB},
+			}},
+			{"aggregate_uncompressed_map_estimate_bytes", {
+				{"postprocess_filters", plan.postprocessMapStorageBytes},
+				{"confidence_adjustment", plan.confidenceMapStorageBytes},
+				{"total", plan.totalMapStorageBytes},
+			}},
+			{"estimate_model", {
+					{"postprocess_filters", {
+						{"active_stage_count", plan.postprocessStageCount},
+						{"maximum_maps_per_active_stage", 11},
+						{"uncompressed_bytes_per_pixel_per_active_stage", 54},
+						{"retained_snapshot_bytes_per_pixel_per_active_stage", 20},
+						{"map_export_peak_scratch_bytes_per_pixel", 10},
+						{"summary_observer_host_bytes_per_pixel", plan.postprocessStageCount*20u},
+						{"conservative_maps_host_peak_bytes_per_pixel", plan.postprocessStageCount*20u+10u},
+					{"per_map_reservation_overhead_bytes", 4096},
+					{"normal_maps_conditional_on_normal_state", true},
+					{"confidence_maps_conditional_on_confidence_state", true},
+				}},
+			}},
+			{"components", nlohmann::json::object()},
+		};
+	}
+	nlohmann::json component = {
+		{"requested_capabilities", {
+			{"summary", true},
+			{"maps", plan.mapsRequested},
+			{"filter_active", plan.componentRequested},
+		}},
+		{"effective_capabilities", {
+			{"summary", plan.summaryAvailable},
+			{"maps", plan.mapsAvailable},
+		}},
+		{"estimate_bytes", {
+			{"summary_host_peak", plan.summaryHostPeakBytes},
+			{"maps_host_peak", plan.mapsHostPeakBytes},
+			{"component_uncompressed_map_storage", plan.component == _T("postprocess_filters") ?
+				plan.postprocessMapStorageBytes : plan.confidenceMapStorageBytes},
+			{"all_filter_uncompressed_map_storage", plan.totalMapStorageBytes},
+		}},
+		{"effective_estimate_bytes", {
+			{"host", plan.effectiveHostBytes},
+			{"storage", plan.effectiveStorageBytes},
+		}},
+		{"storage_preflight", {
+			{"attempted", plan.storageQueryAttempted},
+			{"succeeded", plan.storageQuerySucceeded},
+			{"available_bytes", plan.storageAvailableBytes},
+			{"reserved_before_bytes", plan.storageReservedBeforeBytes},
+			{"effective_available_bytes", plan.storageEffectiveAvailableBytes},
+			{"leased_bytes", plan.storageLeasedBytes},
+			{"reserved_after_admission_bytes", plan.storageReservedAfterAdmissionBytes},
+			{"lease_released", plan.leaseReleased},
+			{"reserved_after_release_bytes", plan.storageReservedAfterReleaseBytes},
+			{"reservation_key", plan.reservationKey.c_str()},
+		}},
+		{"decision", plan.decision.c_str()},
+		{"reason", plan.reason.c_str()},
+		{"fatal", plan.fatal},
+	};
+	component["actual_maps"] = usage ? nlohmann::json({
+		{"map_count", usage->mapCount},
+		{"declared_bytes", usage->declaredBytes},
+		{"file_bytes", usage->fileBytes},
+		{"estimate_covers_declared_bytes", usage->declaredBytes <=
+			(plan.component == _T("postprocess_filters") ? plan.postprocessMapStorageBytes : plan.confidenceMapStorageBytes)},
+	}) : nlohmann::json(nullptr);
+	artifact["components"][plan.component.c_str()] = component;
+	if (!WriteDMapJson(fileName, artifact))
+		VERBOSE("warning: failed to write depth-map filter resource plan: %s", fileName.c_str());
+}
+
+bool PrepareDMapFilterInstrumentation(
+	const Scene& scene,
+	IIndex idxImage,
+	int geometricIteration,
+	uint64_t pixels,
+	const char* component,
+	DMapFilterResourcePlan& plan,
+	DMapFilterStorageLease& lease)
+{
+	plan = PlanDMapFilterResources(pixels, component);
+	const String frameDir(DMapInstrumentFrameDir(scene.images[idxImage], geometricIteration));
+	ApplyDMapFilterStoragePreflight(frameDir, plan, lease);
+	WriteDMapFilterResourcePlan(scene, idxImage, geometricIteration, plan);
+	if (plan.fatal) {
+		VERBOSE("error: depth-map %s instrumentation rejected before observer allocation: %s",
+			component, plan.reason.c_str());
+		exit(EXIT_FAILURE);
+	}
+	return plan.summaryAvailable;
+}
+
+void FinishDMapFilterInstrumentation(
+	const Scene& scene,
+	IIndex idxImage,
+	int geometricIteration,
+	DMapFilterResourcePlan& plan,
+	DMapFilterStorageLease& lease,
+	const DMapArtifactUsage& usage)
+{
+	if (plan.storageLeasedBytes > 0)
+		ReleaseDMapFilterStorageLease(plan, lease);
+	WriteDMapFilterResourcePlan(scene, idxImage, geometricIteration, plan, &usage);
+}
+
+uint64_t DMapFilterPixelCount(const Image& image, const DepthMap* depthMap=NULL)
+{
+	if (depthMap && !depthMap->empty())
+		return (uint64_t)depthMap->total();
+	return image.image.empty() ? 0 : (uint64_t)image.image.total();
+}
+
+struct DMapStateSummary {
+	uint64_t totalPixels{0};
+	uint64_t validPixels{0};
+	double depthSum{0};
+	bool normalAvailable{false};
+	uint64_t validNormalPixels{0};
+	uint64_t validDepthNormalPixels{0};
+	bool confidenceAvailable{false};
+	uint64_t positiveConfidencePixels{0};
+	double confidenceSum{0};
+};
+
+float DMapNormalSquaredNorm(const Normal& normal)
+{
+	return normal.x*normal.x + normal.y*normal.y + normal.z*normal.z;
+}
+
+bool DMapNormalIsValid(const Normal& normal)
+{
+	const float squaredNorm(DMapNormalSquaredNorm(normal));
+	return std::isfinite(normal.x) && std::isfinite(normal.y) && std::isfinite(normal.z) &&
+		std::isfinite(squaredNorm) && squaredNorm > std::numeric_limits<float>::epsilon();
+}
+
+DMapStateSummary SummarizeDMapState(
+	const DepthMap& depthMap,
+	const NormalMap& normalMap,
+	const ConfidenceMap& confMap)
+{
+	DMapStateSummary summary;
+	if (depthMap.empty())
+		return summary;
+	summary.totalPixels = (uint64_t)depthMap.total();
+	summary.normalAvailable = !normalMap.empty() && normalMap.size() == depthMap.size();
+	summary.confidenceAvailable = !confMap.empty() && confMap.size() == depthMap.size();
+	for (int r=0; r<depthMap.rows; ++r) {
+		for (int c=0; c<depthMap.cols; ++c) {
+			const Depth depth(depthMap(r,c));
+			if (depth > 0) {
+				++summary.validPixels;
+				summary.depthSum += depth;
+			}
+			if (summary.normalAvailable && DMapNormalIsValid(normalMap(r,c))) {
+				++summary.validNormalPixels;
+				if (depth > 0)
+					++summary.validDepthNormalPixels;
+			}
+			if (summary.confidenceAvailable) {
+				const float confidence(confMap(r,c));
+				if (confidence > 0)
+					++summary.positiveConfidencePixels;
+				summary.confidenceSum += confidence;
+			}
+		}
+	}
+	return summary;
+}
+
+nlohmann::json DMapStateSummaryJson(const DMapStateSummary& summary)
+{
+	return {
+		{"total_pixels", summary.totalPixels},
+		{"valid_depth_pixels", summary.validPixels},
+		{"valid_depth_ratio", summary.totalPixels ? double(summary.validPixels)/double(summary.totalPixels) : 0.0},
+		{"mean_valid_depth", summary.validPixels ? nlohmann::json(summary.depthSum/double(summary.validPixels)) : nlohmann::json(nullptr)},
+		{"normal_available", summary.normalAvailable},
+		{"valid_normal_pixels", summary.normalAvailable ? nlohmann::json(summary.validNormalPixels) : nlohmann::json(nullptr)},
+		{"valid_normal_ratio", summary.normalAvailable && summary.totalPixels ?
+			nlohmann::json(double(summary.validNormalPixels)/double(summary.totalPixels)) : nlohmann::json(nullptr)},
+		{"valid_depth_normal_pixels", summary.normalAvailable ? nlohmann::json(summary.validDepthNormalPixels) : nlohmann::json(nullptr)},
+		{"confidence_available", summary.confidenceAvailable},
+		{"positive_confidence_pixels", summary.confidenceAvailable ? nlohmann::json(summary.positiveConfidencePixels) : nlohmann::json(nullptr)},
+		{"positive_confidence_ratio", summary.confidenceAvailable && summary.totalPixels ?
+			nlohmann::json(double(summary.positiveConfidencePixels)/double(summary.totalPixels)) : nlohmann::json(nullptr)},
+		{"mean_confidence", summary.confidenceAvailable && summary.totalPixels ?
+			nlohmann::json(summary.confidenceSum/double(summary.totalPixels)) : nlohmann::json(nullptr)},
+	};
+}
+
+struct DMapPostprocessStageStats {
+	DMapStateSummary input;
+	DMapStateSummary output;
+	uint64_t removedPixels{0};
+	uint64_t addedPixels{0};
+	uint64_t retainedValidPixels{0};
+	uint64_t depthChangedPixels{0};
+	double depthDeltaSum{0};
+	double depthAbsDeltaSum{0};
+	double depthMaxAbsDelta{0};
+	uint64_t comparableDepthPixels{0};
+	double comparableDepthAbsDeltaSum{0};
+	double comparableDepthMaxAbsDelta{0};
+	bool normalDeltaAvailable{false};
+	uint64_t normalChangedPixels{0};
+	uint64_t normalBecameValidPixels{0};
+	uint64_t normalBecameInvalidPixels{0};
+	uint64_t comparableNormalPixels{0};
+	double normalAngleDeltaSumDegrees{0};
+	double normalAngleDeltaMaxDegrees{0};
+	bool confidenceDeltaAvailable{false};
+	uint64_t confidenceChangedPixels{0};
+	uint64_t confidenceBecamePositivePixels{0};
+	uint64_t confidenceBecameZeroPixels{0};
+	double confidenceDeltaSum{0};
+	double confidenceAbsDeltaSum{0};
+	double confidenceMaxAbsDelta{0};
+};
+
+DMapPostprocessStageStats ComputeDMapPostprocessStageStats(
+	const DepthMap& depthBefore,
+	const NormalMap& normalBefore,
+	const ConfidenceMap& confidenceBefore,
+	const DepthMap& depthAfter,
+	const NormalMap& normalAfter,
+	const ConfidenceMap& confidenceAfter)
+{
+	ASSERT(depthBefore.size() == depthAfter.size());
+	DMapPostprocessStageStats stats;
+	stats.input = SummarizeDMapState(depthBefore, normalBefore, confidenceBefore);
+	stats.output = SummarizeDMapState(depthAfter, normalAfter, confidenceAfter);
+	stats.normalDeltaAvailable = stats.input.normalAvailable && stats.output.normalAvailable;
+	stats.confidenceDeltaAvailable = stats.input.confidenceAvailable && stats.output.confidenceAvailable;
+	for (int r=0; r<depthBefore.rows; ++r) {
+		for (int c=0; c<depthBefore.cols; ++c) {
+			const Depth inputDepth(depthBefore(r,c));
+			const Depth outputDepth(depthAfter(r,c));
+			const bool inputValid(inputDepth > 0);
+			const bool outputValid(outputDepth > 0);
+			if (inputValid && !outputValid)
+				++stats.removedPixels;
+			else if (!inputValid && outputValid)
+				++stats.addedPixels;
+			else if (inputValid)
+				++stats.retainedValidPixels;
+			const double depthDelta(double(outputDepth)-double(inputDepth));
+			const double depthAbsDelta(ABS(depthDelta));
+			if (inputDepth != outputDepth)
+				++stats.depthChangedPixels;
+			stats.depthDeltaSum += depthDelta;
+			stats.depthAbsDeltaSum += depthAbsDelta;
+			stats.depthMaxAbsDelta = MAXF(stats.depthMaxAbsDelta, depthAbsDelta);
+			if (inputValid && outputValid) {
+				++stats.comparableDepthPixels;
+				stats.comparableDepthAbsDeltaSum += depthAbsDelta;
+				stats.comparableDepthMaxAbsDelta = MAXF(stats.comparableDepthMaxAbsDelta, depthAbsDelta);
+			}
+			if (stats.normalDeltaAvailable) {
+				const Normal& inputNormal(normalBefore(r,c));
+				const Normal& outputNormal(normalAfter(r,c));
+				const bool inputNormalValid(DMapNormalIsValid(inputNormal));
+				const bool outputNormalValid(DMapNormalIsValid(outputNormal));
+				if (inputNormal.x != outputNormal.x || inputNormal.y != outputNormal.y || inputNormal.z != outputNormal.z)
+					++stats.normalChangedPixels;
+				if (!inputNormalValid && outputNormalValid)
+					++stats.normalBecameValidPixels;
+				else if (inputNormalValid && !outputNormalValid)
+					++stats.normalBecameInvalidPixels;
+				if (inputNormalValid && outputNormalValid) {
+					const float cosine(CLAMP(inputNormal.dot(outputNormal) /
+						SQRT(DMapNormalSquaredNorm(inputNormal)*DMapNormalSquaredNorm(outputNormal)), -1.f, 1.f));
+					const double angleDegrees(R2D(ACOS(cosine)));
+					++stats.comparableNormalPixels;
+					stats.normalAngleDeltaSumDegrees += angleDegrees;
+					stats.normalAngleDeltaMaxDegrees = MAXF(stats.normalAngleDeltaMaxDegrees, angleDegrees);
+				}
+			}
+			if (stats.confidenceDeltaAvailable) {
+				const float inputConfidence(confidenceBefore(r,c));
+				const float outputConfidence(confidenceAfter(r,c));
+				const double confidenceDelta(double(outputConfidence)-double(inputConfidence));
+				const double confidenceAbsDelta(ABS(confidenceDelta));
+				if (inputConfidence != outputConfidence)
+					++stats.confidenceChangedPixels;
+				if (inputConfidence <= 0 && outputConfidence > 0)
+					++stats.confidenceBecamePositivePixels;
+				if (inputConfidence > 0 && outputConfidence <= 0)
+					++stats.confidenceBecameZeroPixels;
+				stats.confidenceDeltaSum += confidenceDelta;
+				stats.confidenceAbsDeltaSum += confidenceAbsDelta;
+				stats.confidenceMaxAbsDelta = MAXF(stats.confidenceMaxAbsDelta, confidenceAbsDelta);
+			}
+		}
+	}
+	return stats;
+}
+
+nlohmann::json DMapPostprocessStageStatsJson(const DMapPostprocessStageStats& stats)
+{
+	const uint64_t totalPixels(stats.input.totalPixels);
+	return {
+		{"input", DMapStateSummaryJson(stats.input)},
+		{"output", DMapStateSummaryJson(stats.output)},
+		{"removed_pixels", stats.removedPixels},
+		{"added_pixels", stats.addedPixels},
+		{"retained_valid_pixels", stats.retainedValidPixels},
+		{"depth_changed_pixels", stats.depthChangedPixels},
+		{"depth_delta_mean_all_pixels", totalPixels ? stats.depthDeltaSum/double(totalPixels) : 0.0},
+		{"depth_abs_delta_mean_all_pixels", totalPixels ? stats.depthAbsDeltaSum/double(totalPixels) : 0.0},
+		{"depth_abs_delta_max", stats.depthMaxAbsDelta},
+		{"comparable_valid_depth_pixels", stats.comparableDepthPixels},
+		{"comparable_valid_depth_abs_delta_mean", stats.comparableDepthPixels ?
+			nlohmann::json(stats.comparableDepthAbsDeltaSum/double(stats.comparableDepthPixels)) : nlohmann::json(nullptr)},
+		{"comparable_valid_depth_abs_delta_max", stats.comparableDepthPixels ?
+			nlohmann::json(stats.comparableDepthMaxAbsDelta) : nlohmann::json(nullptr)},
+		{"normal_delta_available", stats.normalDeltaAvailable},
+		{"normal_changed_pixels", stats.normalDeltaAvailable ? nlohmann::json(stats.normalChangedPixels) : nlohmann::json(nullptr)},
+		{"normal_became_valid_pixels", stats.normalDeltaAvailable ? nlohmann::json(stats.normalBecameValidPixels) : nlohmann::json(nullptr)},
+		{"normal_became_invalid_pixels", stats.normalDeltaAvailable ? nlohmann::json(stats.normalBecameInvalidPixels) : nlohmann::json(nullptr)},
+		{"comparable_normal_pixels", stats.normalDeltaAvailable ? nlohmann::json(stats.comparableNormalPixels) : nlohmann::json(nullptr)},
+		{"normal_angle_delta_mean_degrees", stats.comparableNormalPixels ?
+			nlohmann::json(stats.normalAngleDeltaSumDegrees/double(stats.comparableNormalPixels)) : nlohmann::json(nullptr)},
+		{"normal_angle_delta_max_degrees", stats.comparableNormalPixels ?
+			nlohmann::json(stats.normalAngleDeltaMaxDegrees) : nlohmann::json(nullptr)},
+		{"confidence_delta_available", stats.confidenceDeltaAvailable},
+		{"confidence_changed_pixels", stats.confidenceDeltaAvailable ? nlohmann::json(stats.confidenceChangedPixels) : nlohmann::json(nullptr)},
+		{"confidence_became_positive_pixels", stats.confidenceDeltaAvailable ? nlohmann::json(stats.confidenceBecamePositivePixels) : nlohmann::json(nullptr)},
+		{"confidence_became_zero_pixels", stats.confidenceDeltaAvailable ? nlohmann::json(stats.confidenceBecameZeroPixels) : nlohmann::json(nullptr)},
+		{"confidence_delta_mean_all_pixels", stats.confidenceDeltaAvailable && totalPixels ?
+			nlohmann::json(stats.confidenceDeltaSum/double(totalPixels)) : nlohmann::json(nullptr)},
+		{"confidence_abs_delta_mean_all_pixels", stats.confidenceDeltaAvailable && totalPixels ?
+			nlohmann::json(stats.confidenceAbsDeltaSum/double(totalPixels)) : nlohmann::json(nullptr)},
+		{"confidence_abs_delta_max", stats.confidenceDeltaAvailable ? nlohmann::json(stats.confidenceMaxAbsDelta) : nlohmann::json(nullptr)},
+	};
+}
+
+struct DMapStateSnapshot {
+	DepthMap depth;
+	NormalMap normal;
+	ConfidenceMap confidence;
+};
+
+DMapStateSnapshot CaptureDMapState(const DepthData& depthData)
+{
+	DMapStateSnapshot snapshot;
+	snapshot.depth = depthData.depthMap.clone();
+	if (!depthData.normalMap.empty())
+		snapshot.normal = depthData.normalMap.clone();
+	if (!depthData.confMap.empty())
+		snapshot.confidence = depthData.confMap.clone();
+	return snapshot;
+}
+
+void AddDMapArtifactMap(
+	nlohmann::json& maps,
+	nlohmann::json& writeErrors,
+	bool saved,
+	const String& absolutePath,
+	uint64_t declaredBytes,
+	const String& signal,
+	const String& relativePath,
+	const char* dtype,
+	const char* semantics,
+	const char* stage)
+{
+	if (!saved) {
+		writeErrors.push_back(signal.c_str());
+		return;
+	}
+	std::error_code fileError;
+	const uint64_t fileBytes((uint64_t)std::filesystem::file_size(
+		std::filesystem::path(absolutePath.c_str()), fileError));
+	if (fileError)
+		writeErrors.push_back((signal + _T("_file_size")).c_str());
+	maps.push_back({
+		{"signal", signal.c_str()},
+		{"path", relativePath.c_str()},
+		{"dtype", dtype},
+		{"semantics", semantics},
+		{"quality", "exact"},
+		{"algorithm_stage", stage},
+		{"declared_bytes", declaredBytes},
+		{"file_bytes", fileError ? 0 : fileBytes},
+		{"file_size_available", !fileError},
+	});
+}
+
+void SaveDMapPostprocessStageMaps(
+	const String& frameDir,
+	unsigned stageIndex,
+	const char* stageName,
+	const DepthMap& depthBefore,
+	const NormalMap& normalBefore,
+	const ConfidenceMap& confidenceBefore,
+	const DepthMap& depthAfter,
+	const NormalMap& normalAfter,
+	const ConfidenceMap& confidenceAfter,
+	nlohmann::json& maps,
+	nlohmann::json& writeErrors)
+{
+	const String relativeDir(_T("postprocess_filters/"));
+	const String mapsDir(frameDir + relativeDir);
+	Util::ensureFolder(mapsDir);
+	const String prefix(String::FormatString(_T("%02u_%s_"), stageIndex, stageName));
+	auto saveDepth = [&](const DepthMap& map, const char* suffix, const char* semantics) {
+		const String fileName(prefix + suffix + _T(".pfm"));
+		const String absolutePath(mapsDir + fileName);
+		AddDMapArtifactMap(maps, writeErrors, !map.empty() && map.Save(absolutePath), absolutePath,
+			DMapSaturatingMul((uint64_t)map.total(), sizeof(Depth)),
+			prefix + suffix, relativeDir + fileName, "float32", semantics, stageName);
+	};
+	saveDepth(depthBefore, "depth_before", "depth immediately before this sequential postprocess stage");
+	saveDepth(depthAfter, "depth_after", "depth immediately after this sequential postprocess stage");
+
+	DepthMap depthDelta(depthBefore.size());
+	Image8U validityTransition(depthBefore.size());
+	for (int r=0; r<depthBefore.rows; ++r) {
+		for (int c=0; c<depthBefore.cols; ++c) {
+			const Depth inputDepth(depthBefore(r,c));
+			const Depth outputDepth(depthAfter(r,c));
+			depthDelta(r,c) = outputDepth-inputDepth;
+			const bool inputValid(inputDepth > 0), outputValid(outputDepth > 0);
+			validityTransition(r,c) = inputValid ? (outputValid ? 1 : 2) : (outputValid ? 3 : 0);
+		}
+	}
+	saveDepth(depthDelta, "depth_delta", "signed depth_after-depth_before; includes additions and removals");
+	{
+		const String fileName(prefix + _T("validity_transition.png"));
+		const String absolutePath(mapsDir + fileName);
+		AddDMapArtifactMap(maps, writeErrors, validityTransition.Save(absolutePath), absolutePath,
+			(uint64_t)validityTransition.total(),
+			prefix + _T("validity_transition"), relativeDir + fileName, "uint8",
+			"depth validity transition codes: 0 invalid-to-invalid, 1 valid-to-valid, 2 removed, 3 added", stageName);
+	}
+
+	if (!confidenceBefore.empty() && !confidenceAfter.empty() &&
+		confidenceBefore.size() == depthBefore.size() && confidenceAfter.size() == depthBefore.size())
+	{
+		auto saveConfidence = [&](const ConfidenceMap& map, const char* suffix, const char* semantics) {
+			const String fileName(prefix + suffix + _T(".pfm"));
+			const String absolutePath(mapsDir + fileName);
+			AddDMapArtifactMap(maps, writeErrors, map.Save(absolutePath), absolutePath,
+				DMapSaturatingMul((uint64_t)map.total(), sizeof(float)),
+				prefix + suffix, relativeDir + fileName, "float32", semantics, stageName);
+		};
+		saveConfidence(confidenceBefore, "confidence_before", "confidence immediately before this sequential postprocess stage");
+		saveConfidence(confidenceAfter, "confidence_after", "confidence immediately after this sequential postprocess stage");
+		ConfidenceMap confidenceDelta(confidenceBefore.size());
+		Image8U confidenceTransition(confidenceBefore.size());
+		for (int r=0; r<confidenceBefore.rows; ++r) {
+			for (int c=0; c<confidenceBefore.cols; ++c) {
+				const float inputConfidence(confidenceBefore(r,c));
+				const float outputConfidence(confidenceAfter(r,c));
+				confidenceDelta(r,c) = outputConfidence-inputConfidence;
+				const bool inputPositive(inputConfidence > 0), outputPositive(outputConfidence > 0);
+				confidenceTransition(r,c) = inputPositive ? (outputPositive ? 1 : 2) : (outputPositive ? 3 : 0);
+			}
+		}
+		saveConfidence(confidenceDelta, "confidence_delta", "signed confidence_after-confidence_before");
+		const String fileName(prefix + _T("confidence_transition.png"));
+		const String absolutePath(mapsDir + fileName);
+		AddDMapArtifactMap(maps, writeErrors, confidenceTransition.Save(absolutePath), absolutePath,
+			(uint64_t)confidenceTransition.total(),
+			prefix + _T("confidence_transition"), relativeDir + fileName, "uint8",
+			"confidence positivity transition codes: 0 zero-to-zero, 1 positive-to-positive, 2 became zero, 3 became positive", stageName);
+	}
+
+	if (!normalBefore.empty() && !normalAfter.empty() &&
+		normalBefore.size() == depthBefore.size() && normalAfter.size() == depthBefore.size())
+	{
+		auto saveNormal = [&](const NormalMap& map, const char* suffix, const char* semantics) {
+			const String fileName(prefix + suffix + _T(".pfm"));
+			const String absolutePath(mapsDir + fileName);
+			AddDMapArtifactMap(maps, writeErrors, map.Save(absolutePath), absolutePath,
+				DMapSaturatingMul((uint64_t)map.total(), 3u*sizeof(float)),
+				prefix + suffix, relativeDir + fileName, "float32x3", semantics, stageName);
+		};
+		saveNormal(normalBefore, "normal_before",
+			"camera-space normal immediately before this sequential postprocess stage; zero encodes invalid");
+		saveNormal(normalAfter, "normal_after",
+			"camera-space normal immediately after this sequential postprocess stage; zero encodes invalid");
+		DepthMap normalAngleDelta(normalBefore.size());
+		for (int r=0; r<normalBefore.rows; ++r) {
+			for (int c=0; c<normalBefore.cols; ++c) {
+				const Normal& inputNormal(normalBefore(r,c));
+				const Normal& outputNormal(normalAfter(r,c));
+				if (DMapNormalIsValid(inputNormal) && DMapNormalIsValid(outputNormal)) {
+					const float cosine(CLAMP(inputNormal.dot(outputNormal) /
+						SQRT(DMapNormalSquaredNorm(inputNormal)*DMapNormalSquaredNorm(outputNormal)), -1.f, 1.f));
+					normalAngleDelta(r,c) = R2D(ACOS(cosine));
+				} else {
+					normalAngleDelta(r,c) = std::numeric_limits<float>::quiet_NaN();
+				}
+			}
+		}
+		saveDepth(normalAngleDelta, "normal_angle_delta_degrees",
+			"angular difference in degrees between valid before/after normals; NaN where either normal is invalid");
+	}
+}
+
+struct DMapPostprocessStageRecord {
+	unsigned index{0};
+	String name;
+	bool enabled{false};
+	bool executed{false};
+	bool success{false};
+	nlohmann::json parameters;
+	DMapPostprocessStageStats stats;
+};
+
+class DMapPostprocessObservation {
+public:
+	DMapPostprocessObservation(
+		const Scene& scene,
+		IIndex idxImage,
+		int geometricIteration,
+		const DepthData& depthData,
+		const DMapFilterResourcePlan& resourcePlan)
+		: reference(scene.images[idxImage]),
+		  referenceSceneIndex(idxImage),
+		  geometricIteration(geometricIteration),
+		  frameDir(DMapInstrumentFrameDir(reference, geometricIteration)),
+		  mapsRequested(resourcePlan.mapsRequested),
+		  writeMaps(resourcePlan.mapsAvailable),
+		  mapsUnavailableReason(resourcePlan.mapsRequested && !resourcePlan.mapsAvailable ? resourcePlan.reason : String()),
+		  input(SummarizeDMapState(depthData.depthMap, depthData.normalMap, depthData.confMap)),
+		  maps(nlohmann::json::array()),
+		  writeErrors(nlohmann::json::array())
+	{}
+
+	void Record(
+		unsigned index,
+		const char* name,
+		bool enabled,
+		bool executed,
+		bool success,
+		const nlohmann::json& parameters,
+		const DepthMap& depthBefore,
+		const NormalMap& normalBefore,
+		const ConfidenceMap& confidenceBefore,
+		const DepthMap& depthAfter,
+		const NormalMap& normalAfter,
+		const ConfidenceMap& confidenceAfter)
+	{
+		DMapPostprocessStageRecord record;
+		record.index = index;
+		record.name = name;
+		record.enabled = enabled;
+		record.executed = executed;
+		record.success = success;
+		record.parameters = parameters;
+		record.stats = ComputeDMapPostprocessStageStats(
+			depthBefore, normalBefore, confidenceBefore, depthAfter, normalAfter, confidenceAfter);
+		records.emplace_back(std::move(record));
+		if (writeMaps && executed)
+			SaveDMapPostprocessStageMaps(frameDir, index, name, depthBefore, normalBefore, confidenceBefore,
+				depthAfter, normalAfter, confidenceAfter, maps, writeErrors);
+	}
+
+	DMapArtifactUsage Write(const DepthData& depthData) const
+	{
+		nlohmann::json stages(nlohmann::json::array());
+		bool stagesSucceeded(true);
+		const DMapPostprocessStageRecord* terminalExecutedStage(NULL);
+		for (const DMapPostprocessStageRecord& record: records) {
+			if (record.executed)
+				terminalExecutedStage = &record;
+		}
+		for (const DMapPostprocessStageRecord& record: records) {
+			if (record.executed && !record.success)
+				stagesSucceeded = false;
+			stages.push_back({
+				{"stage_index", record.index},
+				{"name", record.name.c_str()},
+				{"enabled", record.enabled},
+				{"executed", record.executed},
+				{"success", record.executed ? nlohmann::json(record.success) : nlohmann::json(nullptr)},
+				{"measurement_basis", record.executed ? "exact sequential before/after state" : "exact identity because stage was disabled"},
+				{"parameters", record.parameters},
+				{"metrics", DMapPostprocessStageStatsJson(record.stats)},
+			});
+		}
+		const DMapStateSummary output(SummarizeDMapState(
+			depthData.depthMap, depthData.normalMap, depthData.confMap));
+		nlohmann::json pipelineOutputMapSignals(nullptr);
+		if (writeMaps && terminalExecutedStage) {
+			const String prefix(String::FormatString(_T("%02u_%s_"),
+				terminalExecutedStage->index, terminalExecutedStage->name.c_str()));
+			pipelineOutputMapSignals = {
+				{"stage_index", terminalExecutedStage->index},
+				{"stage_name", terminalExecutedStage->name.c_str()},
+				{"depth", (prefix + _T("depth_after")).c_str()},
+				{"normal", terminalExecutedStage->stats.normalDeltaAvailable ?
+					nlohmann::json((prefix + _T("normal_after")).c_str()) : nlohmann::json(nullptr)},
+				{"confidence", terminalExecutedStage->stats.confidenceDeltaAvailable ?
+					nlohmann::json((prefix + _T("confidence_after")).c_str()) : nlohmann::json(nullptr)},
+			};
+		}
+		nlohmann::json artifact = {
+			{"schema_name", "openmvs.dmap.postprocess_filters"},
+			{"schema_version", 2},
+			{"algorithm_stage", "depth_map_optional_postprocess"},
+			{"estimation_stage", DMapEstimationStageName(geometricIteration)},
+			{"geometric_iteration", geometricIteration >= 0 ? nlohmann::json(geometricIteration) : nlohmann::json(nullptr)},
+			{"reference_scene_image_index", referenceSceneIndex},
+			{"reference_image_id", reference.ID},
+			{"reference_image_name", reference.name.c_str()},
+			{"optimize_flags", OPTDENSE::nOptimize},
+			{"pipeline_input", DMapStateSummaryJson(input)},
+			{"pipeline_output", DMapStateSummaryJson(output)},
+			{"pipeline_output_map_signals", pipelineOutputMapSignals},
+			{"stage_order", nlohmann::json::array({"remove_speckles", "fill_gaps"})},
+			{"stages", stages},
+			{"resource_plan", {
+				{"path", "filter_resource_plan.json"},
+				{"path_base", "artifact_directory"},
+				{"schema_name", "openmvs.dmap.filter_resource_plan"},
+				{"schema_version", 2},
+			}},
+			{"maps_requested", mapsRequested},
+			{"maps_enabled", writeMaps},
+			{"maps_unavailable_reason", mapsUnavailableReason.empty() ? nlohmann::json(nullptr) : nlohmann::json(mapsUnavailableReason.c_str())},
+			{"maps", maps},
+			{"write_errors", writeErrors},
+			{"complete", writeErrors.empty() && stagesSucceeded},
+		};
+		const String jsonFile(frameDir + _T("postprocess_filters.json"));
+		if (!WriteDMapJson(jsonFile, artifact))
+			VERBOSE("warning: failed to write depth-map postprocess instrumentation: %s", jsonFile.c_str());
+
+		std::ostringstream csv;
+		csv << std::setprecision(9);
+		csv << "estimation_stage,geometric_iteration,reference_scene_image_index,reference_image_id,stage_index,stage_name,"
+			"enabled,executed,success,total_pixels,input_valid_depth_pixels,output_valid_depth_pixels,removed_pixels,added_pixels,"
+			"depth_changed_pixels,depth_abs_delta_mean_all_pixels,depth_abs_delta_max,normal_delta_available,"
+			"normal_changed_pixels,normal_became_valid_pixels,normal_became_invalid_pixels,comparable_normal_pixels,"
+			"normal_angle_delta_mean_degrees,normal_angle_delta_max_degrees,confidence_delta_available,"
+			"confidence_changed_pixels,confidence_abs_delta_mean_all_pixels,confidence_abs_delta_max\n";
+		for (const DMapPostprocessStageRecord& record: records) {
+			const DMapPostprocessStageStats& stats(record.stats);
+			csv << DMapEstimationStageName(geometricIteration) << ',';
+			if (geometricIteration >= 0)
+				csv << geometricIteration;
+			csv << ',' << referenceSceneIndex << ',' << reference.ID << ',' << record.index << ',' << record.name.c_str() << ','
+				<< (record.enabled ? 1 : 0) << ',' << (record.executed ? 1 : 0) << ',';
+			if (record.executed)
+				csv << (record.success ? 1 : 0);
+			csv << ',' << stats.input.totalPixels << ',' << stats.input.validPixels << ',' << stats.output.validPixels << ','
+				<< stats.removedPixels << ',' << stats.addedPixels << ',' << stats.depthChangedPixels << ','
+				<< (stats.input.totalPixels ? stats.depthAbsDeltaSum/double(stats.input.totalPixels) : 0.0) << ','
+				<< stats.depthMaxAbsDelta << ',' << (stats.normalDeltaAvailable ? 1 : 0) << ',';
+			if (stats.normalDeltaAvailable) {
+				csv << stats.normalChangedPixels << ',' << stats.normalBecameValidPixels << ','
+					<< stats.normalBecameInvalidPixels << ',' << stats.comparableNormalPixels << ',';
+				if (stats.comparableNormalPixels) {
+					csv << stats.normalAngleDeltaSumDegrees/double(stats.comparableNormalPixels) << ','
+						<< stats.normalAngleDeltaMaxDegrees;
+				} else {
+					csv << ',';
+				}
+			} else {
+				csv << ",,,,,";
+			}
+			csv << ',' << (stats.confidenceDeltaAvailable ? 1 : 0) << ',';
+			if (stats.confidenceDeltaAvailable) {
+				csv << stats.confidenceChangedPixels << ','
+					<< (stats.input.totalPixels ? stats.confidenceAbsDeltaSum/double(stats.input.totalPixels) : 0.0) << ','
+					<< stats.confidenceMaxAbsDelta;
+			} else {
+				csv << ",,";
+			}
+			csv << '\n';
+		}
+		const String csvFile(frameDir + _T("postprocess_filters.csv"));
+		if (!WriteDMapText(csvFile, csv.str()))
+			VERBOSE("warning: failed to write depth-map postprocess CSV instrumentation: %s", csvFile.c_str());
+		return DMapArtifactUsageFromMaps(maps);
+	}
+
+private:
+	const Image& reference;
+	IIndex referenceSceneIndex;
+	int geometricIteration;
+	String frameDir;
+	bool mapsRequested;
+	bool writeMaps;
+	String mapsUnavailableReason;
+	DMapStateSummary input;
+	std::vector<DMapPostprocessStageRecord> records;
+	nlohmann::json maps;
+	nlohmann::json writeErrors;
+};
+
+void WriteUnavailableDMapPostprocessArtifacts(
+	const Scene& scene,
+	IIndex idxImage,
+	int geometricIteration,
+	const char* reason,
+	const DMapFilterResourcePlan& resourcePlan)
+{
+	const Image& reference(scene.images[idxImage]);
+	const String frameDir(DMapInstrumentFrameDir(reference, geometricIteration));
+	const String jsonFile(frameDir + _T("postprocess_filters.json"));
+	if (File::access(jsonFile))
+		return;
+	auto unavailableStage = [&](unsigned index, const char* name, bool enabled, const nlohmann::json& parameters) {
+		return nlohmann::json({
+			{"stage_index", index},
+			{"name", name},
+			{"enabled", enabled},
+			{"executed", false},
+			{"success", nullptr},
+			{"measurement_basis", "unavailable because no in-memory final state was observed"},
+			{"unavailable_reason", reason},
+			{"parameters", parameters},
+			{"metrics", nullptr},
+		});
+	};
+	nlohmann::json artifact = {
+		{"schema_name", "openmvs.dmap.postprocess_filters"},
+		{"schema_version", 2},
+		{"algorithm_stage", "depth_map_optional_postprocess"},
+		{"estimation_stage", DMapEstimationStageName(geometricIteration)},
+		{"geometric_iteration", geometricIteration >= 0 ? nlohmann::json(geometricIteration) : nlohmann::json(nullptr)},
+		{"reference_scene_image_index", idxImage},
+		{"reference_image_id", reference.ID},
+		{"reference_image_name", reference.name.c_str()},
+		{"optimize_flags", OPTDENSE::nOptimize},
+		{"pipeline_input", nullptr},
+		{"pipeline_output", nullptr},
+		{"pipeline_output_map_signals", nullptr},
+		{"stage_order", nlohmann::json::array({"remove_speckles", "fill_gaps"})},
+		{"stages", nlohmann::json::array({
+			unavailableStage(0, "remove_speckles",
+				(OPTDENSE::nOptimize & OPTDENSE::REMOVE_SPECKLES) != 0, {
+				{"speckle_size", OPTDENSE::nSpeckleSize},
+				{"depth_similarity_threshold", OPTDENSE::fDepthDiffThreshold*0.7f},
+				{"connectivity", 4},
+			}),
+			unavailableStage(1, "fill_gaps",
+				(OPTDENSE::nOptimize & OPTDENSE::FILL_GAPS) != 0, {
+				{"maximum_gap_pixels", OPTDENSE::nIpolGapSize},
+				{"depth_similarity_threshold", OPTDENSE::fDepthDiffThreshold*2.5f},
+				{"passes", nlohmann::json::array({"rows", "columns"})},
+			}),
+		})},
+		{"resource_plan", {
+			{"path", "filter_resource_plan.json"},
+			{"path_base", "artifact_directory"},
+			{"schema_name", "openmvs.dmap.filter_resource_plan"},
+			{"schema_version", 2},
+		}},
+		{"maps_requested", resourcePlan.mapsRequested},
+		{"maps_enabled", false},
+		{"maps_unavailable_reason", resourcePlan.mapsRequested ? nlohmann::json(resourcePlan.reason.c_str()) : nlohmann::json(nullptr)},
+		{"maps", nlohmann::json::array()},
+		{"write_errors", nlohmann::json::array()},
+		{"complete", false},
+		{"unavailable_signals", nlohmann::json::array({"input_state", "output_state", "per_pixel_depth_deltas", "per_pixel_normal_deltas", "per_pixel_confidence_deltas"})},
+	};
+	if (!WriteDMapJson(jsonFile, artifact))
+		VERBOSE("warning: failed to write unavailable depth-map postprocess instrumentation: %s", jsonFile.c_str());
+	std::ostringstream csv;
+	csv << "estimation_stage,geometric_iteration,reference_scene_image_index,reference_image_id,stage_index,stage_name,"
+		"enabled,executed,success,state_metrics_available,unavailable_reason\n";
+	for (unsigned stageIndex=0; stageIndex<2; ++stageIndex) {
+		csv << DMapEstimationStageName(geometricIteration) << ',';
+		if (geometricIteration >= 0)
+			csv << geometricIteration;
+		const bool enabled(stageIndex == 0 ?
+			(OPTDENSE::nOptimize & OPTDENSE::REMOVE_SPECKLES) != 0 :
+			(OPTDENSE::nOptimize & OPTDENSE::FILL_GAPS) != 0);
+		csv << ',' << idxImage << ',' << reference.ID << ',' << stageIndex << ','
+			<< (stageIndex == 0 ? "remove_speckles" : "fill_gaps") << ','
+			<< (enabled ? 1 : 0) << ",0,,0," << reason << '\n';
+	}
+	const String csvFile(frameDir + _T("postprocess_filters.csv"));
+	if (!WriteDMapText(csvFile, csv.str()))
+		VERBOSE("warning: failed to write unavailable depth-map postprocess CSV instrumentation: %s", csvFile.c_str());
+}
+
+struct DMapConfidenceDeltaStats {
+	bool available{false};
+	uint64_t totalPixels{0};
+	uint64_t validDepthPixels{0};
+	uint64_t inputPositivePixels{0};
+	uint64_t outputPositivePixels{0};
+	uint64_t changedPixels{0};
+	uint64_t becamePositivePixels{0};
+	uint64_t becameZeroPixels{0};
+	double deltaSum{0};
+	double absDeltaSum{0};
+	double maxAbsDelta{0};
+	uint64_t changedValidDepthPixels{0};
+	double validDepthAbsDeltaSum{0};
+	double validDepthMaxAbsDelta{0};
+};
+
+DMapConfidenceDeltaStats ComputeDMapConfidenceDeltaStats(
+	const DepthMap& depthMap,
+	const ConfidenceMap& input,
+	const ConfidenceMap& output)
+{
+	DMapConfidenceDeltaStats stats;
+	if (depthMap.empty() || input.empty() || output.empty() ||
+		input.size() != depthMap.size() || output.size() != depthMap.size())
+		return stats;
+	stats.available = true;
+	stats.totalPixels = (uint64_t)depthMap.total();
+	for (int r=0; r<depthMap.rows; ++r) {
+		for (int c=0; c<depthMap.cols; ++c) {
+			const bool depthValid(depthMap(r,c) > 0);
+			const float inputConfidence(input(r,c));
+			const float outputConfidence(output(r,c));
+			const bool inputPositive(inputConfidence > 0), outputPositive(outputConfidence > 0);
+			if (depthValid)
+				++stats.validDepthPixels;
+			if (inputPositive)
+				++stats.inputPositivePixels;
+			if (outputPositive)
+				++stats.outputPositivePixels;
+			if (!inputPositive && outputPositive)
+				++stats.becamePositivePixels;
+			if (inputPositive && !outputPositive)
+				++stats.becameZeroPixels;
+			const double delta(double(outputConfidence)-double(inputConfidence));
+			const double absDelta(ABS(delta));
+			if (inputConfidence != outputConfidence) {
+				++stats.changedPixels;
+				if (depthValid)
+					++stats.changedValidDepthPixels;
+			}
+			stats.deltaSum += delta;
+			stats.absDeltaSum += absDelta;
+			stats.maxAbsDelta = MAXF(stats.maxAbsDelta, absDelta);
+			if (depthValid) {
+				stats.validDepthAbsDeltaSum += absDelta;
+				stats.validDepthMaxAbsDelta = MAXF(stats.validDepthMaxAbsDelta, absDelta);
+			}
+		}
+	}
+	return stats;
+}
+
+nlohmann::json DMapConfidenceDeltaStatsJson(const DMapConfidenceDeltaStats& stats)
+{
+	if (!stats.available)
+		return nullptr;
+	return {
+		{"total_pixels", stats.totalPixels},
+		{"valid_depth_pixels", stats.validDepthPixels},
+		{"input_positive_confidence_pixels", stats.inputPositivePixels},
+		{"output_positive_confidence_pixels", stats.outputPositivePixels},
+		{"output_positive_confidence_ratio", stats.totalPixels ? double(stats.outputPositivePixels)/double(stats.totalPixels) : 0.0},
+		{"changed_pixels", stats.changedPixels},
+		{"became_positive_pixels", stats.becamePositivePixels},
+		{"became_zero_pixels", stats.becameZeroPixels},
+		{"delta_mean_all_pixels", stats.totalPixels ? stats.deltaSum/double(stats.totalPixels) : 0.0},
+		{"abs_delta_mean_all_pixels", stats.totalPixels ? stats.absDeltaSum/double(stats.totalPixels) : 0.0},
+		{"abs_delta_max", stats.maxAbsDelta},
+		{"changed_valid_depth_pixels", stats.changedValidDepthPixels},
+		{"abs_delta_mean_valid_depth_pixels", stats.validDepthPixels ?
+			nlohmann::json(stats.validDepthAbsDeltaSum/double(stats.validDepthPixels)) : nlohmann::json(nullptr)},
+		{"abs_delta_max_valid_depth_pixels", stats.validDepthPixels ?
+			nlohmann::json(stats.validDepthMaxAbsDelta) : nlohmann::json(nullptr)},
+	};
+}
+
+void SaveDMapConfidenceAdjustmentMaps(
+	const String& frameDir,
+	const DepthMap& depthMap,
+	const ConfidenceMap& input,
+	const ConfidenceMap* fast,
+	const ConfidenceMap* full,
+	const ConfidenceMap* final,
+	nlohmann::json& maps,
+	nlohmann::json& writeErrors)
+{
+	const String relativeDir(_T("confidence_adjustment/"));
+	const String mapsDir(frameDir + relativeDir);
+	Util::ensureFolder(mapsDir);
+	const String inputPath(mapsDir + _T("confidence_input.pfm"));
+	AddDMapArtifactMap(maps, writeErrors, input.Save(inputPath), inputPath,
+		DMapSaturatingMul((uint64_t)input.total(), sizeof(float)),
+		_T("confidence_input"), relativeDir + _T("confidence_input.pfm"), "float32",
+		"production confidence before optional cross-depth-map adjustment", "confidence_adjustment");
+	Image8U depthValidity(depthMap.size());
+	for (int r=0; r<depthMap.rows; ++r)
+		for (int c=0; c<depthMap.cols; ++c)
+			depthValidity(r,c) = depthMap(r,c) > 0 ? 1 : 0;
+	const String validityPath(mapsDir + _T("depth_validity.png"));
+	AddDMapArtifactMap(maps, writeErrors, depthValidity.Save(validityPath), validityPath,
+		(uint64_t)depthValidity.total(),
+		_T("confidence_adjustment_depth_validity"), relativeDir + _T("depth_validity.png"), "uint8",
+		"reference depth validity: 0 invalid, 1 valid", "confidence_adjustment");
+	auto saveOutput = [&](const char* name, const ConfidenceMap* output, const char* semantics) {
+		if (!output || output->empty())
+			return;
+		const String outputName(String::FormatString(_T("confidence_%s.pfm"), name));
+		const String outputPath(mapsDir + outputName);
+		AddDMapArtifactMap(maps, writeErrors, output->Save(outputPath), outputPath,
+			DMapSaturatingMul((uint64_t)output->total(), sizeof(float)),
+			String::FormatString(_T("confidence_%s"), name), relativeDir + outputName, "float32",
+			semantics, "confidence_adjustment");
+		ConfidenceMap delta(input.size());
+		Image8U transition(input.size());
+		for (int r=0; r<input.rows; ++r) {
+			for (int c=0; c<input.cols; ++c) {
+				const float inputConfidence(input(r,c));
+				const float outputConfidence((*output)(r,c));
+				delta(r,c) = outputConfidence-inputConfidence;
+				const bool inputPositive(inputConfidence > 0), outputPositive(outputConfidence > 0);
+				transition(r,c) = inputPositive ? (outputPositive ? 1 : 2) : (outputPositive ? 3 : 0);
+			}
+		}
+		const String deltaName(String::FormatString(_T("confidence_%s_delta.pfm"), name));
+		const String deltaPath(mapsDir + deltaName);
+		AddDMapArtifactMap(maps, writeErrors, delta.Save(deltaPath), deltaPath,
+			DMapSaturatingMul((uint64_t)delta.total(), sizeof(float)),
+			String::FormatString(_T("confidence_%s_delta"), name), relativeDir + deltaName, "float32",
+			"signed adjusted-confidence minus production input confidence", "confidence_adjustment");
+		const String transitionName(String::FormatString(_T("confidence_%s_transition.png"), name));
+		const String transitionPath(mapsDir + transitionName);
+		AddDMapArtifactMap(maps, writeErrors, transition.Save(transitionPath), transitionPath,
+			(uint64_t)transition.total(),
+			String::FormatString(_T("confidence_%s_transition"), name), relativeDir + transitionName, "uint8",
+			"confidence positivity transition: 0 zero-to-zero, 1 positive-to-positive, 2 became zero, 3 became positive",
+			"confidence_adjustment");
+	};
+	saveOutput("fast", fast, "output of ADJUST_CONFIDENCE_FAST before final combination");
+	saveOutput("full", full, "output of ADJUST_CONFIDENCE before final combination");
+	saveOutput("final", final, "final production confidence after configured adjustment outputs are combined");
+}
+
+DMapArtifactUsage WriteDMapConfidenceAdjustmentArtifacts(
+	const Scene& scene,
+	IIndex idxImage,
+	int geometricIteration,
+	const IIndexArr* idxNeighbors,
+	const DepthMap* depthMap,
+	const ConfidenceMap* input,
+	const ConfidenceMap* fast,
+	const ConfidenceMap* full,
+	const ConfidenceMap* final,
+	const DMapFilterResourcePlan& resourcePlan,
+	const char* status,
+	const char* unavailableReason=NULL)
+{
+	const Image& reference(scene.images[idxImage]);
+	const String frameDir(DMapInstrumentFrameDir(reference, geometricIteration));
+	const bool fastEnabled((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE_FAST) != 0);
+	const bool fullEnabled((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE) != 0);
+	const bool disabledStatus(String(status) == _T("disabled"));
+	const bool inputAvailable(depthMap && input && !depthMap->empty() && !input->empty() && input->size() == depthMap->size());
+	const auto outputAvailable = [&](const ConfidenceMap* output) {
+		return inputAvailable && output && !output->empty() && output->size() == input->size();
+	};
+	const bool fastOutputAvailable(outputAvailable(fast));
+	const bool fullOutputAvailable(outputAvailable(full));
+	const bool finalOutputAvailable(outputAvailable(final));
+	const bool configuredOutputsComplete(
+		(!fastEnabled || fastOutputAvailable) && (!fullEnabled || fullOutputAvailable));
+	nlohmann::json neighbors(nlohmann::json::array());
+	if (idxNeighbors) {
+		for (IIndex neighborSceneIndex: *idxNeighbors) {
+			const Image* neighbor(neighborSceneIndex < scene.images.size() ? &scene.images[neighborSceneIndex] : NULL);
+			neighbors.push_back({
+				{"scene_image_index", neighborSceneIndex},
+				{"image_id", neighbor ? nlohmann::json(neighbor->ID) : nlohmann::json(nullptr)},
+				{"image_name", neighbor ? nlohmann::json(neighbor->name.c_str()) : nlohmann::json(nullptr)},
+			});
+		}
+	}
+	auto method = [&](const char* name, bool enabled, const ConfidenceMap* output, const char* basis) {
+		const bool available(inputAvailable && output && !output->empty() && output->size() == input->size());
+		return nlohmann::json({
+			{"name", name},
+			{"enabled", enabled},
+			{"executed", enabled && !disabledStatus},
+			{"output_available", available},
+			{"quality", available ? "exact" : "unavailable"},
+			{"basis", basis},
+			{"unavailable_reason", available ? nlohmann::json(nullptr) : nlohmann::json(
+				!enabled ? "method disabled by nOptimize" : (unavailableReason ? unavailableReason : "output map unavailable"))},
+			{"metrics", available ? DMapConfidenceDeltaStatsJson(ComputeDMapConfidenceDeltaStats(*depthMap, *input, *output)) : nlohmann::json(nullptr)},
+		});
+	};
+	const bool finalEnabled(fastEnabled || fullEnabled);
+	const char* combination(
+		fast && !fast->empty() && full && !full->empty() ? "maximum_if_both_positive_else_zero" :
+		(fast && !fast->empty() ? "fast_only" : (full && !full->empty() ? "full_only" : "unavailable")));
+	nlohmann::json methods(nlohmann::json::array());
+	methods.push_back(method("adjust_confidence_fast", fastEnabled, fast,
+		"depth-similarity confidence blended with reference/neighbor photometric confidence"));
+	methods.push_back(method("adjust_confidence", fullEnabled, full,
+		"projected neighbor-depth confidence fusion with occlusion and free-space penalties"));
+	methods.push_back(method("final_combined_confidence", finalEnabled, final, combination));
+	nlohmann::json maps(nlohmann::json::array()), writeErrors(nlohmann::json::array());
+	if (resourcePlan.mapsAvailable && inputAvailable)
+		SaveDMapConfidenceAdjustmentMaps(frameDir, *depthMap, *input, fast, full, final, maps, writeErrors);
+	nlohmann::json artifact = {
+		{"schema_name", "openmvs.dmap.confidence_adjustment"},
+		{"schema_version", 1},
+		{"algorithm_stage", "depth_map_optional_confidence_adjustment"},
+		{"estimation_stage", DMapEstimationStageName(geometricIteration)},
+		{"geometric_iteration", geometricIteration >= 0 ? nlohmann::json(geometricIteration) : nlohmann::json(nullptr)},
+		{"reference_scene_image_index", idxImage},
+		{"reference_image_id", reference.ID},
+		{"reference_image_name", reference.name.c_str()},
+		{"status", status},
+		{"optimize_flags", OPTDENSE::nOptimize},
+		{"neighbor_limit", 8},
+		{"neighbors", neighbors},
+		{"parameters", {
+			{"fast_depth_similarity_threshold", 0.01},
+			{"fast_similarity_weight", 0.7},
+			{"fast_photometric_weight", 0.3},
+			{"full_min_views", OPTDENSE::nMinViewsFilter},
+			{"full_min_views_adjust", OPTDENSE::nMinViewsFilterAdjust},
+			{"full_depth_similarity_threshold", OPTDENSE::fDepthDiffThreshold*1.2f},
+		}},
+		{"input_available", inputAvailable},
+		{"configured_outputs_complete", configuredOutputsComplete},
+		{"depth_validity_unchanged", inputAvailable ? nlohmann::json(true) : nlohmann::json(nullptr)},
+		{"final_combination", combination},
+		{"methods", methods},
+		{"resource_plan", {
+			{"path", "filter_resource_plan.json"},
+			{"path_base", "artifact_directory"},
+			{"schema_name", "openmvs.dmap.filter_resource_plan"},
+			{"schema_version", 2},
+		}},
+		{"maps_requested", resourcePlan.mapsRequested},
+		{"maps_enabled", resourcePlan.mapsAvailable},
+		{"maps_unavailable_reason", resourcePlan.mapsRequested && !resourcePlan.mapsAvailable ?
+			nlohmann::json(resourcePlan.reason.c_str()) : nlohmann::json(nullptr)},
+		{"maps", maps},
+		{"write_errors", writeErrors},
+		{"complete", writeErrors.empty() && (disabledStatus ||
+			(inputAvailable && finalOutputAvailable && configuredOutputsComplete))},
+	};
+	if (unavailableReason)
+		artifact["unavailable_reason"] = unavailableReason;
+	const String jsonFile(frameDir + _T("confidence_adjustment.json"));
+	if (!WriteDMapJson(jsonFile, artifact))
+		VERBOSE("warning: failed to write depth-map confidence-adjustment instrumentation: %s", jsonFile.c_str());
+
+	std::ostringstream csv;
+	csv << std::setprecision(9);
+	csv << "estimation_stage,geometric_iteration,reference_scene_image_index,reference_image_id,method,enabled,executed,"
+		"output_available,total_pixels,valid_depth_pixels,input_positive_confidence_pixels,output_positive_confidence_pixels,"
+		"changed_pixels,became_positive_pixels,became_zero_pixels,abs_delta_mean_all_pixels,abs_delta_max,unavailable_reason\n";
+	auto writeMethodRow = [&](const char* name, bool enabled, const ConfidenceMap* output) {
+		const DMapConfidenceDeltaStats stats(inputAvailable && output ?
+			ComputeDMapConfidenceDeltaStats(*depthMap, *input, *output) : DMapConfidenceDeltaStats());
+		csv << DMapEstimationStageName(geometricIteration) << ',';
+		if (geometricIteration >= 0)
+			csv << geometricIteration;
+		csv << ',' << idxImage << ',' << reference.ID << ',' << name << ',' << (enabled ? 1 : 0) << ','
+			<< (enabled && !disabledStatus ? 1 : 0) << ',' << (stats.available ? 1 : 0) << ',';
+		if (stats.available) {
+			csv << stats.totalPixels << ',' << stats.validDepthPixels << ',' << stats.inputPositivePixels << ','
+				<< stats.outputPositivePixels << ',' << stats.changedPixels << ',' << stats.becamePositivePixels << ','
+				<< stats.becameZeroPixels << ','
+				<< (stats.totalPixels ? stats.absDeltaSum/double(stats.totalPixels) : 0.0) << ',' << stats.maxAbsDelta << ',';
+		} else {
+			csv << ",,,,,,,,,";
+			csv << (!enabled ? "method disabled by nOptimize" : (unavailableReason ? unavailableReason : "output map unavailable"));
+		}
+		csv << '\n';
+	};
+	writeMethodRow("adjust_confidence_fast", fastEnabled, fast);
+	writeMethodRow("adjust_confidence", fullEnabled, full);
+	writeMethodRow("final_combined_confidence", finalEnabled, final);
+	const String csvFile(frameDir + _T("confidence_adjustment.csv"));
+	if (!WriteDMapText(csvFile, csv.str()))
+		VERBOSE("warning: failed to write depth-map confidence-adjustment CSV instrumentation: %s", csvFile.c_str());
+	return DMapArtifactUsageFromMaps(maps);
+}
+
+void WriteCPUViewCandidateArtifacts(
+	const Scene& scene,
+	IIndex idxImage,
+	const Scene::NeighborViewSelectionObservation& observation)
+{
+	const Image& reference(scene.images[idxImage]);
+	const String frameDir(DMapInstrumentFrameDir(reference));
+	const bool precomputed(
+		observation.source == Scene::NeighborViewSelectionObservation::SOURCE_PRECOMPUTED_SCENE_NEIGHBORS);
+	nlohmann::json candidates(nlohmann::json::array());
+	unsigned rankedCount(0), retainedCount(0), rejectedInitialCount(0), rejectedFilterCount(0);
+	for (const Scene::NeighborViewCandidateObservation& candidate: observation.candidates) {
+		const bool candidateKnown(candidate.ID < scene.images.size());
+		const Image* candidateImage(candidateKnown ? &scene.images[candidate.ID] : NULL);
+		nlohmann::json scoreComponents;
+		scoreComponents["available"] = candidate.scoreComponentsAvailable;
+		scoreComponents["quality"] = candidate.scoreComponentsAvailable ? "exact_aggregate" : "unavailable";
+		scoreComponents["angle_weight_sum"] = candidate.scoreComponentsAvailable ? nlohmann::json(candidate.angleWeightSum) : nlohmann::json(nullptr);
+		scoreComponents["clipped_angle_weight_sum"] = candidate.scoreComponentsAvailable ? nlohmann::json(candidate.clippedAngleWeightSum) : nlohmann::json(nullptr);
+		scoreComponents["scale_weight_sum"] = candidate.scoreComponentsAvailable ? nlohmann::json(candidate.scaleWeightSum) : nlohmann::json(nullptr);
+		scoreComponents["roi_weight_sum"] = candidate.scoreComponentsAvailable ? nlohmann::json(candidate.roiWeightSum) : nlohmann::json(nullptr);
+		scoreComponents["score_before_area"] = candidate.scoreComponentsAvailable ? nlohmann::json(candidate.scoreBeforeArea) : nlohmann::json(nullptr);
+		scoreComponents["unavailable_reason"] = candidate.scoreComponentsAvailable ? nlohmann::json(nullptr) :
+			nlohmann::json(precomputed ? "precomputed ViewScore stores only the aggregate final score" : "candidate received no valid sparse-point contribution");
+
+		nlohmann::json row = {
+			{"candidate_scene_image_index", candidate.ID},
+			{"candidate_image_id", candidateImage ? nlohmann::json(candidateImage->ID) : nlohmann::json(nullptr)},
+			{"candidate_image_name", candidateImage ? nlohmann::json(candidateImage->name.c_str()) : nlohmann::json(nullptr)},
+			{"image_valid", candidate.imageValid},
+			{"initial_decision", InitialViewDecisionName(candidate.initialDecision)},
+			{"shared_points", candidate.sharedPoints},
+			{"projected_points", precomputed ? nlohmann::json(nullptr) : nlohmann::json(candidate.projectedPoints)},
+			{"average_scale", candidate.avgScale},
+			{"average_angle_radians", candidate.avgAngle},
+			{"covered_area_ratio", candidate.area},
+			{"area_factor", candidate.areaFactor},
+			{"ranking_score", candidate.score},
+			{"score_components", scoreComponents},
+			{"raw_rank_zero_based", candidate.rawRank >= 0 ? nlohmann::json(candidate.rawRank) : nlohmann::json(nullptr)},
+			{"filter_input_rank_zero_based", candidate.filterInputRank >= 0 ? nlohmann::json(candidate.filterInputRank) : nlohmann::json(nullptr)},
+			{"filter_decision", FilterViewDecisionName(candidate.filterDecision)},
+			{"filter_threshold_reasons", ViewThresholdReasons(candidate)},
+			{"final_rank_zero_based", candidate.finalRank >= 0 ? nlohmann::json(candidate.finalRank) : nlohmann::json(nullptr)},
+			{"accepted_after_filter", candidate.finalRank >= 0},
+		};
+		candidates.push_back(std::move(row));
+		if (candidate.rawRank >= 0)
+			++rankedCount;
+		if (candidate.finalRank >= 0)
+			++retainedCount;
+		if (candidate.initialDecision == Scene::NeighborViewCandidateObservation::INITIAL_INVALID_IMAGE ||
+			candidate.initialDecision == Scene::NeighborViewCandidateObservation::INITIAL_INSUFFICIENT_SHARED_POINTS ||
+			candidate.initialDecision == Scene::NeighborViewCandidateObservation::INITIAL_NO_PROJECTED_POINTS)
+			++rejectedInitialCount;
+		if (candidate.filterDecision == Scene::NeighborViewCandidateObservation::FILTER_REJECTED_THRESHOLD ||
+			candidate.filterDecision == Scene::NeighborViewCandidateObservation::FILTER_REJECTED_MAX_VIEW_TRUNCATION)
+			++rejectedFilterCount;
+	}
+	nlohmann::json artifact = {
+		{"schema_name", "openmvs.dmap.cpu_view_candidates"},
+		{"schema_version", 1},
+		{"algorithm_stage", "depth_map_neighbor_view_ranking"},
+		{"estimation_stage", "photometric"},
+		{"geometric_iteration", nullptr},
+		{"scope", "depth-map estimation view selection only"},
+		{"reference_scene_image_index", idxImage},
+		{"reference_image_id", reference.ID},
+		{"reference_image_name", reference.name.c_str()},
+		{"candidate_source", precomputed ? "precomputed_scene_neighbors" : "computed_sparse_visibility"},
+		{"ranking_succeeded", observation.rankingSucceeded},
+		{"filter_succeeded", observation.filterSucceeded},
+		{"parameters", {
+			{"requested_min_views", observation.requiredMinViews},
+			{"effective_min_views", observation.effectiveMinViews},
+			{"requested_min_point_views", observation.requiredMinPointViews},
+			{"effective_min_point_views", observation.effectiveMinPointViews},
+			{"optimal_angle_radians", observation.optimalAngle},
+			{"point_inside_roi_weight", observation.roiWeight},
+			{"filter_min_area", observation.filterMinArea},
+			{"filter_min_scale", observation.filterMinScale},
+			{"filter_max_scale_exclusive", observation.filterMaxScale},
+			{"filter_min_angle_radians", observation.filterMinAngle},
+			{"filter_max_angle_radians_exclusive", observation.filterMaxAngle},
+			{"filter_max_views", observation.filterMaximumViews},
+			{"filter_minimum_retained_guard", observation.filterMinimumRetained},
+		}},
+		{"score_model", {
+			{"higher_is_better", true},
+			{"ranking_score", "sum(max(angle_weight,0.1)*scale_weight*roi_weight)*max(covered_area,0.01)"},
+			{"angle_weight", "exp((angle-optimal_angle)^2*sigma), with asymmetric sigma around the optimum"},
+			{"scale_weight", "piecewise footprint-ratio weight capped at one"},
+			{"reliability_weight", nullptr},
+			{"reliability_weight_status", "unavailable_at_cpu_ranking_stage; exact per-pixel reliability is evaluated inside PatchMatch"},
+		}},
+		{"counts", {
+			{"candidate_records", observation.candidates.size()},
+			{"eligible_reference_points", observation.eligibleReferencePoints},
+			{"scored_reference_points", observation.scoredReferencePoints},
+			{"ranked_candidates", rankedCount},
+			{"filter_input_candidates", observation.filterInputCount},
+			{"retained_candidates", retainedCount},
+			{"initially_rejected_candidates", rejectedInitialCount},
+			{"filter_rejected_candidates", rejectedFilterCount},
+		}},
+		{"unavailable_signals", nlohmann::json::array({"per_pixel_patchmatch_reliability_weight"})},
+		{"candidates", candidates},
+	};
+	if (precomputed) {
+		artifact["unavailable_signals"].push_back("sparse_score_component_sums");
+		artifact["unavailable_signals"].push_back("projected_shared_point_count");
+		artifact["unavailable_signals"].push_back("candidates_rejected_before_the_persisted_neighbor_list");
+	}
+	const String jsonFile(frameDir + _T("cpu_view_candidates.json"));
+	if (!WriteDMapJson(jsonFile, artifact))
+		VERBOSE("warning: failed to write CPU view-candidate instrumentation: %s", jsonFile.c_str());
+
+	std::ostringstream csv;
+	csv << std::setprecision(9);
+	csv << "estimation_stage,geometric_iteration,reference_scene_image_index,reference_image_id,"
+		"candidate_scene_image_index,candidate_image_id,candidate_image_name,"
+		"initial_decision,image_valid,shared_points,projected_points,score_components_available,angle_weight_sum,"
+		"clipped_angle_weight_sum,scale_weight_sum,roi_weight_sum,score_before_area,average_scale,average_angle_radians,"
+		"covered_area_ratio,area_factor,ranking_score,raw_rank_zero_based,filter_input_rank_zero_based,filter_decision,"
+		"filter_threshold_reasons,final_rank_zero_based,accepted_after_filter\n";
+	for (const Scene::NeighborViewCandidateObservation& candidate: observation.candidates) {
+		const Image* candidateImage(candidate.ID < scene.images.size() ? &scene.images[candidate.ID] : NULL);
+		const nlohmann::json thresholdReasons(ViewThresholdReasons(candidate));
+		csv << "photometric,," << idxImage << ',' << reference.ID << ',' << candidate.ID << ',';
+		if (candidateImage)
+			csv << candidateImage->ID;
+		csv << ',' << DMapCsvEscape(candidateImage ? candidateImage->name : String()).c_str() << ','
+			<< InitialViewDecisionName(candidate.initialDecision) << ',' << (candidate.imageValid ? 1 : 0) << ','
+			<< candidate.sharedPoints << ',';
+		if (!precomputed)
+			csv << candidate.projectedPoints;
+		csv << ',' << (candidate.scoreComponentsAvailable ? 1 : 0) << ',';
+		if (candidate.scoreComponentsAvailable)
+			csv << candidate.angleWeightSum << ',' << candidate.clippedAngleWeightSum << ',' << candidate.scaleWeightSum << ','
+				<< candidate.roiWeightSum << ',' << candidate.scoreBeforeArea;
+		else
+			csv << ",,,,";
+		csv << ',' << candidate.avgScale << ',' << candidate.avgAngle << ',' << candidate.area << ',' << candidate.areaFactor << ','
+			<< candidate.score << ',';
+		if (candidate.rawRank >= 0)
+			csv << candidate.rawRank;
+		csv << ',';
+		if (candidate.filterInputRank >= 0)
+			csv << candidate.filterInputRank;
+		csv << ',' << FilterViewDecisionName(candidate.filterDecision) << ','
+			<< DMapCsvEscape(thresholdReasons.dump().c_str()).c_str() << ',';
+		if (candidate.finalRank >= 0)
+			csv << candidate.finalRank;
+		csv << ',' << (candidate.finalRank >= 0 ? 1 : 0) << '\n';
+	}
+	const String csvFile(frameDir + _T("cpu_view_candidates.csv"));
+	if (!WriteDMapText(csvFile, csv.str()))
+		VERBOSE("warning: failed to write CPU view-candidate CSV instrumentation: %s", csvFile.c_str());
+}
+
+void WriteCPUViewEstimationSelectionArtifacts(
+	const Scene& scene,
+	IIndex idxImage,
+	const DepthData& depthData,
+	IIndex explicitNeighbor,
+	IIndex requestedNumNeighbors,
+	bool loadImages,
+	int loadDepthMaps,
+	IIndex stopIndex,
+	CPUViewSelectionStopReason stopReason,
+	float configuredEffectiveMinScore,
+	bool selectionSucceeded,
+	const std::unordered_set<IIndex>* missingDepthViews,
+	int geometricIteration)
+{
+	const Image& reference(scene.images[idxImage]);
+	const bool geometricStage(geometricIteration >= 0);
+	const char* estimationStage(geometricStage ? "geometric_consistency" : "photometric");
+	const String frameDir(DMapInstrumentFrameDir(reference, geometricIteration));
+	const String candidateContractRootRelative(
+		_T("depthmaps/") + DMapInstrumentFrameName(reference) + _T("/cpu_view_candidates.json"));
+	const String candidateContractArtifactRelative(geometricStage ?
+		_T("../../../../") + candidateContractRootRelative : _T("cpu_view_candidates.json"));
+	std::unordered_map<IIndex, int> selectedRanks;
+	for (IIndex rank=1; rank<depthData.images.size(); ++rank)
+		selectedRanks.emplace(depthData.images[rank].GetLocalID(scene.images), int(rank-1));
+	const float bestScore(depthData.neighbors.empty() ? 0.f : depthData.neighbors.front().score);
+	const bool rankedPrefixMode(explicitNeighbor == NO_ID);
+	const char* admissionPolicyName(rankedPrefixMode ? "ranked_prefix_with_score_cutoff" : "explicit_neighbor");
+	const char* configuredThresholdStatus(rankedPrefixMode ?
+		"applied_to_patchmatch" : "not_applicable_explicit_neighbor");
+	const auto selectionDecision = [&](IIndex rank, IIndex candidateID, bool isSelected) -> const char* {
+		if (isSelected)
+			return "selected";
+		if (missingDepthViews && missingDepthViews->find(candidateID) != missingDepthViews->end())
+			return "rejected_missing_depth_map";
+		if (explicitNeighbor != NO_ID)
+			return "rejected_not_explicit_neighbor";
+		if (stopReason == CPU_VIEW_STOP_NUM_NEIGHBORS && rank == stopIndex)
+			return "rejected_requested_neighbor_limit";
+		if (stopReason == CPU_VIEW_STOP_NUM_NEIGHBORS && rank > stopIndex)
+			return "rejected_after_ordered_cutoff";
+		if (stopReason == CPU_VIEW_STOP_SCORE_THRESHOLD && rank >= stopIndex)
+			return "rejected_score_threshold";
+		return "rejected_unavailable_reason";
+	};
+	nlohmann::json candidates(nlohmann::json::array());
+	FOREACH(rank, depthData.neighbors) {
+		const ViewScore& candidate(depthData.neighbors[rank]);
+		const auto selected(selectedRanks.find(candidate.ID));
+		const bool isSelected(selected != selectedRanks.end());
+		const char* decision(selectionDecision(rank, candidate.ID, isSelected));
+		const nlohmann::json wouldPassConfiguredThreshold(rankedPrefixMode ?
+			nlohmann::json(candidate.score >= configuredEffectiveMinScore) : nlohmann::json(nullptr));
+		const Image* candidateImage(candidate.ID < scene.images.size() ? &scene.images[candidate.ID] : NULL);
+		candidates.push_back({
+			{"candidate_scene_image_index", candidate.ID},
+			{"candidate_image_id", candidateImage ? nlohmann::json(candidateImage->ID) : nlohmann::json(nullptr)},
+			{"candidate_image_name", candidateImage ? nlohmann::json(candidateImage->name.c_str()) : nlohmann::json(nullptr)},
+			{"filtered_rank_zero_based", rank},
+			{"ranking_score", candidate.score},
+			{"score_ratio_to_best", bestScore > 0 ? nlohmann::json(candidate.score/bestScore) : nlohmann::json(nullptr)},
+			{"selected", isSelected},
+			{"selected_rank_zero_based", isSelected ? nlohmann::json(selected->second) : nlohmann::json(nullptr)},
+			{"would_pass_configured_score_threshold", wouldPassConfiguredThreshold},
+			{"decision", decision},
+		});
+	}
+	nlohmann::json artifact = {
+		{"schema_name", "openmvs.dmap.cpu_view_estimation_selection"},
+		{"schema_version", 2},
+		{"algorithm_stage", "depth_map_estimation_source_view_selection"},
+		{"estimation_stage", estimationStage},
+		{"geometric_iteration", geometricStage ? nlohmann::json(geometricIteration) : nlohmann::json(nullptr)},
+		{"scope", "depth-map estimation view selection only"},
+		{"reference_scene_image_index", idxImage},
+		{"reference_image_id", reference.ID},
+		{"reference_image_name", reference.name.c_str()},
+		{"candidate_contract", candidateContractArtifactRelative.c_str()},
+		{"candidate_contract_path_base", "artifact_directory"},
+		{"candidate_contract_instrumentation_root_relative", candidateContractRootRelative.c_str()},
+		{"candidate_contract_estimation_stage", "photometric"},
+		{"selection_succeeded", selectionSucceeded},
+		{"selection_mode", rankedPrefixMode ? "ranked_prefix" : "explicit_neighbor"},
+		{"admission_policy", {
+			{"name", admissionPolicyName},
+			{"policy_origin", "openmvs_depth_map_estimation"},
+			{"score_threshold_applied", rankedPrefixMode},
+			{"configured_score_threshold_status", configuredThresholdStatus},
+		}},
+		{"parameters", {
+			{"explicit_neighbor_rank", explicitNeighbor == NO_ID ? nlohmann::json(nullptr) : nlohmann::json(explicitNeighbor)},
+			{"requested_num_neighbors", requestedNumNeighbors},
+			{"view_min_score_absolute", OPTDENSE::fViewMinScore},
+			{"view_min_score_ratio", OPTDENSE::fViewMinScoreRatio},
+			{"best_ranking_score", bestScore},
+			{"effective_min_score", rankedPrefixMode ?
+				nlohmann::json(configuredEffectiveMinScore) : nlohmann::json(nullptr)},
+			{"configured_effective_min_score", rankedPrefixMode ?
+				nlohmann::json(configuredEffectiveMinScore) : nlohmann::json(nullptr)},
+			{"load_images", loadImages},
+			{"load_depth_maps_mode", loadDepthMaps},
+		}},
+		{"ordered_cutoff", {
+			{"trigger_rank_zero_based", stopIndex < depthData.neighbors.size() ? nlohmann::json(stopIndex) : nlohmann::json(nullptr)},
+			{"reason", CPUViewStopReasonName(stopReason)},
+		}},
+		{"selected_count", selectedRanks.size()},
+		{"missing_depth_map_count", missingDepthViews ? missingDepthViews->size() : 0},
+		{"candidates", candidates},
+	};
+	const String jsonFile(frameDir + _T("cpu_view_estimation_selection.json"));
+	if (!WriteDMapJson(jsonFile, artifact))
+		VERBOSE("warning: failed to write CPU estimation-view instrumentation: %s", jsonFile.c_str());
+
+	std::ostringstream csv;
+	csv << std::setprecision(9);
+	csv << "estimation_stage,geometric_iteration,candidate_contract_instrumentation_root_relative,"
+		"admission_policy,score_threshold_applied,configured_effective_min_score,"
+		"reference_scene_image_index,reference_image_id,candidate_scene_image_index,candidate_image_id,candidate_image_name,"
+		"filtered_rank_zero_based,ranking_score,score_ratio_to_best,selected,selected_rank_zero_based,"
+		"would_pass_configured_score_threshold,decision\n";
+	FOREACH(rank, depthData.neighbors) {
+		const ViewScore& candidate(depthData.neighbors[rank]);
+		const Image* candidateImage(candidate.ID < scene.images.size() ? &scene.images[candidate.ID] : NULL);
+		const auto selected(selectedRanks.find(candidate.ID));
+		const bool isSelected(selected != selectedRanks.end());
+		const char* decision(selectionDecision(rank, candidate.ID, isSelected));
+		csv << estimationStage << ',';
+		if (geometricStage)
+			csv << geometricIteration;
+		csv << ',' << candidateContractRootRelative.c_str()
+			<< ',' << admissionPolicyName << ',' << (rankedPrefixMode ? 1 : 0) << ',';
+		if (rankedPrefixMode)
+			csv << configuredEffectiveMinScore;
+		csv << ',' << idxImage << ',' << reference.ID << ',' << candidate.ID << ',';
+		if (candidateImage)
+			csv << candidateImage->ID;
+		csv << ',' << DMapCsvEscape(candidateImage ? candidateImage->name : String()).c_str() << ',' << rank << ',' << candidate.score << ',';
+		if (bestScore > 0)
+			csv << candidate.score/bestScore;
+		csv << ',' << (isSelected ? 1 : 0) << ',';
+		if (isSelected)
+			csv << selected->second;
+		csv << ',';
+		if (rankedPrefixMode)
+			csv << (candidate.score >= configuredEffectiveMinScore ? 1 : 0);
+		csv << ',' << decision << '\n';
+	}
+	const String csvFile(frameDir + _T("cpu_view_estimation_selection.csv"));
+	if (!WriteDMapText(csvFile, csv.str()))
+		VERBOSE("warning: failed to write CPU estimation-view CSV instrumentation: %s", csvFile.c_str());
+}
+
+} // anonymous namespace
+#endif
 
 // Dense3D data.events
 enum EVENT_TYPE {
@@ -259,9 +2235,32 @@ bool DepthMapsData::SelectViews(DepthData& depthData)
 	// find and sort valid neighbor views
 	const IIndex idxImage((IIndex)(&depthData-arrDepthData.Begin()));
 	ASSERT(depthData.neighbors.IsEmpty());
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	const bool observeViewSelection(DMapInstrumentImageEnabled(scene.images[idxImage]));
+	std::unique_ptr<Scene::NeighborViewSelectionObservation> observation;
+	if (observeViewSelection)
+		observation = std::make_unique<Scene::NeighborViewSelectionObservation>();
+	if (scene.images[idxImage].neighbors.empty()) {
+		const bool selected(observation ?
+			scene.SelectNeighborViews(idxImage, depthData.points, OPTDENSE::nMinViews,
+				OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2,
+				D2R(OPTDENSE::fOptimAngle), OPTDENSE::fWeightPointInsideROI, observation.get()) :
+			scene.SelectNeighborViews(idxImage, depthData.points, OPTDENSE::nMinViews,
+				OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2,
+				D2R(OPTDENSE::fOptimAngle), OPTDENSE::fWeightPointInsideROI));
+		if (!selected) {
+			if (observation)
+				WriteCPUViewCandidateArtifacts(scene, idxImage, *observation);
+			return false;
+		}
+	} else if (observation) {
+		InitPrecomputedViewObservation(scene, idxImage, *observation);
+	}
+#else
 	if (scene.images[idxImage].neighbors.empty() &&
 		!scene.SelectNeighborViews(idxImage, depthData.points, OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, D2R(OPTDENSE::fOptimAngle), OPTDENSE::fWeightPointInsideROI))
 		return false;
+#endif
 	depthData.neighbors.CopyOf(scene.images[idxImage].neighbors);
 
 	// remove invalid neighbor views
@@ -270,7 +2269,16 @@ bool DepthMapsData::SelectViews(DepthData& depthData)
 	const float fMinAngle(D2R(OPTDENSE::fMinAngle));
 	const float fMaxAngle(D2R(OPTDENSE::fMaxAngle));
 	const unsigned nMaxViews(MAXF(OPTDENSE::nMaxViews, OPTDENSE::nNumViews));
+#ifdef _USE_DMAP_INSTRUMENTATION
+	const bool filtered(observation ?
+		Scene::FilterNeighborViews(depthData.neighbors, fMinArea, fMinScale, fMaxScale, fMinAngle, fMaxAngle, nMaxViews, observation.get()) :
+		Scene::FilterNeighborViews(depthData.neighbors, fMinArea, fMinScale, fMaxScale, fMinAngle, fMaxAngle, nMaxViews));
+	if (observation)
+		WriteCPUViewCandidateArtifacts(scene, idxImage, *observation);
+	if (!filtered) {
+#else
 	if (!Scene::FilterNeighborViews(depthData.neighbors, fMinArea, fMinScale, fMaxScale, fMinAngle, fMaxAngle, nMaxViews)) {
+#endif
 		DEBUG_EXTRA("error: reference image %3u has no good images in view", idxImage);
 		return false;
 	}
@@ -301,11 +2309,28 @@ bool DepthMapsData::FetchViewImage(DepthData::ViewData& view)
 // if loadDepthMaps is 1, the depth-maps are loaded from disk,
 // if 0, the reference depth-map is initialized from sparse point-cloud,
 // and if -1, the depth-maps are not initialized
+#ifdef _USE_DMAP_INSTRUMENTATION
+// nGeometricIter identifies the geometric-consistency stage (-1 - photometric)
+#endif
 // returns false if there are no good neighbors to estimate the depth-map
+#ifdef _USE_DMAP_INSTRUMENTATION
+bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex numNeighbors, bool loadImages, int loadDepthMaps, int nGeometricIter)
+#else
 bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex numNeighbors, bool loadImages, int loadDepthMaps)
+#endif
 {
 	const IIndex idxImage((IIndex)(&depthData-arrDepthData.Begin()));
 	ASSERT(!depthData.neighbors.IsEmpty());
+#ifdef _USE_DMAP_INSTRUMENTATION
+	const bool observeViewSelection(DMapInstrumentImageEnabled(scene.images[idxImage]));
+	IIndex selectionStopIndex(depthData.neighbors.size());
+	CPUViewSelectionStopReason selectionStopReason(
+		idxNeighbor == NO_ID ? CPU_VIEW_STOP_NONE : CPU_VIEW_STOP_EXPLICIT_PAIR);
+	float configuredEffectiveMinScore(0);
+	std::unique_ptr<std::unordered_set<IIndex>> missingDepthViews;
+	if (observeViewSelection && loadDepthMaps > 0)
+		missingDepthViews = std::make_unique<std::unordered_set<IIndex>>();
+#endif
 
 	// set this image the first image in the array
 	depthData.images.Empty();
@@ -334,10 +2359,30 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 	} else {
 		// initialize all neighbor views too (global reconstruction is used)
 		const float fMinScore(MAXF(depthData.neighbors.First().score*OPTDENSE::fViewMinScoreRatio, OPTDENSE::fViewMinScore));
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if (observeViewSelection)
+			configuredEffectiveMinScore = fMinScore;
+		#endif
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		FOREACH(idxView, depthData.neighbors) {
+			const ViewScore& neighbor(depthData.neighbors[idxView]);
+			if ((numNeighbors && depthData.images.GetSize() > numNeighbors) ||
+				neighbor.score < fMinScore)
+			{
+				if (observeViewSelection) {
+					selectionStopIndex = idxView;
+					selectionStopReason =
+						(numNeighbors && depthData.images.GetSize() > numNeighbors) ?
+						CPU_VIEW_STOP_NUM_NEIGHBORS : CPU_VIEW_STOP_SCORE_THRESHOLD;
+				}
+				break;
+			}
+		#else
 		for (const ViewScore& neighbor: depthData.neighbors) {
 			if ((numNeighbors && depthData.images.GetSize() > numNeighbors) ||
 				(neighbor.score < fMinScore))
 				break;
+		#endif
 			DepthData::ViewData& viewTrg = depthData.images.AddEmpty();
 			viewTrg.pImageData = &scene.images[neighbor.ID];
 			viewTrg.scale = neighbor.scale;
@@ -370,6 +2415,11 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 		#endif
 	}
 	if (depthData.images.size() < 2) {
+#ifdef _USE_DMAP_INSTRUMENTATION
+		if (observeViewSelection)
+			WriteCPUViewEstimationSelectionArtifacts(scene, idxImage, depthData, idxNeighbor, numNeighbors,
+			loadImages, loadDepthMaps, selectionStopIndex, selectionStopReason, configuredEffectiveMinScore, false, missingDepthViews.get(), nGeometricIter);
+#endif
 		depthData.images.Release();
 		return false;
 	}
@@ -408,6 +2458,10 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 				// some views may have failed depth estimation, so their depth-map is missing
 				VERBOSE("warning: skipping neighbor view %u (%s): cannot load depth-map '%s'",
 					view.GetID(), Util::getFileNameExt(view.pImageData->name).c_str(), ComposeDepthFilePath(view.GetID(), "dmap").c_str());
+				#ifdef _USE_DMAP_INSTRUMENTATION
+					if (missingDepthViews)
+						missingDepthViews->insert(view.GetLocalID(scene.images));
+				#endif
 				view.depthMap.release();
 				depthData.images.RemoveAtMove(i);
 				continue;
@@ -418,9 +2472,19 @@ bool DepthMapsData::InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex n
 		++i;
 	}
 	if (depthData.images.size() < 2) {
+#ifdef _USE_DMAP_INSTRUMENTATION
+		if (observeViewSelection)
+			WriteCPUViewEstimationSelectionArtifacts(scene, idxImage, depthData, idxNeighbor, numNeighbors,
+			loadImages, loadDepthMaps, selectionStopIndex, selectionStopReason, configuredEffectiveMinScore, false, missingDepthViews.get(), nGeometricIter);
+#endif
 		depthData.images.Release();
 		return false;
  	}
+#ifdef _USE_DMAP_INSTRUMENTATION
+	if (observeViewSelection)
+		WriteCPUViewEstimationSelectionArtifacts(scene, idxImage, depthData, idxNeighbor, numNeighbors,
+		loadImages, loadDepthMaps, selectionStopIndex, selectionStopReason, configuredEffectiveMinScore, true, missingDepthViews.get(), nGeometricIter);
+#endif
 
 	// initialize depth-map and normal-map for the reference image
 	if (loadDepthMaps > 0) {
@@ -658,7 +2722,11 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 			s_slot = (int)(Thread::safeInc(pmCUDANextIdx) % (Thread::safe_t)pmCUDAPool.size());
 			s_epoch = pmCUDAEpoch;
 		}
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		pmCUDAPool[s_slot]->EstimateDepthMap(arrDepthData[idxImage], nGeometricIter);
+		#else
 		pmCUDAPool[s_slot]->EstimateDepthMap(arrDepthData[idxImage]);
+		#endif
 		return true;
 	}
 	#endif // _USE_CUDA
@@ -2659,7 +4727,49 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 	// the depth-map caches of the filtering and the fusion that follow
 	data.depthMaps.imageCache.Reset(0);
 
+#ifdef _USE_DMAP_INSTRUMENTATION
+	const int finalGeometricIteration(DMapFinalActiveGeometricIteration(data));
+	const bool confidenceAdjustmentEnabled(
+		(OPTDENSE::nOptimize & (OPTDENSE::ADJUST_CONFIDENCE | OPTDENSE::ADJUST_CONFIDENCE_FAST)) != 0);
+	if (!OPTDENSE::strDMapInstrumentationDir.empty() &&
+		(OPTDENSE::nOptimize & OPTDENSE::OPTIMIZE) == 0)
+	{
+		for (IIndex idxImage: data.images) {
+			if (!DMapInstrumentImageEnabled(images[idxImage]))
+				continue;
+			DMapFilterResourcePlan resourcePlan;
+			DMapFilterStorageLease storageLease;
+			const bool summaryAvailable(PrepareDMapFilterInstrumentation(*this, idxImage,
+				finalGeometricIteration, DMapFilterPixelCount(images[idxImage]), "postprocess_filters",
+				resourcePlan, storageLease));
+			WriteUnavailableDMapPostprocessArtifacts(*this, idxImage, finalGeometricIteration,
+				summaryAvailable ? "final depth-map state was not resident (for example, a cached DMAP was reused)" :
+				resourcePlan.reason.c_str(), resourcePlan);
+			FinishDMapFilterInstrumentation(*this, idxImage, finalGeometricIteration,
+				resourcePlan, storageLease, DMapArtifactUsage());
+		}
+	}
+	if (!confidenceAdjustmentEnabled && !OPTDENSE::strDMapInstrumentationDir.empty()) {
+		for (IIndex idxImage: data.images) {
+			if (!DMapInstrumentImageEnabled(images[idxImage]))
+				continue;
+			DMapFilterResourcePlan resourcePlan;
+			DMapFilterStorageLease storageLease;
+			const bool summaryAvailable(PrepareDMapFilterInstrumentation(*this, idxImage,
+				finalGeometricIteration, DMapFilterPixelCount(images[idxImage]), "confidence_adjustment",
+				resourcePlan, storageLease));
+			const DMapArtifactUsage usage(WriteDMapConfidenceAdjustmentArtifacts(*this, idxImage,
+				finalGeometricIteration, NULL, NULL, NULL, NULL, NULL, NULL, resourcePlan,
+				summaryAvailable ? "disabled" : "resource_unavailable",
+				summaryAvailable ? NULL : resourcePlan.reason.c_str()));
+			FinishDMapFilterInstrumentation(*this, idxImage, finalGeometricIteration,
+				resourcePlan, storageLease, usage);
+		}
+	}
+	if (confidenceAdjustmentEnabled) {
+#else
 	if ((OPTDENSE::nOptimize & (OPTDENSE::ADJUST_CONFIDENCE | OPTDENSE::ADJUST_CONFIDENCE_FAST)) != 0) {
+#endif
 		// initialize the queue of depth-maps to be filtered
 		data.sem.Clear();
 		data.idxImage = data.images.GetSize();
@@ -2749,7 +4859,11 @@ void Scene::DenseReconstructionEstimate(void* pData)
 			const bool depthmapComputed(data.nFusionMode < 0 || (data.nFusionMode >= 0 && data.nEstimationGeometricIter < 0 && isCachedDmapUsable(idx)));
 			// initialize images pair: reference image and the best neighbor view
 			ASSERT(data.neighborsMap.IsEmpty() || data.neighborsMap[evtImage.idxImage] != NO_ID);
+			#ifdef _USE_DMAP_INSTRUMENTATION
+			if (!data.depthMaps.InitViews(depthData, data.neighborsMap.IsEmpty()?NO_ID:data.neighborsMap[evtImage.idxImage], OPTDENSE::nNumViews, !depthmapComputed, depthmapComputed ? -1 : (data.nEstimationGeometricIter >= 0 ? 1 : 0), data.nEstimationGeometricIter)) {
+			#else
 			if (!data.depthMaps.InitViews(depthData, data.neighborsMap.IsEmpty()?NO_ID:data.neighborsMap[evtImage.idxImage], OPTDENSE::nNumViews, !depthmapComputed, depthmapComputed ? -1 : (data.nEstimationGeometricIter >= 0 ? 1 : 0))) {
+			#endif
 				// process next image
 				data.events.AddEvent(new EVTProcessImage((IIndex)Thread::safeInc(data.idxImage)));
 				break;
@@ -2809,12 +4923,85 @@ void Scene::DenseReconstructionEstimate(void* pData)
 			const EVTOptimizeDepthMap& evtImage = *((EVTOptimizeDepthMap*)(Event*)evt);
 			const IIndex idx = data.images[evtImage.idxImage];
 			DepthData& depthData(data.depthMaps.arrDepthData[idx]);
+#ifdef _USE_DMAP_INSTRUMENTATION
+			// Record every logical stage so disabled intermediate filters remain
+			// explicit and the final filter transition is isolated unambiguously.
+			const bool observePostprocess(DMapInstrumentImageEnabled(images[idx]));
+			DMapFilterResourcePlan postprocessResourcePlan;
+			DMapFilterStorageLease postprocessStorageLease;
+			std::unique_ptr<DMapPostprocessObservation> postprocessObservation;
+			if (observePostprocess && PrepareDMapFilterInstrumentation(*this, idx, data.nEstimationGeometricIter, DMapFilterPixelCount(images[idx], &depthData.depthMap), "postprocess_filters", postprocessResourcePlan, postprocessStorageLease)) {
+				postprocessObservation = std::make_unique<DMapPostprocessObservation>(
+				    *this, idx, data.nEstimationGeometricIter, depthData, postprocessResourcePlan);
+			}
+#endif
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			// save depth map as image
 			if (VERBOSITY_LEVEL > 3)
 				ExportDepthMap(ComposeDepthFilePath(depthData.GetView().GetID(), "raw.png"), depthData.depthMap);
 			#endif
 			// apply filters
+#ifdef _USE_DMAP_INSTRUMENTATION
+			const bool removeSpecklesEnabled((OPTDENSE::nOptimize & OPTDENSE::REMOVE_SPECKLES) != 0);
+			DMapStateSnapshot beforeRemoveSpeckles;
+			if (postprocessObservation && removeSpecklesEnabled)
+				beforeRemoveSpeckles = CaptureDMapState(depthData);
+			bool removeSpecklesSuccess(false);
+			if (removeSpecklesEnabled) {
+				TD_TIMER_START();
+				removeSpecklesSuccess = data.depthMaps.RemoveSmallSegments(depthData);
+				if (removeSpecklesSuccess) {
+					DEBUG_ULTIMATE("Depth-map %3u filtered: remove small segments (%s)", depthData.GetView().GetID(), TD_TIMER_GET_FMT().c_str());
+				}
+			}
+			if (postprocessObservation) {
+				const DepthMap& depthBefore(removeSpecklesEnabled ? beforeRemoveSpeckles.depth : depthData.depthMap);
+				const NormalMap& normalBefore(removeSpecklesEnabled ? beforeRemoveSpeckles.normal : depthData.normalMap);
+				const ConfidenceMap& confidenceBefore(removeSpecklesEnabled ? beforeRemoveSpeckles.confidence : depthData.confMap);
+				postprocessObservation->Record(0, "remove_speckles", removeSpecklesEnabled, removeSpecklesEnabled,
+				                               removeSpecklesSuccess, {
+				                                                          {"speckle_size", OPTDENSE::nSpeckleSize},
+				                                                          {"depth_similarity_threshold", OPTDENSE::fDepthDiffThreshold * 0.7f},
+				                                                          {"connectivity", 4},
+				                                                      },
+				                               depthBefore, normalBefore, confidenceBefore, depthData.depthMap, depthData.normalMap, depthData.confMap);
+			}
+
+			const bool fillGapsEnabled((OPTDENSE::nOptimize & OPTDENSE::FILL_GAPS) != 0);
+			DMapStateSnapshot beforeFillGaps;
+			if (postprocessObservation && fillGapsEnabled)
+				beforeFillGaps = CaptureDMapState(depthData);
+			bool fillGapsSuccess(false);
+			if (fillGapsEnabled) {
+				TD_TIMER_START();
+				fillGapsSuccess = data.depthMaps.GapInterpolation(depthData);
+				if (fillGapsSuccess) {
+					DEBUG_ULTIMATE("Depth-map %3u filtered: gap interpolation (%s)", depthData.GetView().GetID(), TD_TIMER_GET_FMT().c_str());
+				}
+			}
+			if (postprocessObservation) {
+				const DepthMap& depthBefore(fillGapsEnabled ? beforeFillGaps.depth : depthData.depthMap);
+				const NormalMap& normalBefore(fillGapsEnabled ? beforeFillGaps.normal : depthData.normalMap);
+				const ConfidenceMap& confidenceBefore(fillGapsEnabled ? beforeFillGaps.confidence : depthData.confMap);
+				postprocessObservation->Record(1, "fill_gaps", fillGapsEnabled, fillGapsEnabled,
+				                               fillGapsSuccess, {
+				                                                    {"maximum_gap_pixels", OPTDENSE::nIpolGapSize},
+				                                                    {"depth_similarity_threshold", OPTDENSE::fDepthDiffThreshold * 2.5f},
+				                                                    {"passes", nlohmann::json::array({"rows", "columns"})},
+				                                                },
+				                               depthBefore, normalBefore, confidenceBefore, depthData.depthMap, depthData.normalMap, depthData.confMap);
+			}
+			if (observePostprocess) {
+				DMapArtifactUsage usage;
+				if (postprocessObservation)
+					usage = postprocessObservation->Write(depthData);
+				else
+					WriteUnavailableDMapPostprocessArtifacts(*this, idx, data.nEstimationGeometricIter,
+					                                         postprocessResourcePlan.reason.c_str(), postprocessResourcePlan);
+				FinishDMapFilterInstrumentation(*this, idx, data.nEstimationGeometricIter,
+				                                postprocessResourcePlan, postprocessStorageLease, usage);
+			}
+#else
 			if (OPTDENSE::nOptimize & (OPTDENSE::REMOVE_SPECKLES)) {
 				TD_TIMER_START();
 				if (data.depthMaps.RemoveSmallSegments(depthData)) {
@@ -2827,6 +5014,7 @@ void Scene::DenseReconstructionEstimate(void* pData)
 					DEBUG_ULTIMATE("Depth-map %3u filtered: gap interpolation (%s)", depthData.GetView().GetID(), TD_TIMER_GET_FMT().c_str());
 				}
 			}
+#endif
 			// save depth-map
 			data.events.AddEventFirst(new EVTSaveDepthMap(evtImage.idxImage));
 			break; }
@@ -2836,6 +5024,40 @@ void Scene::DenseReconstructionEstimate(void* pData)
 			const EVTSaveDepthMap& evtImage = *((EVTSaveDepthMap*)(Event*)evt);
 			const IIndex idx = data.images[evtImage.idxImage];
 			DepthData& depthData(data.depthMaps.arrDepthData[idx]);
+#ifdef _USE_DMAP_INSTRUMENTATION
+			if ((OPTDENSE::nOptimize & OPTDENSE::OPTIMIZE) == 0 &&
+				DMapInstrumentImageEnabled(images[idx]))
+			{
+				DMapFilterResourcePlan resourcePlan;
+				DMapFilterStorageLease storageLease;
+				DMapArtifactUsage usage;
+				if (PrepareDMapFilterInstrumentation(*this, idx, data.nEstimationGeometricIter,
+					DMapFilterPixelCount(images[idx], &depthData.depthMap), "postprocess_filters",
+					resourcePlan, storageLease))
+				{
+					DMapPostprocessObservation observation(*this, idx, data.nEstimationGeometricIter,
+						depthData, resourcePlan);
+					observation.Record(0, "remove_speckles", false, false, false, {
+						{"speckle_size", OPTDENSE::nSpeckleSize},
+						{"depth_similarity_threshold", OPTDENSE::fDepthDiffThreshold*0.7f},
+						{"connectivity", 4},
+					}, depthData.depthMap, depthData.normalMap, depthData.confMap,
+					depthData.depthMap, depthData.normalMap, depthData.confMap);
+					observation.Record(1, "fill_gaps", false, false, false, {
+						{"maximum_gap_pixels", OPTDENSE::nIpolGapSize},
+						{"depth_similarity_threshold", OPTDENSE::fDepthDiffThreshold*2.5f},
+						{"passes", nlohmann::json::array({"rows", "columns"})},
+					}, depthData.depthMap, depthData.normalMap, depthData.confMap,
+					depthData.depthMap, depthData.normalMap, depthData.confMap);
+					usage = observation.Write(depthData);
+				} else {
+					WriteUnavailableDMapPostprocessArtifacts(*this, idx, data.nEstimationGeometricIter,
+						resourcePlan.reason.c_str(), resourcePlan);
+				}
+				FinishDMapFilterInstrumentation(*this, idx, data.nEstimationGeometricIter,
+					resourcePlan, storageLease, usage);
+			}
+#endif
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			// save depth map as image
 			if (VERBOSITY_LEVEL > 2) {
@@ -2921,11 +5143,38 @@ void Scene::DenseReconstructionFilter(void* pData)
 					break;
 			}
 			// filter the depth-map for this image
+#ifdef _USE_DMAP_INSTRUMENTATION
+			const bool adjustFastEnabled((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE_FAST) != 0);
+			const bool adjustFullEnabled((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE) != 0);
+			const bool adjustFastSucceeded(adjustFastEnabled && data.depthMaps.AdjustConfidenceFast(depthData, idxNeighbors));
+			const bool adjustFullSucceeded(adjustFullEnabled && data.depthMaps.AdjustConfidence(depthData, idxNeighbors));
+			const bool observeConfidenceAdjustment(DMapInstrumentImageEnabled(images[idx]));
+			if (adjustFastSucceeded | adjustFullSucceeded) {
+				// load the filtered maps after all depth-maps were filtered
+				data.events.AddEvent(new EVTAdjustDepthMap(evtImage.idxImage));
+			} else if (observeConfidenceAdjustment) {
+				const int geometricIteration(DMapFinalActiveGeometricIteration(data));
+				DMapFilterResourcePlan resourcePlan;
+				DMapFilterStorageLease storageLease;
+				const bool summaryAvailable(PrepareDMapFilterInstrumentation(*this, idx, geometricIteration,
+				                                                             DMapFilterPixelCount(images[idx], &depthData.depthMap), "confidence_adjustment",
+				                                                             resourcePlan, storageLease));
+				const DMapArtifactUsage usage(WriteDMapConfidenceAdjustmentArtifacts(*this, idx,
+				                                                                     geometricIteration, summaryAvailable ? &idxNeighbors : NULL,
+				                                                                     summaryAvailable ? &depthData.depthMap : NULL,
+				                                                                     summaryAvailable ? &depthData.confMap : NULL, NULL, NULL, NULL, resourcePlan,
+				                                                                     summaryAvailable ? "failed" : "resource_unavailable",
+				                                                                     summaryAvailable ? "configured confidence-adjustment method did not produce a readable output" : resourcePlan.reason.c_str()));
+				FinishDMapFilterInstrumentation(*this, idx, geometricIteration,
+				                                resourcePlan, storageLease, usage);
+			}
+#else
 			if (((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE_FAST) != 0 && data.depthMaps.AdjustConfidenceFast(depthData, idxNeighbors)) |
 				((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE) != 0 && data.depthMaps.AdjustConfidence(depthData, idxNeighbors))) {
 				// load the filtered maps after all depth-maps were filtered
 				data.events.AddEvent(new EVTAdjustDepthMap(evtImage.idxImage));
 			}
+#endif
 			// unload referenced depth-maps
 			for (IIndex idxNeighbor: idxNeighbors) {
 				DepthData& depthDataPair = data.depthMaps.arrDepthData[idxNeighbor];
@@ -2943,15 +5192,71 @@ void Scene::DenseReconstructionFilter(void* pData)
 			data.sem.Wait();
 			// load filtered maps
 			ConfidenceMap confMapFast, confMap;
+#ifdef _USE_DMAP_INSTRUMENTATION
+			const bool referenceLoaded(
+			    depthData.IncRef(ComposeDepthFilePath(depthData.GetView().GetID(), "dmap")) != 0);
+			bool fastLoaded(false), fullLoaded(false);
+			if (referenceLoaded) {
+				fastLoaded = LoadConfidenceMap(ComposeDepthFilePath(depthData.GetView().GetID(), "adjusted.fast.cmap"), confMapFast);
+				fullLoaded = LoadConfidenceMap(ComposeDepthFilePath(depthData.GetView().GetID(), "adjusted.cmap"), confMap);
+			}
+			const bool observeConfidenceAdjustment(DMapInstrumentImageEnabled(images[idx]));
+			const int geometricIteration(DMapFinalActiveGeometricIteration(data));
+			DMapFilterResourcePlan confidenceResourcePlan;
+			DMapFilterStorageLease confidenceStorageLease;
+			bool confidenceSummaryAvailable(false);
+			IIndexArr observedNeighbors;
+			if (observeConfidenceAdjustment) {
+				confidenceSummaryAvailable = PrepareDMapFilterInstrumentation(*this, idx,
+				                                                              geometricIteration, DMapFilterPixelCount(images[idx], referenceLoaded ? &depthData.depthMap : NULL), "confidence_adjustment",
+				                                                              confidenceResourcePlan, confidenceStorageLease);
+				if (confidenceSummaryAvailable) {
+					observedNeighbors.Reserve(8);
+					for (const ViewScore& neighbor : depthData.neighbors) {
+						if (neighbor.ID >= data.depthMaps.arrDepthData.size() || !data.depthMaps.arrDepthData[neighbor.ID].IsValid())
+							continue;
+						observedNeighbors.push_back(neighbor.ID);
+						if (observedNeighbors.size() == 8)
+							break;
+					}
+				}
+			}
+			if (!referenceLoaded || !(fastLoaded | fullLoaded)) {
+				if (observeConfidenceAdjustment) {
+					const DMapArtifactUsage usage(WriteDMapConfidenceAdjustmentArtifacts(*this, idx,
+					                                                                     geometricIteration,
+					                                                                     confidenceSummaryAvailable ? &observedNeighbors : NULL,
+					                                                                     confidenceSummaryAvailable && referenceLoaded ? &depthData.depthMap : NULL,
+					                                                                     confidenceSummaryAvailable && referenceLoaded ? &depthData.confMap : NULL,
+					                                                                     confidenceSummaryAvailable && fastLoaded ? &confMapFast : NULL,
+					                                                                     confidenceSummaryAvailable && fullLoaded ? &confMap : NULL, NULL,
+					                                                                     confidenceResourcePlan,
+					                                                                     confidenceSummaryAvailable ? "failed" : "resource_unavailable",
+					                                                                     confidenceSummaryAvailable ? "failed to reload the reference DMAP or adjusted confidence output" : confidenceResourcePlan.reason.c_str()));
+					FinishDMapFilterInstrumentation(*this, idx, geometricIteration,
+					                                confidenceResourcePlan, confidenceStorageLease, usage);
+				}
+#else
 			if (depthData.IncRef(ComposeDepthFilePath(depthData.GetView().GetID(), "dmap")) == 0 ||
 				!(LoadConfidenceMap(ComposeDepthFilePath(depthData.GetView().GetID(), "adjusted.fast.cmap"), confMapFast) |
 				  LoadConfidenceMap(ComposeDepthFilePath(depthData.GetView().GetID(), "adjusted.cmap"), confMap)))
 			{
+#endif
 				// signal error and terminate
 				data.events.AddEventFirst(new EVTFail);
 				return;
 			}
 			ASSERT(depthData.GetRef() == 1);
+#ifdef _USE_DMAP_INSTRUMENTATION
+			ConfidenceMap confidenceInput, confidenceFastOutput, confidenceFullOutput;
+			if (confidenceSummaryAvailable) {
+				confidenceInput = depthData.confMap.clone();
+				if (!confMapFast.empty())
+					confidenceFastOutput = confMapFast.clone();
+				if (!confMap.empty())
+					confidenceFullOutput = confMap.clone();
+			}
+#endif
 			if (!confMapFast.empty())
 				File::deleteFile(ComposeDepthFilePath(depthData.GetView().GetID(), "adjusted.fast.cmap").c_str());
 			if (!confMap.empty())
@@ -2972,6 +5277,23 @@ void Scene::DenseReconstructionFilter(void* pData)
 				confMapFast.release();
 				confMap.release();
 			}
+#ifdef _USE_DMAP_INSTRUMENTATION
+			if (observeConfidenceAdjustment) {
+				const DMapArtifactUsage usage(WriteDMapConfidenceAdjustmentArtifacts(*this, idx,
+				                                                                     geometricIteration,
+				                                                                     confidenceSummaryAvailable ? &observedNeighbors : NULL,
+				                                                                     confidenceSummaryAvailable ? &depthData.depthMap : NULL,
+				                                                                     confidenceSummaryAvailable ? &confidenceInput : NULL,
+				                                                                     confidenceSummaryAvailable && !confidenceFastOutput.empty() ? &confidenceFastOutput : NULL,
+				                                                                     confidenceSummaryAvailable && !confidenceFullOutput.empty() ? &confidenceFullOutput : NULL,
+				                                                                     confidenceSummaryAvailable ? &depthData.confMap : NULL,
+				                                                                     confidenceResourcePlan,
+				                                                                     confidenceSummaryAvailable ? "completed" : "resource_unavailable",
+				                                                                     confidenceSummaryAvailable ? NULL : confidenceResourcePlan.reason.c_str()));
+				FinishDMapFilterInstrumentation(*this, idx, geometricIteration,
+				                                confidenceResourcePlan, confidenceStorageLease, usage);
+			}
+#endif
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			// save depth map as image
 			if (VERBOSITY_LEVEL > 2) {
