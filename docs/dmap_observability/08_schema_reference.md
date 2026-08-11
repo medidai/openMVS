@@ -14,6 +14,7 @@ the definitive field-level source for the current schema version.
 | run metadata | capture profile, build boundary, CLI, and completion identity | JSON |
 | selection ledger | deterministic frame selection and exclusion reasons | CSV/JSONL |
 | resource plan | requested/admitted buffers and device/host/storage bytes | JSONL |
+| reference patch layout | fixed observer reference-grid contract source-checked against CUDA scoring constants | nested run-metadata JSON |
 | frame summary | final state statistics, availability, and endpoint relationship | JSON |
 | pass timing | CUDA checkerboard phase timings | CSV |
 | logical iteration | initialization and complete-iteration metrics | CSV/Parquet |
@@ -26,6 +27,32 @@ the definitive field-level source for the current schema version.
 | report model | canonical structured comparison and UI input | JSON |
 | report inventory | semantic report artifacts grouped by mechanism | JSON |
 | report tree closure | exact final report path/hash/size/mode inventory | JSON |
+
+## Reference patch layout
+
+`openmvs.dmap.reference_patch_layout` schema v1 is nested under
+`cuda_patchmatch_parameters.reference_patch_layout` in both run metadata and
+frame summaries. It declares a `fixed_cartesian_grid` in
+`reference_pyramid_pixels`, the half-window, step, ordered integer offsets,
+sample count, texel-center offset, configured/effective texture address modes,
+coordinate normalization, filter mode, and capture-availability flags. The
+observer constants are source-checked against the constants consumed by the
+CUDA scoring loop.
+
+The report validates schema identity, kind, coordinate convention, configured
+wrap plus effective clamp mode, unnormalized coordinates, linear filtering,
+positive step, bounded half-window/cardinality, unique integral offsets, exact
+Cartesian ordering, and `sample_count == len(sample_offsets_pixels)`. CUDA
+switches wrap to clamp when coordinates are unnormalized. The report separately
+retains exact per-run, frame, stage, and pyramid `width`/`height` from
+resource-plan schema v4. Only that validated pair can produce the
+`derived_exact` reference-grid guide.
+
+Schema v1 explicitly reports that sample locations, values, and source-view
+footprints were not emitted by the kernel. The layout is exact configuration;
+the displayed positions are derived geometry; the report-owned RGB thumbnail is
+qualitative context. Missing, malformed, variable, or unsupported layouts are
+unavailable and never replaced by a hard-coded legacy grid.
 
 ## Input snapshot
 

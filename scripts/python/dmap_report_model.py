@@ -19,10 +19,14 @@ import numpy as np
 import pandas as pd
 
 try:
-    from dmap_observability import component_registry, integrity, region_metrics
+    from dmap_observability import (
+        component_registry, integrity, reference_patch_layout, region_metrics,
+    )
     import dmap_drilldown
 except ImportError:  # Imported as scripts.python.dmap_report_model in unit tests.
-    from scripts.python.dmap_observability import component_registry, integrity, region_metrics
+    from scripts.python.dmap_observability import (
+        component_registry, integrity, reference_patch_layout, region_metrics,
+    )
     from scripts.python import dmap_drilldown
 
 
@@ -118,7 +122,6 @@ LOW_TEXTURE_UPDATE_COUNTER_FIELDS = (
     "low_texture_required_gain_sum",
     "low_texture_best_proposed_gain_sum",
 )
-
 EVIDENCE_CONTEXT_SCHEMA_NAME = "openmvs.dmap.report_evidence_context"
 EVIDENCE_CONTEXT_SCHEMA_VERSION = 1
 EVIDENCE_CONTEXT_DIGEST_FIELD = "context_sha256"
@@ -414,14 +417,15 @@ INVESTIGATION_GUIDE = {
                 "Better photometric separation without increased boundary bleeding, depth noise, or annotation residuals.",
             ],
             "cautions": [
-                "The current report exposes patch variance and resulting scores, not every weighted sample or ZNCC numerator/denominator inside the patch.",
-                "A patch-size change also changes border evaluability; inspect coverage and out-of-bounds evidence, not only median cost.",
+                "The reference loupe derives fixed-grid positions from a validated observer layout contract and exact pyramid dimensions; it does not expose CUDA sample values, weights, ZNCC terms, or source-view footprints.",
+                "CUDA clamps these unnormalized texture samples at borders even though the descriptor requests wrap; inspect the loupe's clamped-sample markers rather than assuming out-of-bounds rejection.",
                 "For multi-channel maps, the tile caption is authoritative; the global Channel selector can contain generic labels contributed by another signal.",
             ],
             "action_label": "Set up patch inspection",
             "action": {
                 "alignment": "same",
                 "map_preset": "custom",
+                "showPatchLayout": True,
                 "target": "maps-heading",
                 "signals": [
                     "reference_rgb",
@@ -3358,6 +3362,149 @@ def _portable_record(row: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     return result
 
 
+def normalize_reference_patch_layout(
+    value: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate the observer patch contract source-checked against CUDA layout constants."""
+    return reference_patch_layout.normalize(value)
+
+
+def reference_patch_layout_records(
+    run_scenes: Iterable[Any], output_dir: Path,
+) -> list[dict[str, Any]]:
+    """Load one explicit patch-layout availability record per run/stage/scene."""
+
+    records_by_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for run_scene in run_scenes:
+        identity = (
+            str(run_scene.label), int(run_scene.repeat), str(run_scene.scene_id),
+            str(getattr(run_scene, "estimation_stage", "photometric")),
+            getattr(run_scene, "geometric_iteration", None),
+        )
+        instrumentation_dir = getattr(run_scene, "instrumentation_dir", None)
+        metadata_path = (
+            Path(instrumentation_dir) / "run_metadata.json"
+            if instrumentation_dir is not None else None
+        )
+        record: dict[str, Any] = {
+            "run": identity[0],
+            "repeat": identity[1],
+            "scene_id": identity[2],
+            "estimation_stage": identity[3],
+            "geometric_iteration": identity[4],
+            "capture_profile": str(getattr(run_scene, "capture_profile", "summary")),
+            "contract_claimed": False,
+            "contract_valid": True,
+            "capability_status": "legacy_unclaimed",
+            "available": False,
+            "layout": None,
+            "measurement_quality": "unavailable",
+            "measurement_basis": (
+                "run_metadata.cuda_patchmatch_parameters.reference_patch_layout"
+            ),
+            "visualization_quality": "unavailable",
+            "unavailable_reason": (
+                "run_metadata.json is missing"
+                if metadata_path is not None
+                else "instrumentation directory is unavailable"
+            ),
+            "limitations": (
+                "Reference-grid positions can be derived only from a declared fixed "
+                "layout and a validated pyramid extent. CUDA sample values and "
+                "source-view footprints are separate capabilities."
+            ),
+        }
+        if (
+            metadata_path is not None
+            and metadata_path.is_file()
+            and not metadata_path.is_symlink()
+        ):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                record["contract_valid"] = False
+                record["capability_status"] = "invalid_metadata"
+                record["unavailable_reason"] = f"run_metadata.json could not be read: {exc}"
+            else:
+                instrumentation = metadata.get("instrumentation")
+                capabilities = (
+                    instrumentation.get("capabilities")
+                    if isinstance(instrumentation, dict) else None
+                )
+                capabilities = capabilities if isinstance(capabilities, dict) else {}
+                capability_name = "reference_patch_layout_contract"
+                if capability_name not in capabilities:
+                    record["unavailable_reason"] = (
+                        "reference patch layout capability was not declared"
+                    )
+                elif not isinstance(capabilities.get(capability_name), bool):
+                    record["contract_claimed"] = None
+                    record["contract_valid"] = False
+                    record["capability_status"] = "invalid"
+                    record["unavailable_reason"] = (
+                        "reference patch layout capability is not boolean"
+                    )
+                elif capabilities[capability_name] is False:
+                    record["capability_status"] = "disabled"
+                    record["unavailable_reason"] = (
+                        "reference patch layout capability was not claimed"
+                    )
+                else:
+                    record["contract_claimed"] = True
+                    record["capability_status"] = "claimed"
+                    if (
+                        metadata.get("schema_name") != "openmvs.dmap.run"
+                        or _model_integer(metadata.get("schema_version")) != 4
+                    ):
+                        record["contract_valid"] = False
+                        record["capability_status"] = "invalid"
+                        record["unavailable_reason"] = (
+                            "claimed layout requires openmvs.dmap.run schema v4"
+                        )
+                    else:
+                        capability_fields_valid = all(
+                            capabilities.get(name) is False for name in (
+                                "reference_patch_sample_locations",
+                                "reference_patch_sample_values",
+                                "source_view_patch_footprints",
+                            )
+                        )
+                        parameters = metadata.get("cuda_patchmatch_parameters")
+                        layout, reason = normalize_reference_patch_layout(
+                            parameters.get("reference_patch_layout")
+                            if isinstance(parameters, dict) else None
+                        )
+                        if layout is None or not capability_fields_valid:
+                            record["contract_valid"] = False
+                            record["capability_status"] = "invalid"
+                            record["unavailable_reason"] = (
+                                reason if layout is None else
+                                "schema-v1 patch sample capabilities must be false"
+                            )
+                        else:
+                            record.update({
+                                "available": True,
+                                "layout": layout,
+                                "measurement_quality": "exact",
+                                "visualization_quality": "derived_exact",
+                                "unavailable_reason": None,
+                            })
+        previous = records_by_identity.get(identity)
+        if previous is not None and previous != record:
+            raise ValueError(
+                "conflicting reference patch layouts for "
+                f"{identity[0]}/{identity[2]}/{identity[3]}"
+            )
+        records_by_identity[identity] = record
+    return [records_by_identity[key] for key in sorted(
+        records_by_identity,
+        key=lambda value: (
+            value[0], value[1], value[2], value[3],
+            -1 if value[4] is None else int(value[4]),
+        ),
+    )]
+
+
 def _cuda_resource_plan_records(
     dataframe: pd.DataFrame,
     *,
@@ -3366,45 +3513,63 @@ def _cuda_resource_plan_records(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Preserve schema-v4 coarse compatibility-map availability contracts."""
 
-    parsed_files: dict[Path, list[dict[str, Any]]] = {}
+    del experiment_root  # Catalog rows already bind validated raw-plan fields.
     output: list[dict[str, Any]] = []
     availability: list[dict[str, Any]] = []
     for source_row in records(dataframe):
         row = dict(source_row)
-        source_value = row.get("source_json")
-        source = Path(str(source_value)).expanduser() if source_value else None
-        if source is not None and not source.is_absolute():
-            source = experiment_root / source
-        plan: dict[str, Any] = {}
-        if source is not None and source.is_file() and not source.is_symlink():
-            resolved = source.resolve()
-            if resolved not in parsed_files:
-                parsed: list[dict[str, Any]] = []
-                try:
-                    with resolved.open("r", encoding="utf-8") as handle:
-                        for line in handle:
-                            if len(line.encode("utf-8")) > MAX_TRACE_JSONL_LINE_BYTES:
-                                parsed = []
-                                break
-                            value = json.loads(line)
-                            if isinstance(value, dict):
-                                parsed.append(value)
-                except (OSError, UnicodeError, json.JSONDecodeError):
-                    parsed = []
-                parsed_files[resolved] = parsed
-            target_image = _model_integer(row.get("image_id"))
-            target_level = canonical_pyramid_level(row)
-            target_stage = str(row.get("estimation_stage") or "photometric")
-            target_geometric = _model_integer(row.get("geometric_iteration"))
-            plan = next((
-                value for value in parsed_files[resolved]
-                if _trace_integer(value.get("image_id")) == target_image
-                and canonical_pyramid_level(value) == target_level
-                and str(value.get("estimation_stage") or "photometric") == target_stage
-                and _trace_integer(value.get("geometric_iteration")) == target_geometric
-            ), {})
-        contract = plan.get("compatibility_map_contract")
-        if isinstance(contract, dict):
+        target_image = _model_integer(row.get("image_id"))
+        target_level = canonical_pyramid_level(row)
+        target_stage = str(row.get("estimation_stage") or "photometric")
+        target_geometric = _model_integer(row.get("geometric_iteration"))
+        plan_geometric = row.get("plan_geometric_iteration")
+        geometric_identity_matches = (
+            plan_geometric is None
+            if target_geometric is None
+            else _model_integer(plan_geometric) == target_geometric
+        )
+        row_authoritative = (
+            row.get("available") is True
+            and row.get("valid") is True
+            and row.get("schema_name") == "openmvs.dmap.resource_plan"
+            and _model_integer(row.get("schema_version")) == 4
+            and _model_integer(row.get("duplicate_count")) == 1
+            and row.get("plan_identity_complete") is True
+            and target_image is not None
+            and target_level is not None
+            and _model_integer(row.get("plan_image_id")) == target_image
+            and canonical_pyramid_level({
+                "pyramid_level": row.get("plan_pyramid_level")
+            }) == target_level
+            and row.get("plan_estimation_stage") == target_stage
+            and geometric_identity_matches
+        )
+        plan_width = _trace_integer(row.get("grid_width"))
+        plan_height = _trace_integer(row.get("grid_height"))
+        extent_available = (
+            row_authoritative
+            and plan_width is not None and plan_width > 0
+            and plan_height is not None and plan_height > 0
+        )
+        if not row_authoritative:
+            extent_reason = (
+                "resource plan catalog row is not unique valid schema-v4 evidence "
+                "with matching frame, stage, and pyramid identity"
+            )
+        else:
+            extent_reason = "resource plan width/height is missing or invalid"
+        row["grid_extent"] = {
+            "available": extent_available,
+            "width": plan_width if extent_available else None,
+            "height": plan_height if extent_available else None,
+            "measurement_quality": "exact" if extent_available else "unavailable",
+            "measurement_basis": "resource_plan.width_height",
+            "unavailable_reason": (
+                None if extent_available else extent_reason
+            ),
+        }
+        contract = _json_object(row.get("compatibility_map_contract_json"))
+        if row_authoritative and contract:
             row["compatibility_map_contract"] = json_value(contract)
             level = canonical_pyramid_level(row)
             if level is not None and level > 0:
@@ -3418,7 +3583,7 @@ def _cuda_resource_plan_records(
                     "estimation_stage": row.get("estimation_stage"),
                     "geometric_iteration": row.get("geometric_iteration"),
                     "pyramid_level": level,
-                    "compatibility_maps_requested": plan.get(
+                    "compatibility_maps_requested": row.get(
                         "compatibility_maps_requested"
                     ),
                     "update_source_map_expected": contract.get(
@@ -3430,7 +3595,7 @@ def _cuda_resource_plan_records(
                     "measurement_basis": (
                         "resource_plan.compatibility_map_contract"
                     ),
-                    "source_json": relative_path(source, output_dir),
+                    "source_json": row.get("source_json"),
                 }
                 availability.append(json_value(entry))
         output.append(_portable_record(row, output_dir))
@@ -3644,6 +3809,9 @@ def build_report_model(
     )
     map_rows, signal_rows, pixel_budget = build_map_assets(
         map_catalog, signal_availability, output_dir
+    )
+    reference_patch_layouts = reference_patch_layout_records(
+        run_scenes, output_dir
     )
     component_registry_model = component_registry.build_registry([
         *records(map_catalog),
@@ -4324,6 +4492,7 @@ def build_report_model(
             "mechanism_impact": mechanism_impact,
         },
         "mechanics": {
+            "reference_patch_layouts": reference_patch_layouts,
             "observer_kernel_timing_diagnostics": records(performance),
             "texture_stratification": texture_stratification,
             "accepted_gain_census": accepted_gain_census,
@@ -4348,6 +4517,10 @@ def build_report_model(
             "filter_resource_plans": [_portable_record(canonical_pyramid_record(row), output_dir) for row in records(filter_resource_plans)],
             "resource_plan_validation": [_portable_record(canonical_pyramid_record(row), output_dir) for row in records(resource_plan_validation)],
             "availability": {
+                "reference_patch_layout": any(
+                    row.get("available") is True
+                    for row in reference_patch_layouts
+                ),
                 "exact_hot_kernel": not exact_iterations.empty,
                 "low_texture_update_hysteresis": bool(
                     low_texture_hysteresis.get("rows")
@@ -4495,6 +4668,86 @@ def validate_report_model(model: dict[str, Any], output_dir: Path) -> dict[str, 
         {"missing": sorted(declared_signal_ids - registry_signal_ids)},
     )
     mechanics = model.get("mechanics") or {}
+    patch_layout_rows = mechanics.get("reference_patch_layouts") or []
+    patch_layout_errors: list[str] = []
+    patch_layout_identities: set[tuple[Any, ...]] = set()
+    if not isinstance(patch_layout_rows, list):
+        patch_layout_errors.append("reference_patch_layouts is not a list")
+        patch_layout_rows = []
+    for index, row in enumerate(patch_layout_rows):
+        if not isinstance(row, dict):
+            patch_layout_errors.append(f"rows[{index}] is not an object")
+            continue
+        identity = (
+            row.get("run"), _identity_integer(row.get("repeat")),
+            row.get("scene_id"), row.get("estimation_stage"),
+            _model_integer(row.get("geometric_iteration")),
+        )
+        if identity in patch_layout_identities:
+            patch_layout_errors.append(f"rows[{index}] duplicates identity {identity}")
+        patch_layout_identities.add(identity)
+        if row.get("contract_valid") is not True:
+            patch_layout_errors.append(f"rows[{index}] has an invalid claimed contract")
+        if row.get("available") is True:
+            if row.get("contract_claimed") is not True:
+                patch_layout_errors.append(
+                    f"rows[{index}] exposes an unclaimed layout as available"
+                )
+            normalized, reason = normalize_reference_patch_layout(row.get("layout"))
+            if normalized is None:
+                patch_layout_errors.append(f"rows[{index}] is malformed: {reason}")
+            elif normalized != row.get("layout"):
+                patch_layout_errors.append(f"rows[{index}] layout is not normalized")
+            if row.get("measurement_quality") != "exact":
+                patch_layout_errors.append(f"rows[{index}] available layout is not exact")
+            if row.get("visualization_quality") != "derived_exact":
+                patch_layout_errors.append(
+                    f"rows[{index}] available visualization is not derived_exact"
+                )
+            if row.get("unavailable_reason") is not None:
+                patch_layout_errors.append(
+                    f"rows[{index}] available layout has an unavailable reason"
+                )
+        elif not str(row.get("unavailable_reason") or "").strip():
+            patch_layout_errors.append(
+                f"rows[{index}] unavailable layout has no reason"
+            )
+    grid_extent_errors: list[str] = []
+    for index, row in enumerate(mechanics.get("cuda_resource_plans") or []):
+        if not isinstance(row, dict) or "grid_extent" not in row:
+            continue
+        extent = row.get("grid_extent")
+        if not isinstance(extent, dict):
+            grid_extent_errors.append(f"cuda_resource_plans[{index}] grid_extent is invalid")
+            continue
+        if extent.get("available") is True:
+            width = _model_integer(extent.get("width"))
+            height = _model_integer(extent.get("height"))
+            if width is None or width <= 0 or height is None or height <= 0:
+                grid_extent_errors.append(
+                    f"cuda_resource_plans[{index}] available grid extent is non-positive"
+                )
+            if extent.get("measurement_quality") != "exact":
+                grid_extent_errors.append(
+                    f"cuda_resource_plans[{index}] available grid extent is not exact"
+                )
+        elif not str(extent.get("unavailable_reason") or "").strip():
+            grid_extent_errors.append(
+                f"cuda_resource_plans[{index}] unavailable grid extent has no reason"
+            )
+    add(
+        "reference_patch_layout_contract",
+        not patch_layout_errors and not grid_extent_errors,
+        {
+            "layout_records": len(patch_layout_rows),
+            "available_layouts": sum(
+                row.get("available") is True
+                for row in patch_layout_rows if isinstance(row, dict)
+            ),
+            "layout_errors": patch_layout_errors,
+            "grid_extent_errors": grid_extent_errors,
+        },
+    )
     coarse_availability = mechanics.get(
         "coarse_compatibility_map_availability"
     ) or []

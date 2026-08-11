@@ -113,6 +113,31 @@
         "improvement_margin"
       ]
     },
+    "patch_debugging": {
+      "reference_layout_contract": {
+        "schema_name": "openmvs.dmap.reference_patch_layout",
+        "schema_version": 1,
+        "scope": "compiled_fixed_reference_grid",
+        "measurement_quality": "exact"
+      },
+      "reference_grid_visualization": {
+        "status": "available_for_declared_fixed_layouts",
+        "measurement_quality": "derived_exact",
+        "pyramid_extent_basis": "schema_v4_resource_plan_width_height",
+        "texture_address_mode_configured": "wrap",
+        "texture_address_mode_effective": "clamp",
+        "texture_address_mode_effective_basis": "cuda_runtime_unnormalized_wrap_is_clamped",
+        "full_frame_markers": true,
+        "rgb_loupe": true,
+        "rgb_semantics": "qualitative_report_thumbnail_not_cuda_grayscale_texture"
+      },
+      "kernel_recorded_sample_locations": false,
+      "kernel_recorded_sample_values": false,
+      "bilateral_weights": false,
+      "source_view_patch_footprints": false,
+      "per_sample_score_contributions": false,
+      "legacy_behavior": "explicit_unavailable_without_layout_contract"
+    },
     "publication": {
       "core_marker_attests": [
         "patchmatch_map_manifest",
@@ -219,6 +244,7 @@
     "schemas": "docs/dmap_observability/08_schema_reference.md",
     "extension": "docs/dmap_observability/09_extension_guide.md",
     "troubleshooting": "docs/dmap_observability/10_troubleshooting.md",
+    "patch_debugging": "docs/dmap_observability/11_patch_debugging.md",
     "agents": "docs/dmap_observability/agent_guide.md"
   }
 }

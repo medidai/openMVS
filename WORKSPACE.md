@@ -57,6 +57,18 @@ tooling. Start with [`AGENTS.md`](AGENTS.md), then read the human
   v1: PatchMatch enforces it cumulatively across pyramid levels, while later
   postprocess/confidence sidecars enforce it through a separate ledger. Do not
   describe it as one combined whole-frame or whole-report cap.
+- Patch debugging must distinguish synchronized downstream scoring evidence,
+  the declared-layout-derived fixed reference grid, reconstructed final-state footprints, and
+  literal captured CUDA samples. Do not claim source footprints, sample values,
+  weights, or score reconstruction unless a validated patch-trace artifact
+  supplies them. See
+  [`11_patch_debugging.md`](docs/dmap_observability/11_patch_debugging.md).
+- The master report should show a zoomed reference RGB loupe and full-frame
+  markers for a declared fixed patch layout. Label those positions
+  `derived_exact`, preserve effective CUDA clamp behavior while recording that
+  the descriptor requests wrap with unnormalized coordinates, and show older
+  or variable layouts as unavailable rather than hard-coding the current
+  25-sample grid.
 
 ## Development workflow
 

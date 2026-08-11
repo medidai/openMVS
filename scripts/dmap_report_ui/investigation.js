@@ -15,12 +15,14 @@
     sourceView: byId("source-view-select"), channel: byId("channel-select"),
     annotationStage: byId("annotation-stage-select"), annotationKind: byId("annotation-kind-select"),
   };
+  const patchLayoutToggle = byId("patch-layout-toggle");
   const state = {
     baseline: "", baselineRepeat: 0, variant: "", variantRepeat: 0,
     scene: "", frame: "", iteration: -1, pyramidLevel: "unspecified", scale: "shared", signals: [],
     sourceView: "auto", channel: 0,
     captureStage: "photometric", alignment: "final", mapPreset: "overview",
     mechanism: "all", component: "all",
+    showPatchLayout: true,
     annotationStage: "post_filter", annotationKind: "all",
     x: null, y: null, sort: "regression_score", sortDirection: -1, regressionFilter: "",
   };
@@ -228,7 +230,7 @@
           "Cross-check the affected pixels against the reference image before attributing the change to texture or patch support.",
         ],
         look_for: ["Score changes concentrated in low-variance or boundary regions.", "Finite-candidate or selected-view changes that coincide with the score change."],
-        cautions: ["The report does not reconstruct raw patch crops; these signals are downstream evidence.", "Keep exact and proxy cost maps separate when drawing conclusions."],
+        cautions: ["The derived reference grid is not a CUDA sample trace and does not expose grayscale values, bilateral weights, residuals, or source-view footprints.", "Keep exact and proxy cost maps separate when drawing conclusions."],
         action_label: "Load patch-scoring evidence",
       },
       {
@@ -282,7 +284,7 @@
       mechanisms: ["view_selection"], keywords: ["view", "probability", "weight", "contribution"],
     },
     patch: {
-      alignment: "same", sourceView: "first", target: "maps-heading",
+      alignment: "same", sourceView: "first", showPatchLayout: true, target: "maps-heading",
       preferredSignals: [
         "reference_rgb", "reference_variance_production_exact", "cost_photo_raw_production_exact",
         "cost_photo_prior_production_exact", "view_cost_components_exact",
@@ -306,6 +308,7 @@
   let guideOpener = null;
   let columnTooltip = null;
   let activeColumnHelp = null;
+  let patchRenderGeneration = 0;
   const guideRecipeActions = new Map();
   const guideRecipeExactKeys = new Set(Object.keys(GUIDE_RECIPE_ACTIONS));
   const decodedPayloads = new Map();
@@ -626,6 +629,7 @@
     }
     state.scale = "shared";
     state.sourceView = action.sourceView === "first" ? firstSourceView() : (action.sourceView || "auto");
+    if (typeof action.showPatchLayout === "boolean") state.showPatchLayout = action.showPatchLayout;
     state.channel = 0;
     state.x = null;
     state.y = null;
@@ -743,6 +747,7 @@
     ["baselineRepeat", "variantRepeat", "iteration", "channel"].forEach((key) => {
       if (params.has(key)) state[key] = Number(params.get(key));
     });
+    if (params.has("patchLayout")) state.showPatchLayout = params.get("patchLayout") !== "0";
     if (params.has("signals")) state.signals = params.get("signals").split(",").filter(Boolean);
     if (params.has("x") && params.has("y")) { state.x = Number(params.get("x")); state.y = Number(params.get("y")); }
   }
@@ -750,6 +755,7 @@
   function writeHash() {
     const params = new URLSearchParams();
     ["baseline", "baselineRepeat", "variant", "variantRepeat", "scene", "frame", "captureStage", "pyramidLevel", "alignment", "mapPreset", "mechanism", "component", "iteration", "scale", "sourceView", "channel", "annotationStage", "annotationKind"].forEach((key) => params.set(key, state[key]));
+    params.set("patchLayout", state.showPatchLayout ? "1" : "0");
     params.set("signals", state.signals.join(","));
     if (state.x != null && state.y != null) { params.set("x", state.x.toFixed(6)); params.set("y", state.y.toFixed(6)); }
     history.replaceState(null, "", `#${params.toString()}`);
@@ -1515,6 +1521,7 @@
     if (channels.length && !channels.some((item) => Number(item.index) === Number(state.channel))) state.channel = Number(channels[0].index);
     controls.channel.innerHTML = channels.length ? channels.map((item) => option(item.index, `${item.index}: ${item.label}`, Number(item.index) === Number(state.channel))).join("") : option(0, "scalar / composite", true);
     document.querySelector(`input[name=scale][value="${state.scale}"]`).checked = true;
+    patchLayoutToggle.checked = state.showPatchLayout;
     const alignmentLabel = state.alignment === "final" ? "final state per run" : (state.iteration < 0 ? "initialization" : `iteration ${state.iteration + 1}`);
     byId("frame-context").textContent = frame() ? `${scene().label} / image ${frame().image_id} / ${state.captureStage} / ${pyramidLevelLabel(String(state.pyramidLevel))} / ${alignmentLabel}` : "No frame selected";
   }
@@ -1590,10 +1597,119 @@
     return pickAlignedArtifact(preferred, state.alignment, state.iteration);
   }
 
-  function referenceTile(runLabel) {
+  function estimationStageKey(row) {
+    return row?.estimation_stage === "geometric_consistency"
+      ? `geometric_consistency:${row.geometric_iteration}` : "photometric";
+  }
+
+  function selectedPatchLayoutRecord(run, repeat) {
+    const rows = model.mechanics?.reference_patch_layouts || [];
+    return rows.find((row) => (
+      row.run === run && Number(row.repeat) === Number(repeat)
+      && row.scene_id === state.scene
+      && estimationStageKey(row) === state.captureStage
+    )) || {
+      available: false,
+      unavailable_reason: "reference patch layout was not declared for this run, scene, and estimation stage",
+      measurement_quality: "unavailable",
+      visualization_quality: "unavailable",
+    };
+  }
+
+  function selectedGridExtent(run, repeat) {
+    const current = frame();
+    const matchingPlan = (model.mechanics?.cuda_resource_plans || []).find((row) => (
+      row.run === run && Number(row.repeat) === Number(repeat)
+      && row.scene_id === state.scene
+      && Number(row.image_id) === Number(current?.image_id)
+      && estimationStageKey(row) === state.captureStage
+      && pyramidLevelMatches(row)
+      && row.grid_extent?.available === true
+    ));
+    if (matchingPlan) return {
+      available: true,
+      width: Number(matchingPlan.grid_extent.width),
+      height: Number(matchingPlan.grid_extent.height),
+      measurement_quality: matchingPlan.grid_extent.measurement_quality,
+      measurement_basis: matchingPlan.grid_extent.measurement_basis,
+    };
+    const matchingMap = (current?.maps || []).find((row) => (
+      row.run === run && Number(row.repeat) === Number(repeat)
+      && estimationStageKey(row) === state.captureStage
+      && pyramidLevelMatches(row)
+      && Number(row.pixel_data?.width) > 0 && Number(row.pixel_data?.height) > 0
+    ));
+    if (matchingMap) return {
+      available: true,
+      width: Number(matchingMap.pixel_data.width),
+      height: Number(matchingMap.pixel_data.height),
+      measurement_quality: "exact",
+      measurement_basis: "validated map payload dimensions",
+    };
+    return {
+      available: false,
+      width: null,
+      height: null,
+      measurement_quality: "unavailable",
+      measurement_basis: "resource plan or validated map payload dimensions",
+      unavailable_reason: "selected pyramid grid extent is unavailable",
+    };
+  }
+
+  function clampCoordinate(value, extent) {
+    return Math.min(extent - 1, Math.max(0, value));
+  }
+
+  function patchGeometry(run, repeat) {
+    const layoutRecord = selectedPatchLayoutRecord(run, repeat);
+    const extent = selectedGridExtent(run, repeat);
+    if (!state.showPatchLayout) return { available: false, unavailable_reason: "derived patch grid is hidden" };
+    if (state.x == null || state.y == null) return { available: false, unavailable_reason: "select a map pixel" };
+    if (!layoutRecord.available) return { available: false, unavailable_reason: layoutRecord.unavailable_reason, layoutRecord, extent };
+    if (!extent.available) return { available: false, unavailable_reason: extent.unavailable_reason, layoutRecord, extent };
+    const width = Number(extent.width);
+    const height = Number(extent.height);
+    const x = Math.min(width - 1, Math.max(0, Math.floor(state.x * width)));
+    const y = Math.min(height - 1, Math.max(0, Math.floor(state.y * height)));
+    const samples = (layoutRecord.layout.sample_offsets_pixels || []).map(([dx, dy], index) => {
+      const unclampedX = x + Number(dx);
+      const unclampedY = y + Number(dy);
+      const clampedX = clampCoordinate(unclampedX, width);
+      const clampedY = clampCoordinate(unclampedY, height);
+      return {
+        index, dx: Number(dx), dy: Number(dy),
+        unclampedX, unclampedY, x: clampedX, y: clampedY,
+        clamped: unclampedX !== clampedX || unclampedY !== clampedY,
+        normalizedX: (clampedX + Number(layoutRecord.layout.texel_center_offset)) / width,
+        normalizedY: (clampedY + Number(layoutRecord.layout.texel_center_offset)) / height,
+      };
+    });
+    return {
+      available: true, layoutRecord, layout: layoutRecord.layout, extent,
+      x, y, width, height, samples,
+      clampedSamples: samples.filter((sample) => sample.clamped).length,
+    };
+  }
+
+  function patchOverlayHtml(run, repeat, role) {
+    const geometry = patchGeometry(run, repeat);
+    if (!geometry.available) return "";
+    return `<span class="patch-sample-overlay" aria-hidden="true">${geometry.samples.map((sample) => (
+      `<i class="patch-sample-marker ${escapeHtml(role)}${sample.clamped ? " clamped" : ""}" data-patch-sample="${sample.index}" data-clamped="${sample.clamped ? "1" : "0"}" style="left:${(sample.normalizedX * 100).toFixed(6)}%;top:${(sample.normalizedY * 100).toFixed(6)}%"></i>`
+    )).join("")}</span>`;
+  }
+
+  function patchMapNote(run, repeat) {
+    const geometry = patchGeometry(run, repeat);
+    if (!geometry.available) return "";
+    return `<p class="provenance patch-map-note">Derived fixed reference grid: ${geometry.samples.length} positions at ${geometry.width}×${geometry.height}; ${geometry.clampedSamples} clamp-addressed. The descriptor requests wrap but unnormalized CUDA coordinates make clamp effective. Layout metadata is exact; positions are derived_exact. Values and source-view footprints were not captured.</p>`;
+  }
+
+  function referenceTile(runLabel, repeat) {
     const reference = frame()?.reference || { available: false, unavailable_reason: "reference image unavailable" };
     return {
-      id: `reference-${runLabel}`, signal: "reference_rgb", available: reference.available,
+      id: `reference-${runLabel}-${repeat}`, signal: "reference_rgb", available: reference.available,
+      run: runLabel, repeat,
       preview: { local: reference.path, shared: reference.path }, measurement_quality: "source",
       stage: "input", measurement_basis: "reference image", unavailable_reason: reference.unavailable_reason,
       pixel_data: { available: false, reason: "RGB display values only" },
@@ -1626,7 +1742,7 @@
     };
   }
 
-  function artifactTile(artifact, runLabel, repeat, signal) {
+  function artifactTile(artifact, runLabel, repeat, signal, armRole) {
     if (!artifact) artifact = coarseCostUnavailability(runLabel, repeat, signal);
     if (!artifact) artifact = {
       available: false,
@@ -1658,7 +1774,10 @@
     renderedTiles.push({ artifact, runLabel, signal });
     const viewLabel = artifact.source_view_index == null ? "" : ` / view ${artifact.source_view_index} (image ${artifact.source_image_id ?? "n/a"})`;
     const channelLabel = channelPreview ? ` / ${channelPreview.label}` : "";
-    return `<article class="map-tile" id="${escapeHtml(artifact.deep_link_id || artifact.id)}" data-artifact="${escapeHtml(artifact.id)}"><div class="map-stage"><span>${escapeHtml(stage)} / ${escapeHtml(pyramidLabel)}${escapeHtml(viewLabel)}${escapeHtml(channelLabel)} / ${escapeHtml(scaleLabel)}</span><span class="quality ${escapeHtml(quality)}">${escapeHtml(quality)}</span></div><div class="map-image-wrap"><img class="map-image" src="${escapeHtml(preview)}" alt="${escapeHtml(signal)} for ${escapeHtml(runLabel)}"><i class="crosshair-x"></i><i class="crosshair-y"></i></div>${categoryLegend ? `<p class="category-legend">${escapeHtml(categoryLegend)}</p>` : ""}<p class="provenance">${escapeHtml(artifact.measurement_basis || "unspecified basis")}${semantics}${limitation} / ${source}</p></article>`;
+    const patchRole = armRole === "baseline" ? "baseline" : "variant";
+    const patchOverlay = signal === "reference_rgb" ? patchOverlayHtml(runLabel, repeat, patchRole) : "";
+    const patchNote = signal === "reference_rgb" ? patchMapNote(runLabel, repeat) : "";
+    return `<article class="map-tile" id="${escapeHtml(artifact.deep_link_id || artifact.id)}" data-artifact="${escapeHtml(artifact.id)}"><div class="map-stage"><span>${escapeHtml(stage)} / ${escapeHtml(pyramidLabel)}${escapeHtml(viewLabel)}${escapeHtml(channelLabel)} / ${escapeHtml(scaleLabel)}</span><span class="quality ${escapeHtml(quality)}">${escapeHtml(quality)}</span></div><div class="map-image-wrap"><img class="map-image" src="${escapeHtml(preview)}" alt="${escapeHtml(signal)} for ${escapeHtml(runLabel)}">${patchOverlay}<i class="crosshair-x"></i><i class="crosshair-y"></i></div>${categoryLegend ? `<p class="category-legend">${escapeHtml(categoryLegend)}</p>` : ""}<p class="provenance">${escapeHtml(artifact.measurement_basis || "unspecified basis")}${semantics}${limitation} / ${source}</p>${patchNote}</article>`;
   }
 
   function deltaTile(baseline, variant, signal) {
@@ -1740,6 +1859,191 @@
     }
   }
 
+  function patchLoupeCard(run, repeat, role, geometry) {
+    const roleLabel = role === "baseline" ? "Baseline" : "Variant";
+    if (!geometry.available) {
+      return `<article class="patch-loupe-card" data-patch-role="${escapeHtml(role)}" data-patch-state="unavailable"><div class="patch-loupe-head"><div><h4>${escapeHtml(roleLabel)}: ${escapeHtml(run)}</h4><small>repeat ${repeat} / ${escapeHtml(pyramidLevelLabel(String(state.pyramidLevel)))}</small></div><span class="quality unavailable">unavailable</span></div><div class="patch-loupe-unavailable">${escapeHtml(geometry.unavailable_reason || "derived reference grid unavailable")}</div></article>`;
+    }
+    const offsetsX = [...new Set(geometry.samples.map((sample) => sample.dx))].sort((left, right) => left - right);
+    const offsetsY = [...new Set(geometry.samples.map((sample) => sample.dy))].sort((left, right) => left - right);
+    const markerLabel = role === "baseline" ? "blue squares" : "red circles";
+    return `<article class="patch-loupe-card" data-patch-role="${escapeHtml(role)}" data-patch-state="available" data-sample-count="${geometry.samples.length}"><div class="patch-loupe-head"><div><h4>${escapeHtml(roleLabel)}: ${escapeHtml(run)}</h4><small>pixel (${geometry.x}, ${geometry.y}) / ${geometry.width}×${geometry.height} / ${geometry.samples.length} positions</small></div><span class="quality derived_exact">derived_exact</span></div><div class="patch-loupe-canvas-wrap"><canvas id="patch-loupe-${escapeHtml(role)}" class="patch-loupe-canvas" width="640" height="640" aria-label="${escapeHtml(roleLabel)} derived reference patch around pixel ${geometry.x}, ${geometry.y}"></canvas></div><div class="patch-loupe-legend"><span><i class="patch-legend-mark ${escapeHtml(role)}"></i>${escapeHtml(markerLabel)}</span><span><i class="patch-legend-mark center"></i>selected pixel</span><span><i class="patch-legend-mark clamped"></i>clamp-addressed sample</span></div><p class="patch-loupe-provenance">Offsets x=[${escapeHtml(offsetsX.join(", "))}], y=[${escapeHtml(offsetsY.join(", "))}] pyramid pixels. ${geometry.clampedSamples} sample(s) clamp to an image edge. The texture descriptor requests wrap, but CUDA makes clamp effective because coordinates are unnormalized. Derived from the validated fixed-layout contract plus exact resource-plan dimensions; thumbnail RGB is qualitative and is not the CUDA grayscale pyramid texture.</p></article>`;
+  }
+
+  function drawClampedReferenceCrop(context, image, cropLeft, cropTop, cropWidth, cropHeight, size) {
+    const sourceWidth = image.naturalWidth;
+    const sourceHeight = image.naturalHeight;
+    const cropRight = cropLeft + cropWidth;
+    const cropBottom = cropTop + cropHeight;
+    const sourceLeft = Math.max(0, cropLeft);
+    const sourceTop = Math.max(0, cropTop);
+    const sourceRight = Math.min(sourceWidth, cropRight);
+    const sourceBottom = Math.min(sourceHeight, cropBottom);
+    const destinationLeft = (sourceLeft - cropLeft) * size / cropWidth;
+    const destinationTop = (sourceTop - cropTop) * size / cropHeight;
+    const destinationRight = (sourceRight - cropLeft) * size / cropWidth;
+    const destinationBottom = (sourceBottom - cropTop) * size / cropHeight;
+    const destinationWidth = Math.max(0, destinationRight - destinationLeft);
+    const destinationHeight = Math.max(0, destinationBottom - destinationTop);
+    const sourceCropWidth = Math.max(0, sourceRight - sourceLeft);
+    const sourceCropHeight = Math.max(0, sourceBottom - sourceTop);
+
+    if (sourceCropWidth > 0 && sourceCropHeight > 0) {
+      context.drawImage(image, sourceLeft, sourceTop, sourceCropWidth, sourceCropHeight,
+        destinationLeft, destinationTop, destinationWidth, destinationHeight);
+    }
+    if (destinationLeft > 0 && sourceCropHeight > 0) {
+      context.drawImage(image, 0, sourceTop, 1, sourceCropHeight,
+        0, destinationTop, destinationLeft, destinationHeight);
+    }
+    if (destinationRight < size && sourceCropHeight > 0) {
+      context.drawImage(image, sourceWidth - 1, sourceTop, 1, sourceCropHeight,
+        destinationRight, destinationTop, size - destinationRight, destinationHeight);
+    }
+    if (destinationTop > 0 && sourceCropWidth > 0) {
+      context.drawImage(image, sourceLeft, 0, sourceCropWidth, 1,
+        destinationLeft, 0, destinationWidth, destinationTop);
+    }
+    if (destinationBottom < size && sourceCropWidth > 0) {
+      context.drawImage(image, sourceLeft, sourceHeight - 1, sourceCropWidth, 1,
+        destinationLeft, destinationBottom, destinationWidth, size - destinationBottom);
+    }
+    if (destinationLeft > 0 && destinationTop > 0) {
+      context.drawImage(image, 0, 0, 1, 1, 0, 0, destinationLeft, destinationTop);
+    }
+    if (destinationRight < size && destinationTop > 0) {
+      context.drawImage(image, sourceWidth - 1, 0, 1, 1,
+        destinationRight, 0, size - destinationRight, destinationTop);
+    }
+    if (destinationLeft > 0 && destinationBottom < size) {
+      context.drawImage(image, 0, sourceHeight - 1, 1, 1,
+        0, destinationBottom, destinationLeft, size - destinationBottom);
+    }
+    if (destinationRight < size && destinationBottom < size) {
+      context.drawImage(image, sourceWidth - 1, sourceHeight - 1, 1, 1,
+        destinationRight, destinationBottom, size - destinationRight, size - destinationBottom);
+    }
+  }
+
+  function drawPatchLoupe(canvas, referenceImage, geometry, role) {
+    const context = canvas.getContext("2d");
+    const size = canvas.width;
+    const referenceWidth = referenceImage.naturalWidth;
+    const referenceHeight = referenceImage.naturalHeight;
+    const halfWindow = Number(geometry.layout.half_window_pixels);
+    const step = Number(geometry.layout.step_pixels);
+    const halfSpanGrid = Math.max(halfWindow * 2.25, step * 4, 8);
+    const spanGrid = halfSpanGrid * 2;
+    const cropWidth = spanGrid * referenceWidth / geometry.width;
+    const cropHeight = spanGrid * referenceHeight / geometry.height;
+    const centerX = (geometry.x + 0.5) * referenceWidth / geometry.width;
+    const centerY = (geometry.y + 0.5) * referenceHeight / geometry.height;
+    const cropLeft = centerX - cropWidth / 2;
+    const cropTop = centerY - cropHeight / 2;
+
+    context.fillStyle = "#20282b";
+    context.fillRect(0, 0, size, size);
+    context.imageSmoothingEnabled = false;
+    drawClampedReferenceCrop(context, referenceImage, cropLeft, cropTop, cropWidth, cropHeight, size);
+
+    geometry.samples.forEach((sample) => {
+      const x = (sample.dx + halfSpanGrid) * size / spanGrid;
+      const y = (sample.dy + halfSpanGrid) * size / spanGrid;
+      context.save();
+      context.shadowColor = "rgba(0,0,0,.75)";
+      context.shadowBlur = 4;
+      context.lineWidth = 4;
+      if (role === "baseline") {
+        context.strokeStyle = "#1976d2";
+        context.fillStyle = "rgba(255,255,255,.16)";
+        context.fillRect(x - 8, y - 8, 16, 16);
+        context.strokeRect(x - 8, y - 8, 16, 16);
+      } else {
+        context.beginPath();
+        context.arc(x, y, 8, 0, Math.PI * 2);
+        context.fillStyle = "#d81b60";
+        context.fill();
+        context.strokeStyle = "white";
+        context.lineWidth = 2;
+        context.stroke();
+      }
+      context.restore();
+      if (sample.clamped) {
+        context.beginPath();
+        context.arc(x, y, 13, 0, Math.PI * 2);
+        context.strokeStyle = "#f2c94c";
+        context.lineWidth = 4;
+        context.stroke();
+      }
+    });
+
+    const center = size / 2;
+    context.strokeStyle = "#00e5ff";
+    context.lineWidth = 4;
+    context.beginPath();
+    context.moveTo(center - 14, center);
+    context.lineTo(center + 14, center);
+    context.moveTo(center, center - 14);
+    context.lineTo(center, center + 14);
+    context.stroke();
+    context.strokeStyle = "rgba(255,255,255,.85)";
+    context.lineWidth = 2;
+    context.strokeRect(1, 1, size - 2, size - 2);
+    canvas.dataset.rendered = "1";
+    canvas.dataset.pixelX = String(geometry.x);
+    canvas.dataset.pixelY = String(geometry.y);
+    canvas.dataset.clampedSamples = String(geometry.clampedSamples);
+  }
+
+  function renderPatchInspector() {
+    const panel = byId("patch-inspector");
+    const grid = byId("patch-inspector-grid");
+    const quality = byId("patch-inspector-quality");
+    const generation = ++patchRenderGeneration;
+    if (!state.showPatchLayout || state.x == null || state.y == null) {
+      panel.hidden = true;
+      grid.innerHTML = "";
+      return;
+    }
+    const arms = [
+      { run: state.baseline, repeat: state.baselineRepeat, role: "baseline" },
+      { run: state.variant, repeat: state.variantRepeat, role: "variant" },
+    ].map((arm) => ({ ...arm, geometry: patchGeometry(arm.run, arm.repeat) }));
+    const available = arms.filter((arm) => arm.geometry.available);
+    const qualityState = available.length === arms.length
+      ? "derived_exact" : available.length ? "partial" : "unavailable";
+    panel.hidden = false;
+    quality.className = `quality ${qualityState}`;
+    quality.textContent = qualityState;
+    grid.innerHTML = arms.map((arm) => patchLoupeCard(
+      arm.run, arm.repeat, arm.role, arm.geometry,
+    )).join("");
+    const reference = frame()?.reference;
+    if (!available.length || !reference?.available || !reference.path) {
+      if (available.length) {
+        grid.querySelectorAll(".patch-loupe-canvas-wrap").forEach((wrap) => {
+          wrap.innerHTML = '<div class="patch-loupe-unavailable">Reference thumbnail unavailable.</div>';
+        });
+      }
+      return;
+    }
+    const referenceImage = new Image();
+    referenceImage.onload = () => {
+      if (generation !== patchRenderGeneration) return;
+      available.forEach((arm) => {
+        const canvas = byId(`patch-loupe-${arm.role}`);
+        if (canvas?.isConnected) drawPatchLoupe(canvas, referenceImage, arm.geometry, arm.role);
+      });
+    };
+    referenceImage.onerror = () => {
+      if (generation !== patchRenderGeneration) return;
+      grid.querySelectorAll(".patch-loupe-canvas-wrap").forEach((wrap) => {
+        wrap.innerHTML = '<div class="patch-loupe-unavailable">Reference thumbnail could not be loaded.</div>';
+      });
+    };
+    referenceImage.src = reference.path;
+  }
+
   function renderMaps() {
     renderedTiles = [];
     deltaJobs = [];
@@ -1751,20 +2055,25 @@
     state.signals.filter((signal) => signalMatchesFilters(model.signals.find((item) => item.name === signal))).forEach((signal) => {
       const metadata = model.signals.find((item) => item.name === signal) || { label: signal, measurement_qualities: [] };
       html += `<div class="signal-label" title="${escapeHtml(metadata.description || "")}"><strong>${escapeHtml(metadata.label)}</strong><small>${escapeHtml(metadata.mechanism || "state")} / ${escapeHtml(metadata.quantity || "value")} / ${escapeHtml(metadata.measurement_qualities.join(" / "))}</small></div>`;
-      const baseline = signal === "reference_rgb" ? referenceTile(columns[0].label)
+      const baseline = signal === "reference_rgb" ? referenceTile(columns[0].label, columns[0].repeat)
         : selectedArtifact(columns[0].label, columns[0].repeat, signal)
           || coarseCostUnavailability(columns[0].label, columns[0].repeat, signal);
-      const variant = signal === "reference_rgb" ? referenceTile(columns[1].label)
+      const variant = signal === "reference_rgb" ? referenceTile(columns[1].label, columns[1].repeat)
         : selectedArtifact(columns[1].label, columns[1].repeat, signal)
           || coarseCostUnavailability(columns[1].label, columns[1].repeat, signal);
-      html += artifactTile(baseline, columns[0].label, columns[0].repeat, signal);
-      html += artifactTile(variant, columns[1].label, columns[1].repeat, signal);
+      html += artifactTile(
+        baseline, columns[0].label, columns[0].repeat, signal, "baseline",
+      );
+      html += artifactTile(
+        variant, columns[1].label, columns[1].repeat, signal, "variant",
+      );
       html += deltaTile(baseline, variant, signal);
     });
     byId("map-grid").innerHTML = html;
     byId("map-grid").querySelectorAll(".map-image").forEach((image) => image.addEventListener("click", imageClicked));
     deltaJobs.forEach((job) => renderDeltaCanvas(job));
     updateCrosshairs();
+    renderPatchInspector();
     renderPixelTable();
   }
 
@@ -1772,7 +2081,7 @@
     const rectangle = event.currentTarget.getBoundingClientRect();
     state.x = Math.min(1, Math.max(0, (event.clientX - rectangle.left) / rectangle.width));
     state.y = Math.min(1, Math.max(0, (event.clientY - rectangle.top) / rectangle.height));
-    updateCrosshairs(); renderPixelTable(); renderDrilldownStatus(); writeHash();
+    renderMaps(); renderDrilldownStatus(); writeHash();
   }
 
   function updateCrosshairs() {
@@ -2365,7 +2674,11 @@
     state.x = null; state.y = null; renderAll();
   }));
   document.querySelectorAll("input[name=scale]").forEach((input) => input.addEventListener("change", () => { state.scale = input.value; renderMaps(); writeHash(); }));
-  byId("clear-crosshair").addEventListener("click", () => { state.x = null; state.y = null; updateCrosshairs(); renderPixelTable(); renderDrilldownStatus(); writeHash(); });
+  patchLayoutToggle.addEventListener("change", () => {
+    state.showPatchLayout = patchLayoutToggle.checked;
+    renderMaps(); writeHash();
+  });
+  byId("clear-crosshair").addEventListener("click", () => { state.x = null; state.y = null; renderMaps(); renderDrilldownStatus(); writeHash(); });
   byId("deep-frame-request").addEventListener("click", () => exportDrilldownRequest("deep"));
   byId("trace-pixel-request").addEventListener("click", () => exportDrilldownRequest("trace"));
   byId("regression-filter").addEventListener("input", (event) => { state.regressionFilter = event.target.value; renderRegressions(); });

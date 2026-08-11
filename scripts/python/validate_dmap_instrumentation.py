@@ -26,6 +26,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from report_dmap_annotation_fit import load_dmap  # noqa: E402
 from dmap_instrumentation_report import read_pfm  # noqa: E402
+from dmap_observability import reference_patch_layout  # noqa: E402
 
 
 REQUIRED_FINAL_SIGNALS = {
@@ -686,6 +687,14 @@ def validate_summary_only(arguments: Arguments, frame_dir: Path) -> dict[str, An
         "schema_name": summary.get("schema_name"),
         "schema_version": summary.get("schema_version"),
     })
+    patch_layout_valid, patch_layout_detail = (
+        validate_reference_patch_layout_contract(frame_dir, summary)
+    )
+    check(
+        "reference_patch_layout_contract",
+        patch_layout_valid,
+        patch_layout_detail,
+    )
     check("summary_dimensions", width is not None and width > 0 and height is not None and height > 0, {
         "width": summary.get("width"), "height": summary.get("height"),
     })
@@ -1042,6 +1051,14 @@ def validate_prefilter_only(arguments: Arguments, frame_dir: Path) -> dict[str, 
         "summary_version": summary.get("schema_version"),
         "process_specialization": manifest.get("process_specialization"),
     })
+    patch_layout_valid, patch_layout_detail = (
+        validate_reference_patch_layout_contract(frame_dir, summary)
+    )
+    check(
+        "reference_patch_layout_contract",
+        patch_layout_valid,
+        patch_layout_detail,
+    )
     check(
         "prefilter_dimensions",
         width is not None
@@ -1629,6 +1646,113 @@ def owned_regular_artifact_path(
         if not stat.S_ISREG(metadata.st_mode):
             return None, f"artifact is not a regular file: {relative}"
     return candidate, None
+
+
+def validate_reference_patch_layout_contract(
+    frame_dir: Path,
+    summary: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Fail closed when a producer claims the patch-layout contract."""
+
+    instrumentation_root = (
+        frame_dir.parent.parent
+        if frame_dir.parent.name == "depthmaps" else frame_dir.parent
+    )
+    metadata_candidate = instrumentation_root / "run_metadata.json"
+    detail: dict[str, Any] = {
+        "path": str(metadata_candidate),
+        "claimed": False,
+        "status": "legacy_unclaimed",
+        "errors": [],
+    }
+    if not metadata_candidate.exists() and not metadata_candidate.is_symlink():
+        detail["unavailable_reason"] = "run_metadata.json is missing"
+        return True, detail
+    metadata_path, path_error = owned_regular_artifact_path(
+        instrumentation_root, "run_metadata.json"
+    )
+    if path_error or metadata_path is None:
+        detail["status"] = "invalid_metadata"
+        detail["errors"].append(path_error or "run_metadata.json is unavailable")
+        return False, detail
+    try:
+        metadata = load_json(metadata_path)
+    except Exception as exc:
+        detail["status"] = "invalid_metadata"
+        detail["errors"].append(f"run_metadata.json could not be read: {exc}")
+        return False, detail
+
+    instrumentation = metadata.get("instrumentation")
+    capabilities = (
+        instrumentation.get("capabilities")
+        if isinstance(instrumentation, dict) else None
+    )
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
+    capability_name = "reference_patch_layout_contract"
+    if capability_name not in capabilities:
+        detail["unavailable_reason"] = "layout capability is not declared"
+        return True, detail
+    claimed = capabilities.get(capability_name)
+    if not isinstance(claimed, bool):
+        detail["status"] = "invalid_capability"
+        detail["errors"].append(
+            "reference_patch_layout_contract capability must be boolean"
+        )
+        return False, detail
+    detail["claimed"] = claimed
+    if not claimed:
+        detail["unavailable_reason"] = "layout capability is explicitly disabled"
+        return True, detail
+
+    detail["status"] = "claimed"
+    if (
+        metadata.get("schema_name") != "openmvs.dmap.run"
+        or strict_int(metadata.get("schema_version")) != 4
+    ):
+        detail["errors"].append(
+            "claimed layout requires openmvs.dmap.run schema v4"
+        )
+    parameters = metadata.get("cuda_patchmatch_parameters")
+    run_layout, run_reason = reference_patch_layout.normalize(
+        parameters.get("reference_patch_layout")
+        if isinstance(parameters, dict) else None
+    )
+    summary_parameters = summary.get("cuda_patchmatch_parameters")
+    summary_layout, summary_reason = reference_patch_layout.normalize(
+        summary_parameters.get("reference_patch_layout")
+        if isinstance(summary_parameters, dict) else None
+    )
+    if run_layout is None:
+        detail["errors"].append(f"run metadata: {run_reason}")
+    if summary_layout is None:
+        detail["errors"].append(f"frame summary: {summary_reason}")
+    if run_layout is not None and summary_layout is not None and run_layout != summary_layout:
+        detail["errors"].append("run metadata and frame summary layouts differ")
+
+    for name in (
+        "reference_patch_sample_locations",
+        "reference_patch_sample_values",
+        "source_view_patch_footprints",
+    ):
+        if capabilities.get(name) is not False:
+            detail["errors"].append(f"schema-v1 capability {name} must be false")
+    if run_layout is not None:
+        detail["layout"] = {
+            "schema_name": run_layout["schema_name"],
+            "schema_version": run_layout["schema_version"],
+            "sample_count": run_layout["sample_count"],
+            "half_window_pixels": run_layout["half_window_pixels"],
+            "step_pixels": run_layout["step_pixels"],
+            "texture_address_mode_configured": run_layout[
+                "texture_address_mode_configured"
+            ],
+            "texture_address_mode_effective": run_layout[
+                "texture_address_mode_effective"
+            ],
+        }
+    valid = not detail["errors"]
+    detail["status"] = "valid" if valid else "invalid_claimed_contract"
+    return valid, detail
 
 
 def optional_manifest_maps(
@@ -3726,6 +3850,14 @@ def validate(arguments: Arguments) -> dict[str, Any]:
     check("dimensions", width > 0 and height > 0 and summary.get("width") == width and summary.get("height") == height, {
         "width": width, "height": height
     })
+    patch_layout_valid, patch_layout_detail = (
+        validate_reference_patch_layout_contract(frame_dir, summary)
+    )
+    check(
+        "reference_patch_layout_contract",
+        patch_layout_valid,
+        patch_layout_detail,
+    )
     if schema_version == 4:
         summary_sidecars_valid, summary_sidecars = observer_sidecars_complete(summary)
         manifest_sidecars_valid, manifest_sidecars = observer_sidecars_complete(manifest)

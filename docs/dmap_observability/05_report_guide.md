@@ -132,6 +132,27 @@ must not imply cross-capture pixel parity without an explicit parity record.
 Public-v1 trace targeting narrows the rows investigated, not capture storage:
 the selected frame also carries the full exact deep-map payload.
 
+### Inspect a fixed reference patch
+
+For a patch or photometric-cost change, select matched deep runs and load the
+patch guide recipe. Enable **Derived patch grid**, select the same logical
+iteration and pyramid level, then click a synchronized map. The reference RGB
+tiles and the baseline/variant loupe show positions derived from each run's
+validated fixed-layout contract and that level's exact resource-plan extent.
+Border locations show the effective CUDA clamp semantics. The texture
+descriptor requests wrap, but CUDA switches wrap to clamp because OpenMVS uses
+unnormalized texture coordinates; both configured and effective modes remain
+recorded in the layout contract.
+
+This view answers whether two builds declare different fixed reference support
+and where that support lies in reference-image context. It does not show CUDA
+sample values, bilateral weights, source-view projections, warped footprints,
+or per-sample score contributions. The RGB thumbnail is not the grayscale CUDA
+pyramid. A missing or malformed layout remains unavailable; the UI never falls
+back to a hard-coded 5 by 5 grid. See
+[Patch debugging](11_patch_debugging.md) for the evidence boundary and the
+literal trace extension.
+
 ## Share a validated report
 
 Create a sanitized, content-addressed review archive rather than sharing a

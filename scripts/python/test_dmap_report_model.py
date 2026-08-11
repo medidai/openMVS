@@ -25,6 +25,31 @@ if str(SCRIPT_DIR) not in sys.path:
 import dmap_report_model
 
 
+def reference_patch_layout() -> dict:
+    offsets = [-4, -2, 0, 2, 4]
+    return {
+        "schema_name": "openmvs.dmap.reference_patch_layout",
+        "schema_version": 1,
+        "kind": "fixed_cartesian_grid",
+        "coordinate_domain": "reference_pyramid_pixels",
+        "sample_position": "integer_offset_from_pixel_center",
+        "texel_center_offset": 0.5,
+        "texture_address_mode_configured": "wrap",
+        "texture_address_mode_effective": "clamp",
+        "texture_address_mode_effective_basis": "cuda_runtime_unnormalized_wrap_is_clamped",
+        "texture_coordinates_normalized": False,
+        "texture_filter_mode": "linear",
+        "half_window_pixels": 4,
+        "step_pixels": 2,
+        "sample_count": 25,
+        "sample_offsets_pixels": [[x, y] for y in offsets for x in offsets],
+        "layout_provenance": "compiled_cuda_scoring_constants",
+        "sample_locations_captured_by_kernel": False,
+        "sample_values_captured_by_kernel": False,
+        "source_view_footprints_captured_by_kernel": False,
+    }
+
+
 def write_pfm(path: Path, values: np.ndarray) -> None:
     data = np.asarray(values, dtype=np.float32)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -637,6 +662,133 @@ class DMapReportModelTests(unittest.TestCase):
                 self.assertEqual(availability["postprocess_filter_contract"], expected_contract)
                 self.assertEqual(availability["confidence_adjustment_contract"], expected_contract)
 
+    def test_reference_patch_layout_is_validated_and_retained_per_run_stage(self) -> None:
+        valid = reference_patch_layout()
+        normalized, reason = dmap_report_model.normalize_reference_patch_layout(valid)
+        self.assertEqual(normalized, valid)
+        self.assertIsNone(reason)
+
+        invalid_cases = {
+            "wrong schema": {"schema_version": 2},
+            "bad kind": {"kind": "variable_grid"},
+            "bad configured address mode": {"texture_address_mode_configured": "clamp"},
+            "bad effective address mode": {"texture_address_mode_effective": "wrap"},
+            "bad coordinate mode": {"texture_coordinates_normalized": True},
+            "bad count": {"sample_count": 24},
+            "bad step": {"step_pixels": 0},
+            "hostile half window": {"half_window_pixels": 10**100},
+            "unsupported captured values": {"sample_values_captured_by_kernel": True},
+        }
+        for label, changes in invalid_cases.items():
+            with self.subTest(label=label):
+                candidate = json.loads(json.dumps(valid))
+                candidate.update(changes)
+                result, unavailable_reason = (
+                    dmap_report_model.normalize_reference_patch_layout(candidate)
+                )
+                self.assertIsNone(result)
+                self.assertTrue(unavailable_reason)
+        duplicate = json.loads(json.dumps(valid))
+        duplicate["sample_offsets_pixels"][1] = duplicate["sample_offsets_pixels"][0]
+        self.assertIsNone(
+            dmap_report_model.normalize_reference_patch_layout(duplicate)[0]
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "report"
+            instrumentation = root / "capture"
+            output.mkdir()
+            instrumentation.mkdir()
+            capabilities = {
+                "reference_patch_layout_contract": True,
+                "reference_patch_sample_locations": False,
+                "reference_patch_sample_values": False,
+                "source_view_patch_footprints": False,
+            }
+            (instrumentation / "run_metadata.json").write_text(json.dumps({
+                "schema_name": "openmvs.dmap.run",
+                "schema_version": 4,
+                "instrumentation": {"capabilities": capabilities},
+                "cuda_patchmatch_parameters": {
+                    "reference_patch_layout": valid,
+                },
+            }), encoding="utf-8")
+            run_scene = SimpleNamespace(
+                label="candidate [deep]", repeat=0, scene_id="scene-a",
+                estimation_stage="photometric", geometric_iteration=None,
+                capture_profile="deep", instrumentation_dir=instrumentation,
+            )
+            rows = dmap_report_model.reference_patch_layout_records(
+                [run_scene], output
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0]["available"])
+            self.assertEqual(rows[0]["layout"], valid)
+            self.assertEqual(rows[0]["measurement_quality"], "exact")
+            self.assertEqual(rows[0]["visualization_quality"], "derived_exact")
+            self.assertFalse(
+                rows[0]["layout"]["sample_values_captured_by_kernel"]
+            )
+            self.assertTrue(rows[0]["contract_claimed"])
+            self.assertTrue(rows[0]["contract_valid"])
+
+            (instrumentation / "run_metadata.json").write_text(json.dumps({
+                "schema_name": "openmvs.dmap.run",
+                "schema_version": 4,
+                "cuda_patchmatch_parameters": {
+                    "reference_patch_layout": valid,
+                },
+            }), encoding="utf-8")
+            unclaimed = dmap_report_model.reference_patch_layout_records(
+                [run_scene], output
+            )[0]
+            self.assertFalse(unclaimed["available"])
+            self.assertFalse(unclaimed["contract_claimed"])
+            self.assertTrue(unclaimed["contract_valid"])
+            self.assertIn("not declared", unclaimed["unavailable_reason"])
+
+            (instrumentation / "run_metadata.json").write_text(json.dumps({
+                "schema_name": "openmvs.dmap.run",
+                "schema_version": 3,
+                "cuda_patchmatch_parameters": {},
+            }), encoding="utf-8")
+            legacy = dmap_report_model.reference_patch_layout_records(
+                [run_scene], output
+            )[0]
+            self.assertFalse(legacy["available"])
+            self.assertFalse(legacy["contract_claimed"])
+            self.assertTrue(legacy["contract_valid"])
+            self.assertEqual(legacy["capability_status"], "legacy_unclaimed")
+
+            invalid_capabilities = dict(capabilities)
+            invalid_capabilities["reference_patch_layout_contract"] = "true"
+            (instrumentation / "run_metadata.json").write_text(json.dumps({
+                "schema_name": "openmvs.dmap.run",
+                "schema_version": 4,
+                "instrumentation": {"capabilities": invalid_capabilities},
+                "cuda_patchmatch_parameters": {
+                    "reference_patch_layout": valid,
+                },
+            }), encoding="utf-8")
+            invalid_claim = dmap_report_model.reference_patch_layout_records(
+                [run_scene], output
+            )[0]
+            self.assertFalse(invalid_claim["available"])
+            self.assertFalse(invalid_claim["contract_valid"])
+
+            (instrumentation / "run_metadata.json").write_text(json.dumps({
+                "schema_name": "openmvs.dmap.run",
+                "schema_version": 4,
+                "instrumentation": {"capabilities": capabilities},
+                "cuda_patchmatch_parameters": {},
+            }), encoding="utf-8")
+            unavailable = dmap_report_model.reference_patch_layout_records(
+                [run_scene], output
+            )[0]
+            self.assertFalse(unavailable["available"])
+            self.assertIn("missing", unavailable["unavailable_reason"])
+
     def test_coarse_resource_plan_preserves_explicit_cost_unavailability(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -651,6 +803,8 @@ class DMapReportModelTests(unittest.TestCase):
                 "estimation_stage": "photometric",
                 "geometric_iteration": None,
                 "pyramid_level": 1,
+                "width": 320,
+                "height": 240,
                 "compatibility_maps_requested": True,
                 "compatibility_map_contract": {
                     "update_source_map_expected": True,
@@ -662,7 +816,20 @@ class DMapReportModelTests(unittest.TestCase):
                 "run": "base", "repeat": 0, "scene_id": "scene-a",
                 "image_id": 7, "estimation_stage": "photometric",
                 "geometric_iteration": None, "pyramid_level": 1,
-                "schema_version": 4, "source_json": str(plans),
+                "schema_name": "openmvs.dmap.resource_plan",
+                "schema_version": 4, "available": True, "valid": True,
+                "duplicate_count": 1, "plan_identity_complete": True,
+                "plan_image_id": 7,
+                "plan_estimation_stage": "photometric",
+                "plan_geometric_iteration": None, "plan_pyramid_level": 1,
+                "grid_width": 320, "grid_height": 240,
+                "compatibility_maps_requested": True,
+                "compatibility_map_contract_json": json.dumps({
+                    "update_source_map_expected": True,
+                    "cost_map_expected": False,
+                    "cost_map_unavailable_reason": reason,
+                }),
+                "source_json": str(plans),
             }])
 
             resource_rows, availability = (
@@ -678,6 +845,11 @@ class DMapReportModelTests(unittest.TestCase):
             )
             self.assertEqual(availability[0]["cost_map_unavailable_reason"], reason)
             self.assertFalse(availability[0]["cost_map_available"])
+            self.assertEqual(resource_rows[0]["grid_extent"]["width"], 320)
+            self.assertEqual(resource_rows[0]["grid_extent"]["height"], 240)
+            self.assertEqual(
+                resource_rows[0]["grid_extent"]["measurement_quality"], "exact"
+            )
             model = {
                 "schema_name": dmap_report_model.SCHEMA_NAME,
                 "schema_version": 1,
@@ -703,6 +875,57 @@ class DMapReportModelTests(unittest.TestCase):
                 if row["name"] == "coarse_compatibility_map_availability"
             )
             self.assertFalse(check["passed"])
+
+    def test_patch_grid_extent_rejects_unauthorized_resource_plan_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports"
+            output.mkdir()
+            plans = root / "resource_plans.jsonl"
+
+            base_row = {
+                "run": "base", "repeat": 0, "scene_id": "scene-a",
+                "image_id": 7, "estimation_stage": "photometric",
+                "geometric_iteration": None, "pyramid_level": 1,
+                "schema_name": "openmvs.dmap.resource_plan",
+                "schema_version": 4, "available": True, "valid": True,
+                "duplicate_count": 1, "plan_identity_complete": True,
+                "plan_image_id": 7,
+                "plan_estimation_stage": "photometric",
+                "plan_geometric_iteration": None, "plan_pyramid_level": 1,
+                "grid_width": 320, "grid_height": 240,
+                "source_json": str(plans),
+            }
+            cases = {
+                "invalid catalog row": {"valid": False},
+                "legacy catalog row": {"schema_version": 3},
+                "duplicate raw identity": {"duplicate_count": 2},
+                "incomplete raw identity": {"plan_identity_complete": False},
+                "wrong raw image": {"plan_image_id": 8},
+                "wrong raw stage": {"plan_estimation_stage": "geometric_consistency"},
+                "boolean geometric iteration": {"plan_geometric_iteration": False},
+                "wrong raw level": {"plan_pyramid_level": 0},
+                "boolean width": {"grid_width": True},
+                "zero height": {"grid_height": 0},
+            }
+            for label, row_changes in cases.items():
+                with self.subTest(label=label):
+                    row = {**base_row, **row_changes}
+                    resource_rows, availability = (
+                        dmap_report_model._cuda_resource_plan_records(
+                            pd.DataFrame([row]), experiment_root=root,
+                            output_dir=output,
+                        )
+                    )
+                    self.assertFalse(resource_rows[0]["grid_extent"]["available"])
+                    self.assertEqual(
+                        resource_rows[0]["grid_extent"]["measurement_quality"],
+                        "unavailable",
+                    )
+                    self.assertTrue(
+                        resource_rows[0]["grid_extent"]["unavailable_reason"]
+                    )
+                    self.assertEqual(availability, [])
 
     def test_summary_only_unavailable_signals_are_registered_and_model_valid(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

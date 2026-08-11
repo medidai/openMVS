@@ -44,6 +44,13 @@
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+#ifdef _USE_DMAP_INSTRUMENTATION
+// Observer-side contract for the fixed reference-patch layout. A source test
+// keeps these values synchronized with the production CUDA scoring constants.
+#define PATCHMATCHCUDA_PATCH_HALF_WINDOW 4
+#define PATCHMATCHCUDA_PATCH_STEP 2
+#endif
+
 
 // S T R U C T S ///////////////////////////////////////////////////
 

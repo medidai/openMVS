@@ -21,6 +21,87 @@ if str(SCRIPT_DIR) not in sys.path:
 import validate_dmap_instrumentation as validator
 
 
+def reference_patch_layout() -> dict:
+    axis = [-4, -2, 0, 2, 4]
+    return {
+        "schema_name": "openmvs.dmap.reference_patch_layout",
+        "schema_version": 1,
+        "kind": "fixed_cartesian_grid",
+        "coordinate_domain": "reference_pyramid_pixels",
+        "sample_position": "integer_offset_from_pixel_center",
+        "texel_center_offset": 0.5,
+        "texture_address_mode_configured": "wrap",
+        "texture_address_mode_effective": "clamp",
+        "texture_address_mode_effective_basis": (
+            "cuda_runtime_unnormalized_wrap_is_clamped"
+        ),
+        "texture_coordinates_normalized": False,
+        "texture_filter_mode": "linear",
+        "half_window_pixels": 4,
+        "step_pixels": 2,
+        "sample_count": 25,
+        "sample_offsets_pixels": [[x, y] for y in axis for x in axis],
+        "layout_provenance": (
+            "observer_contract_source_checked_against_cuda_scoring_constants"
+        ),
+        "sample_locations_captured_by_kernel": False,
+        "sample_values_captured_by_kernel": False,
+        "source_view_footprints_captured_by_kernel": False,
+    }
+
+
+def claim_reference_patch_layout(
+    frame_dir: Path,
+    summary: dict,
+    *,
+    capability: object = True,
+    run_layout: object | None = None,
+    summary_layout: object | None = None,
+) -> None:
+    layout = reference_patch_layout()
+    run_value = layout if run_layout is None else run_layout
+    summary_value = layout if summary_layout is None else summary_layout
+    instrumentation_root = (
+        frame_dir.parent.parent if frame_dir.parent.name == "depthmaps"
+        else frame_dir.parent
+    )
+    metadata_path = instrumentation_root / "run_metadata.json"
+    metadata = (
+        json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata_path.is_file() else {
+            "schema_name": "openmvs.dmap.run",
+            "schema_version": 4,
+        }
+    )
+    metadata.setdefault("instrumentation", {})["capabilities"] = {
+        "reference_patch_layout_contract": capability,
+        "reference_patch_sample_locations": False,
+        "reference_patch_sample_values": False,
+        "source_view_patch_footprints": False,
+    }
+    metadata.setdefault("cuda_patchmatch_parameters", {})[
+        "reference_patch_layout"
+    ] = run_value
+    write_json(metadata_path, metadata)
+    summary.setdefault("cuda_patchmatch_parameters", {})[
+        "reference_patch_layout"
+    ] = summary_value
+    summary_path = frame_dir / "summary.json"
+    write_json(summary_path, summary)
+    for marker_name in (
+        "summary_complete.json", "prefilter_capture_complete.json",
+        "capture_complete.json",
+    ):
+        marker_path = frame_dir / marker_name
+        if not marker_path.is_file():
+            continue
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        summary_reference = marker.get("summary")
+        if isinstance(summary_reference, dict) and "bytes" in summary_reference:
+            summary_reference["bytes"] = summary_path.stat().st_size
+            write_json(marker_path, marker)
+
+
 def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
@@ -385,6 +466,44 @@ def make_prefilter_fixture(frame_dir: Path) -> tuple[dict, Path]:
 
 
 class SummaryOnlyValidationTests(unittest.TestCase):
+    def test_claimed_reference_patch_layout_is_validated_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            frame = Path(directory) / "frame"
+            summary, _dmap = make_summary_fixture(frame)
+            claim_reference_patch_layout(frame, summary)
+
+            result = validator.validate(validator.Arguments(frame_dir=frame))
+
+            self.assertTrue(result["valid"], result)
+            check = next(
+                row for row in result["checks"]
+                if row["name"] == "reference_patch_layout_contract"
+            )
+            self.assertTrue(check["passed"], check)
+            self.assertEqual(check["detail"]["status"], "valid")
+
+        cases = {
+            "missing run layout": {"run_layout": {}},
+            "summary mismatch": {"summary_layout": {
+                **reference_patch_layout(), "sample_count": 24,
+            }},
+            "non-boolean capability": {"capability": "true"},
+        }
+        for label, options in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                frame = Path(directory) / "frame"
+                summary, _dmap = make_summary_fixture(frame)
+                claim_reference_patch_layout(frame, summary, **options)
+
+                result = validator.validate(validator.Arguments(frame_dir=frame))
+
+                self.assertFalse(result["valid"], result)
+                check = next(
+                    row for row in result["checks"]
+                    if row["name"] == "reference_patch_layout_contract"
+                )
+                self.assertFalse(check["passed"], check)
+
     def test_valid_exact_targeted_trace_checks_compact_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             frame, trace_path = make_exact_trace_fixture(Path(directory))
@@ -589,6 +708,27 @@ class SummaryOnlyValidationTests(unittest.TestCase):
 
 
 class PrefilterValidationTests(unittest.TestCase):
+    def test_prefilter_enforces_claimed_reference_patch_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            frame = Path(directory) / "frame"
+            summary, _depth_path = make_prefilter_fixture(frame)
+            claim_reference_patch_layout(frame, summary)
+            valid = validator.validate(validator.Arguments(frame_dir=frame))
+            self.assertTrue(valid["valid"], valid)
+
+            metadata_path = frame.parent / "run_metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["cuda_patchmatch_parameters"].pop(
+                "reference_patch_layout"
+            )
+            write_json(metadata_path, metadata)
+            invalid = validator.validate(validator.Arguments(frame_dir=frame))
+            check = next(
+                row for row in invalid["checks"]
+                if row["name"] == "reference_patch_layout_contract"
+            )
+            self.assertFalse(check["passed"], check)
+
     def test_valid_prefilter_capture_is_bounded_and_process_false(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             frame = Path(directory) / "frame"

@@ -28,6 +28,10 @@ from test_validate_dmap_instrumentation_v3 import (
     write_pfm,
     write_run_metadata,
 )
+from test_validate_dmap_instrumentation_summary import (
+    claim_reference_patch_layout,
+    reference_patch_layout,
+)
 
 
 def scalar(value: float) -> np.ndarray:
@@ -585,6 +589,32 @@ def add_optional_stage_manifests(
 
 
 class DMapInstrumentationSchemaV4Tests(unittest.TestCase):
+    def test_deep_capture_enforces_claimed_reference_patch_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            frame_dir = v4_frame_dir(directory)
+            _manifest, summary = make_v4_fixture(frame_dir)
+            claim_reference_patch_layout(frame_dir, summary)
+
+            valid = validator.validate(validator.Arguments(frame_dir=frame_dir))
+
+            self.assertTrue(valid["valid"], valid)
+            self.assertTrue(
+                check_by_name(valid, "reference_patch_layout_contract")["passed"]
+            )
+
+            mismatched = reference_patch_layout()
+            mismatched["sample_offsets_pixels"][0] = [-3, -4]
+            summary["cuda_patchmatch_parameters"][
+                "reference_patch_layout"
+            ] = mismatched
+            (frame_dir / "summary.json").write_text(
+                json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+            )
+            invalid = validator.validate(validator.Arguments(frame_dir=frame_dir))
+            self.assertFalse(
+                check_by_name(invalid, "reference_patch_layout_contract")["passed"]
+            )
+
     def test_logical_cost_improvement_validates_metadata_domain_and_legacy_closure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             frame_dir = v4_frame_dir(directory)
