@@ -889,7 +889,9 @@ class Schema4ReportIntegrationTest(unittest.TestCase):
             self.assertIn(
                 "changed_unknown (proxy; legacy_unclassified_trace)", markdown
             )
-            self.assertIn("variant traces.jsonl (external evidence:", markdown)
+            self.assertIn(
+                "variant photometric traces.jsonl (external evidence:", markdown
+            )
             self.assertNotIn("](../traces.jsonl)", markdown)
             self.assertLess(
                 markdown.index(dmap_report_model.INVESTIGATION_GUIDE_HEADING),

@@ -205,6 +205,24 @@ For configured `N` PatchMatch iterations, a complete timing topology contains
 one initialization pass and `2*N` alternating checkerboard passes. A missing,
 duplicate, reordered, or non-finite timing row invalidates timing completeness.
 
+## Targeted trace indices
+
+`trace_index` is a compact GPU slot local to one estimation stage, image, and
+pyramid level, not the ordinal of the full-resolution request. At level `L`,
+PatchMatch converts each requested coordinate to float32, scales it by the
+float32 value `1 / 2^L`, applies OpenMVS `ROUND2INT`, drops out-of-bounds
+coordinates, and retains the first request when coordinates collapse onto the
+same stage-level pixel. The completion validator and report model reconstruct
+this deterministic layout from the immutable request and the per-level resource
+plan before accepting a trace row. Consumers must use the request, estimation
+stage, geometric iteration, pyramid level, and scaled `(x,y)` together;
+`trace_index` alone is not a cross-stage or cross-level pixel identity.
+
+Normalized report rows preserve both the original request identity (including
+all aliased request coordinates) and the scaled trace coordinate. Photometric
+and geometric-consistency traces are separate sources and their state keys
+cannot collide.
+
 ## Completion
 
 Writers publish manifests and completion markers only after data files are

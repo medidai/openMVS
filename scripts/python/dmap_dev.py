@@ -463,11 +463,14 @@ def manifest_run_scene_rows(run_scenes: Iterable[RunScene]) -> list[dict[str, An
 def expand_instrumentation_stages(run_scene: RunScene) -> list[RunScene]:
     stages = [run_scene]
     nested_root = run_scene.instrumentation_dir / "geometric_iterations"
-    for iteration_dir in sorted(path for path in nested_root.glob("iteration[0-9][0-9]") if path.is_dir()):
-        match = re.fullmatch(r"iteration(\d+)", iteration_dir.name)
-        if not match:
+    indexed_directories: list[tuple[int, Path]] = []
+    for iteration_dir in nested_root.glob("iteration*"):
+        if not iteration_dir.is_dir():
             continue
-        iteration = int(match.group(1))
+        match = re.fullmatch(r"iteration(\d+)", iteration_dir.name)
+        if match:
+            indexed_directories.append((int(match.group(1)), iteration_dir))
+    for iteration, iteration_dir in sorted(indexed_directories):
         nested_timing = (
             run_scene.timing_dir / "geometric_iterations" / iteration_dir.name
             if run_scene.timing_dir is not None else None
@@ -487,10 +490,15 @@ def instrumentation_stage_roots(root: Path) -> list[tuple[str, int | None, Path]
 
     stages: list[tuple[str, int | None, Path]] = [("photometric", None, root)]
     nested_root = root / "geometric_iterations"
-    for iteration_dir in sorted(path for path in nested_root.glob("iteration[0-9][0-9]") if path.is_dir()):
+    indexed_directories: list[tuple[int, Path]] = []
+    for iteration_dir in nested_root.glob("iteration*"):
+        if not iteration_dir.is_dir():
+            continue
         match = re.fullmatch(r"iteration(\d+)", iteration_dir.name)
         if match:
-            stages.append(("geometric_consistency", int(match.group(1)), iteration_dir))
+            indexed_directories.append((int(match.group(1)), iteration_dir))
+    for iteration, iteration_dir in sorted(indexed_directories):
+        stages.append(("geometric_consistency", iteration, iteration_dir))
     return stages
 
 
@@ -1042,6 +1050,7 @@ ORCHESTRATION_OWNED_DENSIFY_ARGUMENTS = frozenset({
     "--working-folder",
     "--input-file",
     "--output-file",
+    "--config-file",
     "--dmap-instrumentation-config",
     "--dmap-instrumentation-dir",
     "--dmap-instrumentation-level",
@@ -3896,6 +3905,219 @@ def validate_coarse_compatibility_update_source_map(
     return True, "validated coarse compatibility update-source map"
 
 
+@dataclass(frozen=True)
+class CaptureStageTopology:
+    photometric_iterations: int
+    geometric_iterations: int
+    sub_resolution_levels: int
+    fusion_mode: int
+
+    @property
+    def geometric_stage_indices(self) -> tuple[int, ...]:
+        if self.fusion_mode < 0:
+            return ()
+        return tuple(range(self.geometric_iterations))
+
+
+def capture_stage_topology(command: Any) -> CaptureStageTopology:
+    """Resolve the CUDA PatchMatch topology from one recorded launch command."""
+
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(value, str) for value in command)
+    ):
+        raise ValueError("repro.json does not contain a resolved DensifyPointCloud command")
+    topology = CaptureStageTopology(
+        photometric_iterations=parse_argument(command, "--iters", 4),
+        geometric_iterations=parse_argument(command, "--geometric-iters", 2),
+        sub_resolution_levels=parse_argument(command, "--sub-resolution-levels", 2),
+        fusion_mode=parse_argument(command, "--fusion-mode", 0),
+    )
+    if topology.photometric_iterations < 0:
+        raise ValueError("resolved --iters must be non-negative")
+    if topology.geometric_iterations < 0:
+        raise ValueError("resolved --geometric-iters must be non-negative")
+    if topology.sub_resolution_levels < 0:
+        raise ValueError("resolved --sub-resolution-levels must be non-negative")
+    return topology
+
+
+def validate_instrumentation_capture_topology(
+    instrumentation_dir: Path,
+    command: Any,
+    *,
+    require_timings: bool = False,
+) -> tuple[bool, str]:
+    """Fail closed when a capture omits a command-declared stage or level."""
+
+    try:
+        topology = capture_stage_topology(command)
+    except ValueError as exc:
+        return False, str(exc)
+
+    geometric_root = instrumentation_dir / "geometric_iterations"
+    observed_geometric: dict[int, Path] = {}
+    if geometric_root.exists() or geometric_root.is_symlink():
+        if geometric_root.is_symlink() or not geometric_root.is_dir():
+            return False, "geometric stage root is not a regular directory"
+        for candidate in geometric_root.iterdir():
+            if candidate.is_symlink() or not candidate.is_dir():
+                return False, f"unexpected geometric stage artifact: {candidate.name}"
+            match = re.fullmatch(r"iteration(\d+)", candidate.name)
+            if match is None:
+                return False, f"unexpected geometric stage directory: {candidate.name}"
+            stage_index = int(match.group(1))
+            if stage_index in observed_geometric:
+                return False, f"duplicate geometric stage index: {stage_index}"
+            observed_geometric[stage_index] = candidate
+    expected_geometric = set(topology.geometric_stage_indices)
+    if set(observed_geometric) != expected_geometric:
+        return False, (
+            "geometric stage topology does not match the resolved command: "
+            f"expected {sorted(expected_geometric)}, observed "
+            f"{sorted(observed_geometric)}"
+        )
+
+    stage_specs: list[tuple[str, int | None, Path, set[int], int]] = [(
+        "photometric",
+        None,
+        instrumentation_dir,
+        set(range(topology.sub_resolution_levels + 1)),
+        topology.photometric_iterations + 1,
+    )]
+    stage_specs.extend(
+        (
+            "geometric_consistency",
+            stage_index,
+            observed_geometric[stage_index],
+            {0},
+            2,
+        )
+        for stage_index in topology.geometric_stage_indices
+    )
+
+    reference_image_ids: set[int] | None = None
+    for estimation_stage, geometric_iteration, stage_root, expected_levels, expected_states in stage_specs:
+        stage_label = (
+            "photometric"
+            if geometric_iteration is None
+            else f"geometric iteration {geometric_iteration}"
+        )
+        metadata = read_json(stage_root / "run_metadata.json")
+        scene_summary = read_json(stage_root / "scene_summary.json")
+        for document_name, expected_schema, document in (
+            ("run_metadata.json", "openmvs.dmap.run", metadata),
+            (
+                "scene_summary.json",
+                "openmvs.dmap.scene_summary",
+                scene_summary,
+            ),
+        ):
+            if document.get("schema_name") != expected_schema:
+                return False, f"{stage_label} {document_name} is missing or malformed"
+            if document.get("estimation_stage") != estimation_stage:
+                return False, f"{stage_label} {document_name} has the wrong stage identity"
+            recorded_iteration = document.get("geometric_iteration")
+            if geometric_iteration is None:
+                if recorded_iteration is not None:
+                    return False, f"{stage_label} {document_name} has the wrong stage identity"
+            elif recorded_iteration != geometric_iteration:
+                return False, f"{stage_label} {document_name} has the wrong stage identity"
+
+        frame_paths = sorted((stage_root / "depthmaps").glob("*/summary.json"))
+        image_ids: list[int] = []
+        for summary_path in frame_paths:
+            summary = read_json(summary_path)
+            image_id = summary.get("image_id")
+            if isinstance(image_id, bool) or not isinstance(image_id, int) or image_id < 0:
+                return False, f"{stage_label} contains a malformed frame summary"
+            image_ids.append(image_id)
+        if not image_ids:
+            return False, f"{stage_label} stage has no instrumented frames"
+        if len(set(image_ids)) != len(image_ids):
+            return False, f"{stage_label} contains duplicate frame image IDs"
+        stage_image_ids = set(image_ids)
+        if reference_image_ids is None:
+            reference_image_ids = stage_image_ids
+        elif stage_image_ids != reference_image_ids:
+            return False, (
+                f"{stage_label} frame set differs from the photometric frame set"
+            )
+
+        plans_path = stage_root / "resource_plans.jsonl"
+        try:
+            plans = read_jsonl(plans_path)
+        except (OSError, ValueError) as exc:
+            return False, f"{stage_label} resource plans are unreadable: {exc}"
+        observed_plan_keys: list[tuple[int, int]] = []
+        for plan in plans:
+            image_id = plan.get("image_id")
+            level = plan.get("pyramid_level")
+            logical_states = plan.get("num_logical_states")
+            if (
+                plan.get("schema_name") != "openmvs.dmap.resource_plan"
+                or isinstance(image_id, bool)
+                or not isinstance(image_id, int)
+                or isinstance(level, bool)
+                or not isinstance(level, int)
+                or isinstance(logical_states, bool)
+                or not isinstance(logical_states, int)
+                or logical_states != expected_states
+            ):
+                return False, f"{stage_label} contains a malformed resource plan"
+            observed_plan_keys.append((image_id, level))
+        expected_plan_keys = {
+            (image_id, level)
+            for image_id in stage_image_ids
+            for level in expected_levels
+        }
+        if len(observed_plan_keys) != len(set(observed_plan_keys)):
+            return False, f"{stage_label} contains duplicate image/level resource plans"
+        if set(observed_plan_keys) != expected_plan_keys:
+            return False, (
+                f"{stage_label} pyramid topology does not match the resolved command: "
+                f"expected {sorted(expected_plan_keys)}, observed "
+                f"{sorted(observed_plan_keys)}"
+            )
+
+        if require_timings:
+            timings_path = instrumentation_csv(stage_root, "timings.csv")
+            if timings_path is None:
+                return False, f"{stage_label} stage has no timing rows"
+            try:
+                with timings_path.open(encoding="utf-8") as handle:
+                    timing_rows = list(csv.DictReader(handle))
+                timing_passes: dict[tuple[int, int], list[int]] = {}
+                for row in timing_rows:
+                    key = (int(row["image_id"]), int(row["scale_number"]))
+                    timing_passes.setdefault(key, []).append(int(row["pass_index"]))
+            except (KeyError, OSError, TypeError, ValueError) as exc:
+                return False, f"{stage_label} timing rows are malformed: {exc}"
+            if set(timing_passes) != expected_plan_keys:
+                return False, (
+                    f"{stage_label} timing pyramid topology does not match the resolved "
+                    f"command: expected {sorted(expected_plan_keys)}, observed "
+                    f"{sorted(timing_passes)}"
+                )
+            expected_passes = set(range(1 + 2 * (expected_states - 1)))
+            for key, pass_indices in timing_passes.items():
+                if (
+                    len(pass_indices) != len(expected_passes)
+                    or set(pass_indices) != expected_passes
+                ):
+                    return False, (
+                        f"{stage_label} timing pass topology is incomplete for "
+                        f"image/level {key}: expected {sorted(expected_passes)}, "
+                        f"observed {sorted(pass_indices)}"
+                    )
+
+    return True, (
+        f"validated {len(stage_specs)} command-declared stage(s), "
+        f"photometric pyramid levels 0..{topology.sub_resolution_levels}"
+    )
+
+
 def validate_completed_run_mode(run_dir: Path, mode: str) -> tuple[bool, str]:
     def close_validation(reason: str) -> tuple[bool, str]:
         closure = integrity.validate_capture_artifact_closure(run_dir)
@@ -3936,20 +4158,24 @@ def validate_completed_run_mode(run_dir: Path, mode: str) -> tuple[bool, str]:
         return False, "run_metadata.json is missing or malformed"
     if scene_summary.get("schema_name") != "openmvs.dmap.scene_summary":
         return False, "scene_summary.json is missing or malformed"
+    topology_valid, topology_reason = validate_instrumentation_capture_topology(
+        instrumentation_dir,
+        repro.get("command"),
+        require_timings=mode == "timing",
+    )
+    if not topology_valid:
+        return False, topology_reason
     top_level_depthmap_dirs = sorted(
         path for path in (instrumentation_dir / "depthmaps").glob("*") if path.is_dir()
     )
     if not top_level_depthmap_dirs:
         return False, "no instrumented depth-map frames"
     if mode == "timing":
-        timings_path = instrumentation_csv(instrumentation_dir, "timings.csv")
-        if timings_path is None or not list(csv.DictReader(timings_path.open(encoding="utf-8"))):
-            return False, "timing capture has no timing rows"
         depth_maps = sorted((run_dir / "depth_maps").glob("depth*.dmap"))
         if not depth_maps:
             return False, "timing capture has no DMAP outputs"
         return close_validation(
-            f"validated timing capture with {len(depth_maps)} DMAPs"
+            f"validated timing capture with {len(depth_maps)} DMAPs; {topology_reason}"
         )
     if mode == "prefilter":
         stage_roots = instrumentation_stage_roots(instrumentation_dir)
@@ -10900,8 +11126,29 @@ summary::marker { color:#4f7f9f }
                 measurement_basis = str(
                     row.get("measurement_basis") or "legacy_unclassified_trace"
                 )
+                request_identity = row.get("request_identity") or {}
+                alias_coordinates = request_identity.get("alias_coordinates") or []
+                requested_pixel = ", ".join(
+                    f"({coordinate.get('x')}, {coordinate.get('y')})"
+                    for coordinate in alias_coordinates
+                    if isinstance(coordinate, dict)
+                )
+                if not requested_pixel and request_identity.get("x") is not None:
+                    requested_pixel = (
+                        f"({request_identity.get('x')}, {request_identity.get('y')})"
+                    )
+                if not requested_pixel:
+                    requested_pixel = "unavailable"
+                estimation_stage = str(row.get("estimation_stage") or "photometric")
+                geometric_iteration = row.get("geometric_iteration")
+                stage_label = (
+                    "photometric"
+                    if estimation_stage == "photometric"
+                    else f"geometric {geometric_iteration}"
+                )
                 trace_rows.append([
-                    row.get("run"), f"({row.get('x')}, {row.get('y')})", state_label,
+                    row.get("run"), stage_label, row.get("pyramid_level"),
+                    requested_pixel, f"({row.get('x')}, {row.get('y')})", state_label,
                     f"{row.get('source', 'unknown')} ({source_quality}; {measurement_basis})",
                     f"{fmt(cost.get('before'), 6)} -> {fmt(cost.get('after'), 6)}",
                     fmt(cost.get("improvement"), 6),
@@ -10911,14 +11158,19 @@ summary::marker { color:#4f7f9f }
                 ])
             lines.extend([
                 md_table(
-                    ["run", "pixel", "state", "update source / quality", "cost before -> after", "improvement", "depth before -> after m", "absolute depth change m", "normal change deg", "selected views / masks"],
+                    ["run", "stage", "pyramid level", "requested pixel(s)", "trace pixel", "state", "update source / quality", "cost before -> after", "improvement", "depth before -> after m", "absolute depth change m", "normal change deg", "selected views / masks"],
                     trace_rows,
                 ), "",
             ])
             source_links = [
                 markdown_evidence_reference(
                     source.get("source_path"),
-                    f"{source.get('run')} traces.jsonl",
+                    (
+                        f"{source.get('run')} "
+                        f"{source.get('estimation_stage', 'photometric')}"
+                        f"{'' if source.get('geometric_iteration') is None else ' ' + str(source.get('geometric_iteration'))} "
+                        "traces.jsonl"
+                    ),
                     report_path,
                 )
                 for source in trace.get("sources") or []
@@ -12268,81 +12520,237 @@ def drilldown_run_complete(
     repro = read_json(run_dir / "repro.json")
     if bool(repro.get("dry_run")) or as_integer(repro.get("return_code")) != 0:
         return False, "run did not complete successfully"
+    command = repro.get("command")
+    if not isinstance(command, list) or not command or not all(
+        isinstance(value, str) for value in command
+    ):
+        return False, "repro.json does not contain the resolved DensifyPointCloud command"
+    controlled_config = run_dir / "generated" / "Densify.drilldown.cfg"
+    configured_program_options = Path(
+        argument_value(command, "--config-file", "")
+    ).expanduser()
+    if (
+        not str(configured_program_options)
+        or configured_program_options.resolve() != controlled_config.resolve()
+        or controlled_config.is_symlink()
+        or not controlled_config.is_file()
+        or controlled_config.read_bytes() != b""
+    ):
+        return False, "resolved command is not bound to the empty drill-down program-options file"
+    try:
+        geometric_iterations = parse_argument(command, "--geometric-iters", 2)
+        fusion_mode = parse_argument(command, "--fusion-mode", 0)
+    except ValueError as exc:
+        return False, f"resolved stage topology is malformed: {exc}"
+    if geometric_iterations < 0:
+        return False, "resolved --geometric-iters must be non-negative"
+    expected_geometric_stages = (
+        set(range(geometric_iterations)) if fusion_mode >= 0 else set()
+    )
     instrumentation_dir = run_dir / "dmap_instrumentation"
     if read_json(instrumentation_dir / "run_metadata.json").get("schema_name") != "openmvs.dmap.run":
         return False, "run_metadata.json is missing or malformed"
     if read_json(instrumentation_dir / "scene_summary.json").get("schema_name") != "openmvs.dmap.scene_summary":
         return False, "scene_summary.json is missing or malformed"
-    frame_summaries = [
-        read_json(path)
-        for path in sorted((instrumentation_dir / "depthmaps").glob("*/summary.json"))
-    ]
-    if not any(as_integer(summary.get("image_id")) == image_id for summary in frame_summaries):
-        return False, f"no summary was captured for image {image_id}"
-    target_frames = [
-        path.parent
-        for path in sorted((instrumentation_dir / "depthmaps").glob("*/summary.json"))
-        if as_integer(read_json(path).get("image_id")) == image_id
-    ]
-    if not target_frames:
-        return False, f"no map capture was found for image {image_id}"
-    expected_states: set[tuple[int, int]] = set()
-    for frame_dir in target_frames:
-        manifest = read_json(frame_dir / "map_manifest.json")
-        exact_capture = manifest.get("exact_capture") or {}
-        if exact_capture.get("requested") is not True or exact_capture.get("available") is not True:
-            return False, f"exact Process<true> maps are unavailable for image {image_id}"
-        num_iterations = as_integer(manifest.get("num_iterations"))
-        num_logical_states = as_integer(manifest.get("num_logical_states"))
-        if num_iterations < 0 or num_logical_states != num_iterations + 1:
-            return False, f"logical-state topology is malformed for image {image_id}"
-        levels = {
-            as_integer(item.get("pyramid_level", item.get("scale_number", 0)), 0)
-            for item in manifest.get("maps") or []
-            if isinstance(item, dict)
-        } or {as_integer(manifest.get("pyramid_level"), 0)}
-        if any(level < 0 for level in levels):
-            return False, f"pyramid-level topology is malformed for image {image_id}"
-        expected_states.update(
-            (level, iteration)
-            for level in levels
-            for iteration in range(-1, num_iterations)
-        )
-    traces_path = instrumentation_dir / "instrumentation" / "traces.jsonl"
-    if not traces_path.is_file():
-        return False, "targeted trace output is missing"
     requested_order = [
         (int(pixel["x"]), int(pixel["y"])) for pixel in trace_pixels
     ]
+    if not requested_order:
+        return False, "trace request does not contain any pixels"
     requested = set(requested_order)
-    observed_states: set[tuple[int, int, int, int]] = set()
-    for row in read_jsonl(traces_path):
-        if as_integer(row.get("image_id")) != image_id:
-            continue
-        trace_index = as_integer(row.get("trace_index"))
-        coordinate = (as_integer(row.get("x")), as_integer(row.get("y")))
+
+    geometric_root = instrumentation_dir / "geometric_iterations"
+    observed_geometric_stages: set[int] = set()
+    if geometric_root.exists() or geometric_root.is_symlink():
+        if geometric_root.is_symlink() or not geometric_root.is_dir():
+            return False, "geometric stage root is not a regular directory"
+        for stage_dir in geometric_root.iterdir():
+            if stage_dir.is_symlink() or not stage_dir.is_dir():
+                return False, f"unexpected geometric stage artifact: {stage_dir.name}"
+            match = re.fullmatch(r"iteration(\d+)", stage_dir.name)
+            if match is None:
+                return False, f"unexpected geometric stage directory: {stage_dir.name}"
+            stage_index = int(match.group(1))
+            if stage_index in observed_geometric_stages:
+                return False, f"duplicate geometric stage index: {stage_index}"
+            observed_geometric_stages.add(stage_index)
+    if observed_geometric_stages != expected_geometric_stages:
+        return False, (
+            "geometric stage topology does not match the resolved command: "
+            f"expected {sorted(expected_geometric_stages)}, observed "
+            f"{sorted(observed_geometric_stages)}"
+        )
+
+    all_expected_states: set[tuple[str, int, int, int, int]] = set()
+    stage_roots = instrumentation_stage_roots(instrumentation_dir)
+    for estimation_stage, geometric_iteration, stage_root in stage_roots:
+        stage_index = -1 if geometric_iteration is None else geometric_iteration
+        stage_label = (
+            "photometric"
+            if geometric_iteration is None
+            else f"geometric iteration {geometric_iteration}"
+        )
+        stage_metadata = read_json(stage_root / "run_metadata.json")
+        stage_summary = read_json(stage_root / "scene_summary.json")
         if (
-            trace_index < 0
-            or trace_index >= len(requested_order)
-            or requested_order[trace_index] != coordinate
+            stage_metadata.get("schema_name") != "openmvs.dmap.run"
+            or stage_metadata.get("estimation_stage") != estimation_stage
+            or (
+                geometric_iteration is None
+                and stage_metadata.get("geometric_iteration") is not None
+            )
+            or (
+                geometric_iteration is not None
+                and as_integer(stage_metadata.get("geometric_iteration")) != stage_index
+            )
+            or stage_summary.get("schema_name") != "openmvs.dmap.scene_summary"
+            or stage_summary.get("estimation_stage") != estimation_stage
+            or (
+                geometric_iteration is None
+                and stage_summary.get("geometric_iteration") is not None
+            )
+            or (
+                geometric_iteration is not None
+                and as_integer(stage_summary.get("geometric_iteration")) != stage_index
+            )
         ):
-            return False, "trace output does not bind trace_index to the requested pixel"
-        observed_states.add((
-            coordinate[0], coordinate[1],
-            as_integer(row.get("pyramid_level", row.get("scale_number"))),
-            as_integer(row.get("logical_iteration", row.get("iteration"))),
-        ))
-    missing = {
-        (x, y, level, iteration)
-        for x, y in requested
-        for level, iteration in expected_states
-        if (x, y, level, iteration) not in observed_states
+            return False, f"{stage_label} metadata is missing or malformed"
+
+        target_frames = [
+            path.parent
+            for path in sorted((stage_root / "depthmaps").glob("*/summary.json"))
+            if as_integer(read_json(path).get("image_id")) == image_id
+        ]
+        if not target_frames:
+            return False, f"no map capture was found for image {image_id} in {stage_label}"
+        manifest_states: set[tuple[int, int]] = set()
+        for frame_dir in target_frames:
+            manifest = read_json(frame_dir / "map_manifest.json")
+            exact_capture = manifest.get("exact_capture") or {}
+            if exact_capture.get("requested") is not True or exact_capture.get("available") is not True:
+                return False, f"exact Process<true> maps are unavailable in {stage_label}"
+            num_iterations = as_integer(manifest.get("num_iterations"))
+            num_logical_states = as_integer(manifest.get("num_logical_states"))
+            if num_iterations < 0 or num_logical_states != num_iterations + 1:
+                return False, f"logical-state topology is malformed in {stage_label}"
+            levels = {
+                as_integer(item.get("pyramid_level", item.get("scale_number", 0)), 0)
+                for item in manifest.get("maps") or []
+                if isinstance(item, dict)
+            } or {as_integer(manifest.get("pyramid_level"), 0)}
+            if any(level < 0 for level in levels):
+                return False, f"pyramid-level topology is malformed in {stage_label}"
+            manifest_states.update(
+                (level, iteration)
+                for level in levels
+                for iteration in range(-1, num_iterations)
+            )
+
+        # PatchMatch scales requested full-resolution coordinates independently
+        # at each pyramid level and first-wins deduplicates collisions.
+        plans_by_level: dict[int, dict[str, Any]] = {}
+        for plan in read_jsonl(stage_root / "resource_plans.jsonl"):
+            if as_integer(plan.get("image_id")) != image_id:
+                continue
+            level = as_integer(plan.get("pyramid_level"))
+            if level < 0 or level > 30 or level in plans_by_level:
+                return False, f"trace resource-plan topology is malformed in {stage_label}"
+            plans_by_level[level] = plan
+
+        expected_coordinates: dict[tuple[int, int], tuple[int, int]] = {}
+        expected_states: set[tuple[int, int, int]] = set()
+        if plans_by_level:
+            for level, plan in sorted(plans_by_level.items()):
+                width = as_integer(plan.get("width"))
+                height = as_integer(plan.get("height"))
+                num_trace_pixels = as_integer(plan.get("num_trace_pixels"))
+                num_logical_states = as_integer(plan.get("num_logical_states"))
+                if width <= 0 or height <= 0 or num_trace_pixels < 0 or num_logical_states <= 0:
+                    return False, f"trace resource-plan topology is malformed in {stage_label}"
+                try:
+                    selected = dmap_drilldown.trace_pyramid_layout(
+                        requested_order, level, width=width, height=height
+                    )
+                except ValueError as exc:
+                    return False, f"trace resource-plan topology is malformed: {exc}"
+                if len(selected) != num_trace_pixels:
+                    return False, (
+                        f"trace resource plan declares {num_trace_pixels} pixels at pyramid "
+                        f"level {level} in {stage_label}, but the request resolves to "
+                        f"{len(selected)}"
+                    )
+                represented_requests = sum(len(slot.request_indices) for slot in selected)
+                if level == 0 and represented_requests != len(requested_order):
+                    return False, "one or more requested pixels are outside the full-resolution frame"
+                if not selected:
+                    if plan.get("trace_requested") is not False or plan.get("trace_available") is not False:
+                        return False, f"empty trace resource plan is malformed in {stage_label}"
+                    continue
+                if plan.get("trace_requested") is not True or plan.get("trace_available") is not True:
+                    return False, f"targeted trace is unavailable in {stage_label} at level {level}"
+                for trace_index, slot in enumerate(selected):
+                    expected_coordinates[(level, trace_index)] = slot.coordinate
+                    expected_states.update(
+                        (trace_index, level, iteration)
+                        for iteration in range(-1, num_logical_states - 1)
+                    )
+            plan_states = {(level, iteration) for _, level, iteration in expected_states}
+            manifest_levels = {level for level, _ in manifest_states}
+            declared_plan_states = {
+                state for state in plan_states if state[0] in manifest_levels
+            }
+            if manifest_states != declared_plan_states:
+                return False, f"trace and exact-map logical-state topology disagree in {stage_label}"
+        else:
+            for level, iteration in manifest_states:
+                if level != 0:
+                    return False, "multiscale trace validation requires resource_plans.jsonl"
+                for trace_index, slot in enumerate(
+                    dmap_drilldown.trace_pyramid_layout(requested_order, level)
+                ):
+                    expected_coordinates[(level, trace_index)] = slot.coordinate
+                    expected_states.add((trace_index, level, iteration))
+
+        traces_path = stage_root / "instrumentation" / "traces.jsonl"
+        if not traces_path.is_file():
+            return False, f"targeted trace output is missing in {stage_label}"
+        observed_states: set[tuple[int, int, int]] = set()
+        for row in read_jsonl(traces_path):
+            if as_integer(row.get("image_id")) != image_id:
+                continue
+            trace_index = as_integer(row.get("trace_index"))
+            level = as_integer(row.get("pyramid_level", row.get("scale_number")))
+            iteration = as_integer(row.get("logical_iteration", row.get("iteration")))
+            coordinate = (as_integer(row.get("x")), as_integer(row.get("y")))
+            state = (trace_index, level, iteration)
+            if expected_coordinates.get((level, trace_index)) != coordinate:
+                return False, (
+                    f"trace output in {stage_label} does not bind its compact slot "
+                    "to the requested pixel layout"
+                )
+            if state not in expected_states:
+                return False, f"trace output in {stage_label} contains an undeclared state row"
+            if state in observed_states:
+                return False, f"trace output in {stage_label} contains a duplicate state row"
+            observed_states.add(state)
+        missing = expected_states - observed_states
+        if missing:
+            return False, (
+                f"trace output in {stage_label} is missing {len(missing)} "
+                "requested pixel/state rows"
+            )
+        all_expected_states.update(
+            (estimation_stage, stage_index, trace_index, level, iteration)
+            for trace_index, level, iteration in expected_states
+        )
+
+    logical_states = {
+        (stage, stage_index, level, iteration)
+        for stage, stage_index, _, level, iteration in all_expected_states
     }
-    if missing:
-        return False, f"trace output is missing {len(missing)} requested pixel/state rows"
     return True, (
         f"validated {len(requested)} targeted trace pixels across "
-        f"{len(expected_states)} logical states"
+        f"{len(stage_roots)} stage(s) and {len(logical_states)} logical states"
     )
 
 
@@ -12354,6 +12762,7 @@ def drilldown_run_command(
     work_dir: Path,
     local_mvs: Path,
     trace_config: Path | None,
+    program_options_config: Path,
     scene: dict[str, Any] | None = None,
 ) -> list[str]:
     densify_bin = densify_binary(config, instrumented=True)
@@ -12370,12 +12779,14 @@ def drilldown_run_command(
             "--dmap-instrumentation-sample-rate",
             "--dmap-instrumentation-write-maps",
             "--patch-match-cuda-instances",
+            "--config-file",
         },
     )
     profile = str(request["capture_profile"])
     target = request["target"]
     command = [
         str(densify_bin),
+        "--config-file", str(program_options_config.resolve()),
         "--working-folder", str(dmap_working_folder(local_mvs)),
         "--input-file", str(local_mvs),
         "--output-file", str(run_dir / "drilldown_dense.mvs"),
@@ -12495,6 +12906,9 @@ def execute_drilldown_request(
     scene = scenes.get(scene_id)
     if scene is None or not scene.get("working_folder") or not scene.get("mvs_file"):
         raise FileNotFoundError(f"cannot resolve drill-down input scene {scene_id}")
+    dmap_drilldown.validate_trace_row_admission(
+        config, request, argument_overrides=scene.get("argument_overrides")
+    )
     source_work = Path(str(scene["working_folder"])).expanduser().resolve()
     source_mvs = Path(str(scene["mvs_file"])).expanduser().resolve()
     densify_bin = densify_binary(config, instrumented=True)
@@ -12569,6 +12983,20 @@ def execute_drilldown_request(
         local_mvs = prepare_locked_profile_workspace(
             config, root, scene, work_dir
         )
+        dmap_drilldown.validate_no_implicit_program_options_file(
+            dmap_working_folder(local_mvs)
+        )
+        program_options_config = run_dir / "generated" / "Densify.drilldown.cfg"
+        if program_options_config.is_symlink():
+            raise RuntimeError(
+                f"controlled drill-down program-options path is a symlink: "
+                f"{program_options_config}"
+            )
+        write_immutable_text(
+            program_options_config,
+            "",
+            "controlled empty drill-down program-options file",
+        )
         trace_config = None
         if profile == "trace":
             trace_config = run_dir / "trace_config.json"
@@ -12583,7 +13011,15 @@ def execute_drilldown_request(
             ]
             write_json(trace_config, {"trace_pixels": trace_rows})
         command = drilldown_run_command(
-            config, run, request, run_dir, work_dir, local_mvs, trace_config, scene
+            config,
+            run,
+            request,
+            run_dir,
+            work_dir,
+            local_mvs,
+            trace_config,
+            program_options_config,
+            scene,
         )
         result = execute_densify_command(
             command,
@@ -13677,14 +14113,19 @@ def main() -> int:
             if command.refresh_report and command.report_dir is None:
                 raise ValueError("--refresh-report requires --report-dir")
             config, root = prepare_experiment(command.config, True)
-            scene_ids = {
-                str(scene["scan_id"])
+            resolved_scenes = {
+                str(scene["scan_id"]): scene
                 for scene in resolve_scenes(config, resolve_suite(config))
             }
-            if command.scene not in scene_ids:
+            selected_scene = resolved_scenes.get(command.scene)
+            if selected_scene is None:
                 raise ValueError(
                     f"scene {command.scene!r} is not selected by this experiment config"
                 )
+            selected_mvs = Path(str(selected_scene["mvs_file"])).expanduser().resolve()
+            dmap_drilldown.validate_no_implicit_program_options_file(
+                selected_mvs.parent
+            )
             request = dmap_drilldown.build_request(
                 config=config,
                 config_path=Path(str(config["_config_path"])),
@@ -13695,6 +14136,7 @@ def main() -> int:
                 variants=command.variant,
                 source_revision=git_hash(),
                 source_dirty=git_dirty(),
+                argument_overrides=selected_scene.get("argument_overrides"),
             )
             path = dmap_drilldown.write_immutable_request(root / "drilldowns", request)
             index_path = refresh_drilldown_index(root)

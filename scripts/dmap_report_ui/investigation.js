@@ -1355,7 +1355,11 @@
       return `<div class="trace-unavailable"><strong>Completed trace data unavailable.</strong> ${escapeHtml(trace?.unavailable_reason || "No normalized trace rows were indexed.")}</div>`;
     }
     const runOrder = new Map([[state.baseline, 0], [state.variant, 1]]);
-    const rows = trace.rows.filter(mechanicsPyramidLevelMatches).sort((left, right) => (
+    const traceStageKey = (row) => row.estimation_stage === "geometric_consistency"
+      ? `geometric_consistency:${row.geometric_iteration}` : "photometric";
+    const rows = trace.rows.filter((row) => (
+      traceStageKey(row) === state.captureStage && mechanicsPyramidLevelMatches(row)
+    )).sort((left, right) => (
       Number(left.y) - Number(right.y) || Number(left.x) - Number(right.x) ||
       (runOrder.get(left.run) ?? 2) - (runOrder.get(right.run) ?? 2) ||
       Number(left.logical_iteration) - Number(right.logical_iteration)
@@ -1365,9 +1369,17 @@
       const views = `${row.view?.selected_count ?? "n/a"} / ${traceMask(row.view?.selected_before_mask)} → ${traceMask(row.view?.selected_mask)}`;
       const sourceQuality = row.source_quality || "proxy";
       const measurementBasis = row.measurement_basis || "legacy_unclassified_trace";
+      const identity = row.request_identity || {};
+      const aliases = (identity.alias_coordinates || []).map((coordinate, index) => {
+        const requestIndex = (identity.alias_request_indices || [])[index];
+        return `#${requestIndex ?? "?"} (${Number(coordinate.x)}, ${Number(coordinate.y)})`;
+      });
+      const requestLabel = aliases.length
+        ? `${aliases.join(", ")} → slot ${Number(row.trace_index)} (${Number(row.x)}, ${Number(row.y)})`
+        : `slot ${Number(row.trace_index)} (${Number(row.x)}, ${Number(row.y)})`;
       return `<tr>
         <td>${escapeHtml(row.run)}</td>
-        <td><button class="trace-pixel-jump" type="button" data-x="${Number(row.x)}" data-y="${Number(row.y)}" title="Inspect this pixel in synchronized maps">(${Number(row.x)}, ${Number(row.y)})</button></td>
+        <td><button class="trace-pixel-jump" type="button" data-x="${Number(row.x)}" data-y="${Number(row.y)}" title="Inspect scaled trace coordinate in synchronized maps">${escapeHtml(requestLabel)}</button></td>
         <td>${escapeHtml(iteration)}</td>
         <td>${escapeHtml(row.source)} <span class="quality ${escapeHtml(sourceQuality)}" title="${escapeHtml(measurementBasis)}">${escapeHtml(sourceQuality)}</span><br><small>${escapeHtml(measurementBasis)}</small></td>
         <td>${escapeHtml(traceTransition(row.cost?.before, row.cost?.after))}<br><small>improvement ${escapeHtml(format(row.cost?.improvement, 6))}</small></td>
@@ -1377,21 +1389,24 @@
         <td>${tracePayload(row)}</td>
       </tr>`;
     }).join("") || `<tr><td colspan="9">No trace rows were retained for ${escapeHtml(pyramidLevelLabel(String(state.pyramidLevel)))}.</td></tr>`;
-    const sourceLinks = (trace.sources || []).filter((source) => source.available && source.source_path).map((source) => (
-      evidenceReference(source.source_path, `${source.run} traces.jsonl`, "trace-source-link")
+    const selectedSources = (trace.sources || []).filter((source) => (
+      source.available && source.source_path && traceStageKey(source) === state.captureStage
+    ));
+    const sourceLinks = selectedSources.map((source) => (
+      evidenceReference(source.source_path, `${source.run} ${source.stage_key} traces.jsonl`, "trace-source-link")
     )).join(" / ");
     const executions = entry.execution_metadata?.executions || [];
     const durations = executions.map((execution) => {
       const seconds = execution.elapsed_seconds ?? execution.duration_seconds ?? execution.wall_time_seconds;
       return `${execution.run}: ${seconds == null ? "duration unavailable" : `${format(seconds, 2)} s`} / ${execution.validation || "validation unavailable"}`;
     }).join("; ");
-    const qualityCounts = trace.source_quality_counts || rows.reduce((counts, row) => {
+    const qualityCounts = rows.reduce((counts, row) => {
       const quality = row.source_quality === "exact" ? "exact" : "proxy";
       counts[quality] += 1;
       return counts;
     }, { exact: 0, proxy: 0 });
     return `<details class="completed-trace"${open ? " open" : ""}>
-      <summary><span>Targeted pixel trace</span><strong>${rows.length}/${trace.row_count} rows at ${escapeHtml(pyramidLevelLabel(String(state.pyramidLevel)))} / ${trace.source_count} runs</strong></summary>
+      <summary><span>Targeted pixel trace</span><strong>${rows.length}/${trace.row_count} rows at ${escapeHtml(state.captureStage)} / ${escapeHtml(pyramidLevelLabel(String(state.pyramidLevel)))} / ${selectedSources.length} sources</strong></summary>
       <div class="completed-trace-body">
         <p>New trace requests use a full-frame Process&lt;true&gt; maps rerun with <code>write_maps=1</code>; public v1 has no compact exact-trace path. Source attribution is classified per row: exact requires hot-kernel provenance backed by valid schema-v4 exact-map completion evidence, while imported legacy or post-pass rows remain proxy. This table contains ${Number(qualityCounts.exact || 0)} exact and ${Number(qualityCounts.proxy || 0)} proxy source rows.</p>
         <p class="trace-executions">${escapeHtml(durations)}</p>
@@ -1585,7 +1600,34 @@
     };
   }
 
-  function artifactTile(artifact, runLabel, signal) {
+  function coarseCostUnavailability(runLabel, repeat, signal) {
+    const signalMetadata = model.signals.find((item) => item.name === signal) || {};
+    const costLike = signalMetadata.mechanism === "cost"
+      || /cost|confidence|gap/i.test(String(signal));
+    if (!costLike || state.pyramidLevel === "unspecified" || Number(state.pyramidLevel) <= 0) return null;
+    const current = frame();
+    const contract = (model.mechanics?.coarse_compatibility_map_availability || []).find((row) => {
+      const key = row.estimation_stage === "geometric_consistency"
+        ? `geometric_consistency:${row.geometric_iteration}` : "photometric";
+      return row.run === runLabel && Number(row.repeat) === Number(repeat)
+        && row.scene_id === state.scene && Number(row.image_id) === Number(current?.image_id)
+        && key === state.captureStage && Number(row.pyramid_level) === Number(state.pyramidLevel)
+        && row.cost_map_expected === false;
+    });
+    if (!contract) return null;
+    return {
+      available: false,
+      unavailable_reason: contract.cost_map_unavailable_reason,
+      measurement_quality: "unavailable",
+      measurement_basis: contract.measurement_basis,
+      pyramid_level: Number(contract.pyramid_level),
+      estimation_stage: contract.estimation_stage,
+      geometric_iteration: contract.geometric_iteration,
+    };
+  }
+
+  function artifactTile(artifact, runLabel, repeat, signal) {
+    if (!artifact) artifact = coarseCostUnavailability(runLabel, repeat, signal);
     if (!artifact) artifact = {
       available: false,
       unavailable_reason: "signal not declared for this run/frame/stage/pyramid level",
@@ -1709,10 +1751,14 @@
     state.signals.filter((signal) => signalMatchesFilters(model.signals.find((item) => item.name === signal))).forEach((signal) => {
       const metadata = model.signals.find((item) => item.name === signal) || { label: signal, measurement_qualities: [] };
       html += `<div class="signal-label" title="${escapeHtml(metadata.description || "")}"><strong>${escapeHtml(metadata.label)}</strong><small>${escapeHtml(metadata.mechanism || "state")} / ${escapeHtml(metadata.quantity || "value")} / ${escapeHtml(metadata.measurement_qualities.join(" / "))}</small></div>`;
-      const baseline = signal === "reference_rgb" ? referenceTile(columns[0].label) : selectedArtifact(columns[0].label, columns[0].repeat, signal);
-      const variant = signal === "reference_rgb" ? referenceTile(columns[1].label) : selectedArtifact(columns[1].label, columns[1].repeat, signal);
-      html += artifactTile(baseline, columns[0].label, signal);
-      html += artifactTile(variant, columns[1].label, signal);
+      const baseline = signal === "reference_rgb" ? referenceTile(columns[0].label)
+        : selectedArtifact(columns[0].label, columns[0].repeat, signal)
+          || coarseCostUnavailability(columns[0].label, columns[0].repeat, signal);
+      const variant = signal === "reference_rgb" ? referenceTile(columns[1].label)
+        : selectedArtifact(columns[1].label, columns[1].repeat, signal)
+          || coarseCostUnavailability(columns[1].label, columns[1].repeat, signal);
+      html += artifactTile(baseline, columns[0].label, columns[0].repeat, signal);
+      html += artifactTile(variant, columns[1].label, columns[1].repeat, signal);
       html += deltaTile(baseline, variant, signal);
     });
     byId("map-grid").innerHTML = html;
@@ -2259,6 +2305,17 @@
       row.storage_preflight_succeeded ?? "n/a", row.lease_released ?? "n/a",
       row.actual_map_count ?? "n/a", row.valid ?? "unavailable", row.reason || "-",
     ]);
+    const coarseAvailabilityRows = (
+      mechanics.coarse_compatibility_map_availability || []
+    ).filter(match).map((row) => [
+      row.run,
+      row.pyramid_level,
+      row.update_source_map_expected ?? "n/a",
+      row.cost_map_expected ?? "n/a",
+      row.cost_map_available ?? "unavailable",
+      row.cost_map_unavailable_reason || "-",
+      row.measurement_basis || "-",
+    ]);
     const maskRows = (current?.run_frames || []).filter((row) => {
       const repeat = row.run === state.baseline ? state.baselineRepeat : state.variantRepeat;
       return runs.has(row.run) && Number(row.repeat) === Number(repeat);
@@ -2291,6 +2348,7 @@
       `<div class="mechanics-block"><h3>Sequential postprocess filtering</h3>${smallTable(["Run", "Sequence", "Stage", "Status", "Enabled", "Executed", "Valid in", "Valid out", "Removed", "Added", "Depth changed", "Mean |depth delta|", "Unavailable reason"], filterRows) || unavailable("Sequential postprocess observations", false)}</div>`,
       `<div class="mechanics-block"><h3>Confidence adjustment</h3>${smallTable(["Run", "Method", "Status", "Enabled", "Executed", "Output", "Positive in", "Positive out", "Changed", "Mean |delta|", "Combination", "Unavailable reason"], confidenceRows) || unavailable("Confidence-adjustment observations", false)}</div>`,
       `<div class="mechanics-block"><h3>Resource admission and storage preflight</h3><p class="mechanics-note">Frame storage is cumulative across pyramid levels. Coarse levels hold the displayed full-resolution reserve until it is atomically consumed at the fine level.</p>${smallTable(["Run", "Pyramid", "Component", "Decision", "Trace requested", "Trace admitted", "Maps requested", "Maps admitted", "Device MiB", "Host MiB", "Frame MiB", "Current pyramid MiB", "Committed before MiB", "Full-res reserve MiB", "Held reserve MiB", "Reserve consumed", "Preflight", "Lease released", "Actual maps", "Valid", "Reason"], resourceRows) || unavailable("Resource-plan observations", false)}</div>`,
+      `<div class="mechanics-block"><h3>Coarse compatibility-map availability</h3><p class="mechanics-note">Schema-v4 resource plans explicitly distinguish the available coarse update-source proxy from unavailable production cost/confidence maps.</p>${smallTable(["Run", "Pyramid", "Update-source expected", "Cost expected", "Cost available", "Unavailable reason", "Basis"], coarseAvailabilityRows) || unavailable("Coarse compatibility-map contracts", false)}</div>`,
       `<div class="mechanics-block"><h3>Ignore-mask availability</h3>${smallTable(["Run", "Ignore mask", "Requested", "Loaded", "Mask-rejected pixels", "Unavailable reason"], maskRows) || unavailable("Ignore-mask observations", false)}</div>`,
     ].join("");
   }

@@ -744,6 +744,7 @@ write_demo_inputs() {
   local output="$1"
   local config="$2"
   local sub_resolution_levels="$3"
+  local geometric_iters="$4"
   local annotations="${output}/inputs/annotation_sidecar.json"
   mkdir -p "${output}/inputs/annotation-dataset" "${output}/inputs/cache"
   cat >"${annotations}" <<'EOF'
@@ -863,11 +864,11 @@ runs:
   - label: baseline
     role: baseline
     repeats: 1
-    densify_args: [--iters, "1", --geometric-iters, "0"]
+    densify_args: [--iters, "1", --geometric-iters, "${geometric_iters}"]
   - label: candidate
     role: variant
     repeats: 1
-    densify_args: [--iters, "2", --geometric-iters, "0"]
+    densify_args: [--iters, "2", --geometric-iters, "${geometric_iters}"]
 EOF
 }
 
@@ -875,6 +876,7 @@ command_demo() {
   local output="/tmp/openmvs-dmap-observability-demo"
   local all_profiles=false
   local sub_resolution_levels=0
+  local geometric_iters=0
   if (($#)) && [[ "$1" == "--help" ]]; then
     cat <<'EOF'
 Usage: tools/dmap_observability.sh demo [OPTIONS]
@@ -887,6 +889,7 @@ Options:
   --all-profiles         Add a paired exact trace and require all five capture profiles.
   --all-levels           Backward-compatible alias for --all-profiles.
   --multiscale           Capture and require pyramid levels 0 and 1.
+  --geometric-iters N    Capture and require N geometric-consistency stages.
 
 The default demo captures the four core profiles: endpoint, summary, prefilter,
 and deep. --all-profiles adds trace as the fifth capture profile by running a
@@ -896,7 +899,8 @@ PatchMatch pyramid levels. This mode uses more GPU time and storage. The demo
 creates its synthetic annotations at runtime, never writes evidence into the
 repository, and refuses nonempty output.
 
-Combine --all-profiles and --multiscale for the complete release matrix.
+For the complete release matrix across profiles, pyramid levels, and estimation
+stages, combine --all-profiles, --multiscale, and --geometric-iters 1.
 EOF
     return 0
   fi
@@ -908,6 +912,12 @@ EOF
       --python) need_value "$1" "$#"; python_bin="$2"; shift 2 ;;
       --all-profiles|--all-levels) all_profiles=true; shift ;;
       --multiscale) sub_resolution_levels=1; shift ;;
+      --geometric-iters)
+        need_value "$1" "$#"
+        [[ "$2" =~ ^[0-9]+$ ]] || fail "--geometric-iters must be a non-negative integer"
+        geometric_iters="$2"
+        shift 2
+        ;;
       *) fail "unknown demo option: $1" ;;
     esac
   done
@@ -931,7 +941,7 @@ EOF
   require_dmap_dev
 
   local config="${output}/experiment.yaml"
-  write_demo_inputs "${output}" "${config}" "${sub_resolution_levels}"
+  write_demo_inputs "${output}" "${config}" "${sub_resolution_levels}" "${geometric_iters}"
   "${python_bin}" "${dmap_dev}" prepare --config "${config}"
   "${python_bin}" "${dmap_dev}" run --config "${config}" \
     --profile endpoint summary prefilter deep --skip-report
@@ -996,12 +1006,73 @@ if not any(
     for row in coarse_maps
 ):
     raise SystemExit("multiscale demo report has no validated coarse candidate_source proxy")
+coarse_availability = (
+    model.get("mechanics", {}).get("coarse_compatibility_map_availability", [])
+)
+if not any(
+    row.get("pyramid_level") == 1
+    and row.get("cost_map_expected") is False
+    and row.get("cost_map_available") is False
+    and row.get("cost_map_unavailable_reason")
+        == "production confidence maps are retained at pyramid level 0 only"
+    for row in coarse_availability
+):
+    raise SystemExit(
+        "multiscale demo report does not preserve the producer-declared "
+        "coarse cost-map unavailability reason"
+    )
 ' "${report_dir}/report_model.json"
+  fi
+  if [[ "${all_profiles}" == true ]]; then
+    "${python_bin}" -c '
+import json
+import sys
+from pathlib import Path
+
+model = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_levels = set(range(int(sys.argv[2]) + 1))
+expected_stages = {"photometric"} | {
+    f"geometric_consistency:{index}" for index in range(int(sys.argv[3]))
+}
+entries = [
+    entry
+    for entry in model.get("drilldowns", {}).get("entries", [])
+    if entry.get("status") == "complete"
+]
+if not entries:
+    raise SystemExit("release demo has no completed exact trace entry")
+for entry in entries:
+    rows = entry.get("trace_data", {}).get("rows", [])
+    observed_levels = {
+        int(row["pyramid_level"])
+        for row in rows
+        if row.get("pyramid_level") is not None
+    }
+    observed_stages = {
+        (
+            f"geometric_consistency:{row.get('"'"'geometric_iteration'"'"')}"
+            if row.get("estimation_stage") == "geometric_consistency"
+            else "photometric"
+        )
+        for row in rows
+    }
+    if not expected_levels.issubset(observed_levels):
+        raise SystemExit(
+            f"release demo trace misses pyramid levels: "
+            f"expected={sorted(expected_levels)} observed={sorted(observed_levels)}"
+        )
+    if not expected_stages.issubset(observed_stages):
+        raise SystemExit(
+            f"release demo trace misses estimation stages: "
+            f"expected={sorted(expected_stages)} observed={sorted(observed_stages)}"
+        )
+' "${report_dir}/report_model.json" "${sub_resolution_levels}" "${geometric_iters}"
   fi
 
   printf '\nDemo complete. Generated evidence is external and ephemeral.\n'
   printf 'Coverage: %s\n' "$([[ "${all_profiles}" == true ]] && printf 'all five capture profiles' || printf 'four core profiles')"
   printf 'Pyramids: %s\n' "$([[ "${sub_resolution_levels}" -gt 0 ]] && printf 'levels 0 and 1' || printf 'level 0')"
+  printf 'Stages:   photometric + %s geometric-consistency iteration(s)\n' "${geometric_iters}"
   printf 'Markdown: %s\n' "${report_dir}/01_development_report.md"
   printf 'UI:       %s\n' "${report_dir}/02_investigation.html"
   printf 'Serve:    tools/dmap_observability.sh serve --report-dir %q\n' "${report_dir}"

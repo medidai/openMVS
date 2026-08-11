@@ -99,6 +99,7 @@ require all five capture profiles to validate:
 tools/dmap_observability.sh demo \
   --all-profiles \
   --multiscale \
+  --geometric-iters 1 \
   --output /tmp/openmvs-dmap-observability-all-profiles
 ```
 
@@ -108,6 +109,10 @@ pyramid levels. The older `--all-levels` spelling remains a backward-compatible
 alias. `--multiscale` separately requires pyramid levels 0 and 1, verifies that
 both are selectable in the report model, and requires the coarse compatibility
 update-source proxy. Coarse cost-component maps remain explicitly unavailable.
+`--geometric-iters 1` adds a geometric-consistency stage and requires its exact
+trace rows in the generated report. Together, these options exercise all five
+capture profiles, pyramid levels 0 and 1, and both photometric and geometric
+estimation stages.
 The trace profile is another full-frame `Process<true>` rerun for the baseline
 and candidate, even though the report focuses it on one pixel. Budget this mode
 for more than twice the deep-capture work and storage of the default demo.

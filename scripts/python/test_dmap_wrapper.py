@@ -130,11 +130,22 @@ class DMapWrapperTests(unittest.TestCase):
         self.assertIn("five capture profiles", help_result.stdout)
         self.assertIn("does not mean CUDA or", help_result.stdout)
         self.assertIn("--multiscale", help_result.stdout)
+        self.assertIn("--geometric-iters", help_result.stdout)
         self.assertIn("complete release matrix", help_result.stdout)
+        self.assertIn("trace misses pyramid levels", source)
+        self.assertIn("trace misses estimation stages", source)
         self.assertIn(
             'row.get("measurement_basis") == "post_pass_change_detection"',
             source,
         )
+        self.assertIn(
+            '"production confidence maps are retained at pyramid level 0 only"',
+            source,
+        )
+
+        invalid_geometric = run_wrapper("demo", "--geometric-iters", "invalid")
+        self.assertNotEqual(invalid_geometric.returncode, 0)
+        self.assertIn("must be a non-negative integer", invalid_geometric.stderr)
 
     def test_package_help_exposes_no_sanitizer_bypass(self) -> None:
         result = run_wrapper("package", "--help")
