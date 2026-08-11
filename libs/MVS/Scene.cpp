@@ -842,7 +842,36 @@ bool Scene::EstimateNeighborViewsPointCloud(unsigned maxResolution)
 //  - fWeightPointInsideROI: 0 - ignore ROI, between 0 and 1 - weight inside ROI points, 1 - consider only ROI points
 bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI)
 {
+#ifdef _USE_DMAP_INSTRUMENTATION
+	return SelectNeighborViewsImpl<false>(ID, points, nMinViews, nMinPointViews, fOptimAngle, fWeightPointInsideROI, NULL);
+}
+
+template <bool OBSERVE>
+bool Scene::SelectNeighborViewsImpl(uint32_t ID, IndexArr& points, unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI, NeighborViewSelectionObservation* observation)
+{
+#endif
 	ASSERT(points.empty());
+#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (OBSERVE) {
+		ASSERT(observation);
+		*observation = NeighborViewSelectionObservation();
+		observation->source = NeighborViewSelectionObservation::SOURCE_COMPUTED_SPARSE_VISIBILITY;
+		observation->referenceID = ID;
+		observation->requiredMinViews = nMinViews;
+		observation->requiredMinPointViews = nMinPointViews;
+		observation->effectiveMinViews = MINF(nMinViews, nCalibratedImages-1);
+		observation->optimalAngle = fOptimAngle;
+		observation->roiWeight = fWeightPointInsideROI;
+		observation->candidates.resize(images.size());
+		FOREACH(idxImage, images) {
+			NeighborViewCandidateObservation& candidate(observation->candidates[idxImage]);
+			candidate.ID = idxImage;
+			candidate.imageValid = images[idxImage].IsValid();
+			candidate.initialDecision = idxImage == ID ? NeighborViewCandidateObservation::INITIAL_REFERENCE_IMAGE :
+				(candidate.imageValid ? NeighborViewCandidateObservation::INITIAL_NOT_EVALUATED : NeighborViewCandidateObservation::INITIAL_INVALID_IMAGE);
+		}
+	}
+#endif
 
 	// extract the estimated 3D points and the corresponding 2D projections for the reference image
 	Image& imageData = images[ID];
@@ -859,6 +888,10 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 	scores.Memset(0);
 	if (nMinPointViews > nCalibratedImages)
 		nMinPointViews = nCalibratedImages;
+#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (OBSERVE)
+		observation->effectiveMinPointViews = nMinPointViews;
+#endif
 	unsigned nPoints = 0;
 	imageData.avgDepth = 0;
 	ASSERT(fWeightPointInsideROI >= 0 && fWeightPointInsideROI <= 1);
@@ -912,10 +945,43 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 			score.avgScale += fScaleRatio;
 			score.avgAngle += fAngle;
 			++score.points;
+#ifdef _USE_DMAP_INSTRUMENTATION
+			if constexpr (OBSERVE) {
+				NeighborViewCandidateObservation& candidate(observation->candidates[view]);
+				const float wAngleClipped(MAXF(wAngle,0.1f));
+				candidate.scoreComponentsAvailable = true;
+				candidate.angleWeightSum += wAngle;
+				candidate.clippedAngleWeightSum += wAngleClipped;
+				candidate.scaleWeightSum += wScale;
+				candidate.roiWeightSum += wROI;
+			}
+#endif
 		}
 	}
+#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (OBSERVE) {
+		observation->eligibleReferencePoints = points.size();
+		observation->scoredReferencePoints = nPoints;
+	}
+	#endif
 	if(nPoints > 3)
 		imageData.avgDepth /= nPoints;
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (OBSERVE) {
+		FOREACH(IDB, images) {
+			if (IDB == ID)
+				continue;
+			const Score& score(scores[IDB]);
+			NeighborViewCandidateObservation& candidate(observation->candidates[IDB]);
+			candidate.sharedPoints = score.points;
+			candidate.scoreBeforeArea = score.score;
+			if (score.points) {
+				candidate.avgScale = score.avgScale/score.points;
+				candidate.avgAngle = score.avgAngle/score.points;
+			}
+		}
+	}
+#endif
 
 	// select best neighborViews
 	if (neighbors.empty()) {
@@ -925,8 +991,17 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 			if (!imageDataB.IsValid())
 				continue;
 			const Score& score = scores[IDB];
+			#ifdef _USE_DMAP_INSTRUMENTATION
+			if (score.points < 3) {
+				if constexpr (OBSERVE)
+					if (IDB != ID)
+						observation->candidates[IDB].initialDecision = NeighborViewCandidateObservation::INITIAL_INSUFFICIENT_SHARED_POINTS;
+				continue;
+			}
+			#else
 			if (score.points < 3)
 				continue;
+			#endif
 			ASSERT(ID != IDB);
 			// compute how well the matched features are spread out (image covered area)
 			const Point2f boundsA(imageData.GetSize());
@@ -947,8 +1022,20 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 					projs.RemoveLast();
 			}
 			ASSERT(projs.size() <= score.points);
+#ifdef _USE_DMAP_INSTRUMENTATION
+			if constexpr (OBSERVE)
+				observation->candidates[IDB].projectedPoints = projs.size();
+#endif
+			#ifdef _USE_DMAP_INSTRUMENTATION
+			if (projs.empty()) {
+				if constexpr (OBSERVE)
+					observation->candidates[IDB].initialDecision = NeighborViewCandidateObservation::INITIAL_NO_PROJECTED_POINTS;
+				continue;
+			}
+			#else
 			if (projs.empty())
 				continue;
+			#endif
 			const float area(ComputeCoveredArea<float,2,16,false>((const float*)projs.data(), projs.size(), boundsA.ptr()));
 			projs.Empty();
 			// store image score
@@ -959,10 +1046,29 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 			neighbor.angle = score.avgAngle/score.points;
 			neighbor.area = area;
 			neighbor.score = score.score*MAXF(area,0.01f);
+#ifdef _USE_DMAP_INSTRUMENTATION
+			if constexpr (OBSERVE) {
+				NeighborViewCandidateObservation& candidate(observation->candidates[IDB]);
+				candidate.initialDecision = NeighborViewCandidateObservation::INITIAL_RANKED;
+				candidate.sharedPoints = score.points;
+				candidate.scoreBeforeArea = score.score;
+				candidate.avgScale = neighbor.scale;
+				candidate.avgAngle = neighbor.angle;
+				candidate.area = area;
+				candidate.areaFactor = MAXF(area,0.01f);
+				candidate.score = neighbor.score;
+			}
+#endif
 		}
 		neighbors.Sort([](const ViewScore& i, const ViewScore& j) {
 			return i.score > j.score;
 		});
+#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (OBSERVE) {
+			FOREACH(rank, neighbors)
+				observation->candidates[neighbors[rank].ID].rawRank = rank;
+		}
+#endif
 		#if TD_VERBOSE != TD_VERBOSE_OFF
 		// print neighbor views
 		if (VERBOSITY_LEVEL > 2) {
@@ -973,12 +1079,26 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 		}
 		#endif
 	}
+#ifdef _USE_DMAP_INSTRUMENTATION
+	const bool succeeded(points.size() > 3 && neighbors.size() >= MINF(nMinViews,nCalibratedImages-1));
+	if constexpr (OBSERVE)
+		observation->rankingSucceeded = succeeded;
+	if (!succeeded) {
+	#else
 	if (points.size() <= 3 || neighbors.size() < MINF(nMinViews,nCalibratedImages-1)) {
+	#endif
 		DEBUG_EXTRA("error: reference image %3u has not enough images in view", ID);
 		return false;
 	}
 	return true;
 } // SelectNeighborViews
+#ifdef _USE_DMAP_INSTRUMENTATION
+bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI, NeighborViewSelectionObservation* observation)
+{
+	ASSERT(observation);
+	return SelectNeighborViewsImpl<true>(ID, points, nMinViews, nMinPointViews, fOptimAngle, fWeightPointInsideROI, observation);
+}
+#endif
 
 void Scene::SelectNeighborViews(unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI)
 {
@@ -999,6 +1119,118 @@ void Scene::SelectNeighborViews(unsigned nMinViews, unsigned nMinPointViews, flo
 // keep only the best neighbors for the reference image
 bool Scene::FilterNeighborViews(ViewScoreArr& neighbors, float fMinArea, float fMinScale, float fMaxScale, float fMinAngle, float fMaxAngle, unsigned nMaxViews)
 {
+#ifdef _USE_DMAP_INSTRUMENTATION
+	return FilterNeighborViewsImpl<false>(neighbors, fMinArea, fMinScale, fMaxScale, fMinAngle, fMaxAngle, nMaxViews, NULL);
+}
+
+template <bool OBSERVE>
+bool Scene::FilterNeighborViewsImpl(ViewScoreArr& neighbors, float fMinArea, float fMinScale, float fMaxScale, float fMinAngle, float fMaxAngle, unsigned nMaxViews, NeighborViewSelectionObservation* observation)
+{
+#endif
+#ifdef _USE_DMAP_INSTRUMENTATION
+	auto findCandidate = [&](uint32_t ID) -> NeighborViewCandidateObservation* {
+		if constexpr (!OBSERVE)
+			return NULL;
+		for (NeighborViewCandidateObservation& candidate: observation->candidates)
+			if (candidate.ID == ID)
+				return &candidate;
+		return NULL;
+	};
+	if constexpr (OBSERVE) {
+		ASSERT(observation);
+		observation->filterInputCount = neighbors.size();
+		observation->filterMaximumViews = nMaxViews;
+		observation->filterMinArea = fMinArea;
+		observation->filterMinScale = fMinScale;
+		observation->filterMaxScale = fMaxScale;
+		observation->filterMinAngle = fMinAngle;
+		observation->filterMaxAngle = fMaxAngle;
+		FOREACH(rank, neighbors) {
+			NeighborViewCandidateObservation* candidate(findCandidate(neighbors[rank].ID));
+			if (candidate)
+				candidate->filterInputRank = rank;
+		}
+	}
+	// remove invalid neighbor views
+	const unsigned nMinViews(MAXF(4u, nMaxViews*3/4));
+#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (OBSERVE)
+		observation->filterMinimumRetained = nMinViews;
+#endif
+	RFOREACH(n, neighbors) {
+		const ViewScore& neighbor = neighbors[n];
+		bool failedThreshold;
+#ifdef _USE_DMAP_INSTRUMENTATION
+		NeighborViewCandidateObservation* candidate(NULL);
+		if constexpr (OBSERVE) {
+			const bool belowMinArea(neighbor.area < fMinArea);
+			const bool belowMinScale(neighbor.scale < fMinScale);
+			const bool atOrAboveMaxScale(neighbor.scale >= fMaxScale);
+			const bool scaleNotFinite(!std::isfinite(neighbor.scale));
+			const bool belowMinAngle(neighbor.angle < fMinAngle);
+			const bool atOrAboveMaxAngle(neighbor.angle >= fMaxAngle);
+			const bool angleNotFinite(!std::isfinite(neighbor.angle));
+			failedThreshold = neighbor.area < fMinArea ||
+				!ISINSIDE(neighbor.scale, fMinScale, fMaxScale) ||
+				!ISINSIDE(neighbor.angle, fMinAngle, fMaxAngle);
+			candidate = findCandidate(neighbor.ID);
+			ASSERT(candidate);
+			candidate->belowMinArea = belowMinArea;
+			candidate->belowMinScale = belowMinScale;
+			candidate->atOrAboveMaxScale = atOrAboveMaxScale;
+			candidate->scaleNotFinite = scaleNotFinite;
+			candidate->belowMinAngle = belowMinAngle;
+			candidate->atOrAboveMaxAngle = atOrAboveMaxAngle;
+			candidate->angleNotFinite = angleNotFinite;
+		} else {
+			failedThreshold = neighbor.area < fMinArea ||
+				!ISINSIDE(neighbor.scale, fMinScale, fMaxScale) ||
+				!ISINSIDE(neighbor.angle, fMinAngle, fMaxAngle);
+		}
+#else
+		failedThreshold = neighbor.area < fMinArea ||
+			!ISINSIDE(neighbor.scale, fMinScale, fMaxScale) ||
+			!ISINSIDE(neighbor.angle, fMinAngle, fMaxAngle);
+#endif
+		if (neighbors.size() > nMinViews && failedThreshold) {
+#ifdef _USE_DMAP_INSTRUMENTATION
+			if constexpr (OBSERVE)
+				candidate->filterDecision = NeighborViewCandidateObservation::FILTER_REJECTED_THRESHOLD;
+#endif
+			neighbors.RemoveAtMove(n);
+		} else {
+#ifdef _USE_DMAP_INSTRUMENTATION
+			if constexpr (OBSERVE) {
+				candidate->filterDecision = failedThreshold ?
+					NeighborViewCandidateObservation::FILTER_RETAINED_MINIMUM_VIEW_GUARD :
+					NeighborViewCandidateObservation::FILTER_RETAINED_THRESHOLD_PASS;
+			}
+#endif
+		}
+	}
+	if (neighbors.size() > nMaxViews) {
+#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (OBSERVE) {
+			for (IIndex n=nMaxViews; n<neighbors.size(); ++n) {
+				NeighborViewCandidateObservation* candidate(findCandidate(neighbors[n].ID));
+				if (candidate)
+					candidate->filterDecision = NeighborViewCandidateObservation::FILTER_REJECTED_MAX_VIEW_TRUNCATION;
+			}
+		}
+#endif
+		neighbors.resize(nMaxViews);
+	}
+#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (OBSERVE) {
+		FOREACH(rank, neighbors) {
+			NeighborViewCandidateObservation* candidate(findCandidate(neighbors[rank].ID));
+			if (candidate)
+				candidate->finalRank = rank;
+		}
+		observation->filterSucceeded = !neighbors.empty();
+	}
+#endif
+#else
 	// remove invalid neighbor views
 	const unsigned nMinViews(MAXF(4u, nMaxViews*3/4));
 	RFOREACH(n, neighbors) {
@@ -1011,8 +1243,16 @@ bool Scene::FilterNeighborViews(ViewScoreArr& neighbors, float fMinArea, float f
 	}
 	if (neighbors.size() > nMaxViews)
 		neighbors.resize(nMaxViews);
+#endif
 	return !neighbors.empty();
 } // FilterNeighborViews
+#ifdef _USE_DMAP_INSTRUMENTATION
+bool Scene::FilterNeighborViews(ViewScoreArr& neighbors, float fMinArea, float fMinScale, float fMaxScale, float fMinAngle, float fMaxAngle, unsigned nMaxViews, NeighborViewSelectionObservation* observation)
+{
+	ASSERT(observation);
+	return FilterNeighborViewsImpl<true>(neighbors, fMinArea, fMinScale, fMaxScale, fMinAngle, fMaxAngle, nMaxViews, observation);
+}
+#endif
 /*----------------------------------------------------------------*/
 
 

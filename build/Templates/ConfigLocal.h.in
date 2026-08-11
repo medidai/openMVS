@@ -57,6 +57,17 @@
 // NVidia Cuda Runtime API
 #cmakedefine _USE_CUDA
 
+// Optional depth-map estimation/filtering observability build. The private
+// source guard must come only from the public CMake option, never compiler or
+// cache injection under its internal name.
+#ifdef _USE_DMAP_INSTRUMENTATION
+#error "_USE_DMAP_INSTRUMENTATION is internal; use OpenMVS_DMAP_INSTRUMENTATION"
+#endif
+#cmakedefine01 OPENMVS_DMAP_INSTRUMENTATION_ENABLED
+#if OPENMVS_DMAP_INSTRUMENTATION_ENABLED
+#define _USE_DMAP_INSTRUMENTATION
+#endif
+
 // Apple Metal compute backend
 #cmakedefine _USE_METAL
 
@@ -74,4 +85,3 @@
 
 // Headless debug mode (no modal dialogs, ASSERT prints to stderr, no LogConsole redirection)
 #cmakedefine _HEADLESS_DEBUG
-

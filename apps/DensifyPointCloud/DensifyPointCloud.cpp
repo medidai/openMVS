@@ -38,7 +38,11 @@ using namespace MVS;
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+#ifdef _USE_DMAP_INSTRUMENTATION
+#define APPNAME _T("DensifyPointCloudDMapObserve")
+#else
 #define APPNAME _T("DensifyPointCloud")
+#endif
 
 
 // S T R U C T S ///////////////////////////////////////////////////
@@ -59,6 +63,19 @@ String strCropROIFileName;
 String strExportDMAPSPathName;
 String strDenseConfigFileName;
 String strExportDepthMapsName;
+#ifdef _USE_DMAP_INSTRUMENTATION
+String strDMapInstrumentationDir;
+String strDMapInstrumentationConfig;
+String strDMapInstrumentationLevel;
+float fDMapInstrumentationSampleRate;
+unsigned nDMapInstrumentationSampleSeed;
+String strDMapInstrumentationImageList;
+bool bDMapInstrumentationWriteMaps;
+unsigned nDMapInstrumentationMaxDeviceMB;
+unsigned nDMapInstrumentationMaxHostMB;
+unsigned nDMapInstrumentationMaxFrameStorageMB;
+String strDMapInstrumentationBudgetPolicy;
+#endif
 String strMaskPath;
 float fMaxSubsceneArea;
 float fSampleMesh;
@@ -179,6 +196,19 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("postprocess-dmaps", boost::program_options::value(&nOptimize)->default_value(4), "flags used to filter the depth-maps after estimation (0 - disabled, 1 - remove-speckles, 2 - fill-gaps, 4 - adjust-confidence only when the depth-maps are estimated on CUDA, where it runs fused into the last estimation iteration and costs almost nothing, 8 - adjust-confidence; the default 4 therefore enables it on GPU and skips it on CPU, where it would cost a separate full-resolution pass -- pass 8 to force it on regardless)")
 		("filter-point-cloud", boost::program_options::value(&OPT::thFilterPointCloud)->default_value(0), "filter dense point-cloud based on visibility (0 - disabled)")
 		("export-number-views", boost::program_options::value(&OPT::nExportNumViews)->default_value(0), "export points with >= number of views (0 - disabled, <0 - save MVS project too)")
+#ifdef _USE_DMAP_INSTRUMENTATION
+		("dmap-instrumentation-dir", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationDir), "output directory for optional depth-map instrumentation (empty - disabled)")
+		("dmap-instrumentation-config", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationConfig), "JSON configuration for depth-map trace pixels and map output")
+		("dmap-instrumentation-level", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationLevel)->default_value("summary"), "depth-map instrumentation level: summary, prefilter, debug, maps")
+		("dmap-instrumentation-sample-rate", boost::program_options::value(&OPT::fDMapInstrumentationSampleRate)->default_value(1.f), "deterministic per-reference-image instrumentation sample rate in [0,1]")
+		("dmap-instrumentation-sample-seed", boost::program_options::value(&OPT::nDMapInstrumentationSampleSeed)->default_value(0), "seed for deterministic per-reference-image instrumentation sampling")
+		("dmap-instrumentation-image-list", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationImageList), "comma-separated reference image IDs or image names to instrument")
+		("dmap-instrumentation-write-maps", boost::program_options::value(&OPT::bDMapInstrumentationWriteMaps)->default_value(false), "write per-pixel diagnostic maps (0 - disabled, 1 - enabled)")
+		("dmap-instrumentation-max-device-mb", boost::program_options::value(&OPT::nDMapInstrumentationMaxDeviceMB)->default_value(2048), "maximum additional CUDA device memory per instrumented frame (MiB, 0 - unlimited)")
+		("dmap-instrumentation-max-host-mb", boost::program_options::value(&OPT::nDMapInstrumentationMaxHostMB)->default_value(4096), "maximum retained host memory per instrumented frame (MiB, 0 - unlimited)")
+		("dmap-instrumentation-max-frame-storage-mb", boost::program_options::value(&OPT::nDMapInstrumentationMaxFrameStorageMB)->default_value(4096), "maximum estimated uncompressed map storage per instrumented frame and producer (PatchMatch pyramid or later filter sidecars; MiB, 0 - unlimited)")
+		("dmap-instrumentation-budget-policy", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationBudgetPolicy)->default_value("degrade"), "behavior when an instrumentation budget is exceeded: degrade or error")
+#endif
 		("roi-border", boost::program_options::value(&OPT::fBorderROI)->default_value(0), "add a border to the region-of-interest when cropping the scene (0 - disabled, >0 - percentage, <0 - absolute)")
 		("estimate-roi", boost::program_options::value(&OPT::fScaleROI)->default_value(1.1f), "estimate and set region-of-interest, scale factor applied to the estimated extents (0 - disabled, <1 - shrink, >1 - expand)")
 		("crop-to-roi", boost::program_options::value(&OPT::bCrop2ROI)->default_value(true), "crop scene using the region-of-interest")
@@ -246,6 +276,48 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	}
 	if (OPT::strInputFileName.empty())
 		return false;
+#ifdef _USE_DMAP_INSTRUMENTATION
+	{
+		const bool bDMapInstrumentation(!OPT::strDMapInstrumentationDir.empty());
+		const String level(OPT::strDMapInstrumentationLevel.ToLower());
+		if (bDMapInstrumentation && level != _T("summary") && level != _T("prefilter") && level != _T("debug") && level != _T("maps")) {
+			VERBOSE("error: invalid --dmap-instrumentation-level '%s' (expected summary, prefilter, debug, or maps)", OPT::strDMapInstrumentationLevel.c_str());
+			return false;
+		}
+		if (bDMapInstrumentation && level == _T("prefilter") && OPT::bDMapInstrumentationWriteMaps) {
+			VERBOSE("error: --dmap-instrumentation-level prefilter cannot be combined with --dmap-instrumentation-write-maps=1");
+			return false;
+		}
+		if (bDMapInstrumentation && (
+			!std::isfinite(OPT::fDMapInstrumentationSampleRate) ||
+			OPT::fDMapInstrumentationSampleRate < 0.f ||
+			OPT::fDMapInstrumentationSampleRate > 1.f))
+		{
+			VERBOSE("error: --dmap-instrumentation-sample-rate must be in [0,1] (got %.6f)", OPT::fDMapInstrumentationSampleRate);
+			return false;
+		}
+		const String budgetPolicy(OPT::strDMapInstrumentationBudgetPolicy.ToLower());
+		if (bDMapInstrumentation && budgetPolicy != _T("degrade") && budgetPolicy != _T("error")) {
+			VERBOSE("error: invalid --dmap-instrumentation-budget-policy '%s' (expected degrade or error)", OPT::strDMapInstrumentationBudgetPolicy.c_str());
+			return false;
+		}
+		if (!bDMapInstrumentation && (
+			!OPT::strDMapInstrumentationConfig.empty() ||
+			OPT::bDMapInstrumentationWriteMaps ||
+			!OPT::strDMapInstrumentationImageList.empty() ||
+			OPT::fDMapInstrumentationSampleRate != 1.f ||
+			OPT::nDMapInstrumentationSampleSeed != 0 ||
+			OPT::nDMapInstrumentationMaxDeviceMB != 2048 ||
+			OPT::nDMapInstrumentationMaxHostMB != 4096 ||
+			OPT::nDMapInstrumentationMaxFrameStorageMB != 4096 ||
+			budgetPolicy != _T("degrade") ||
+			level != _T("summary")))
+		{
+			VERBOSE("error: --dmap-instrumentation-dir is required when using depth-map instrumentation options");
+			return false;
+		}
+	}
+#endif
 
 	// initialize optional options
 	Util::ensureValidPath(OPT::strPointCloudFileName);
@@ -257,6 +329,10 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	Util::ensureValidPath(OPT::strExportROIFileName);
 	Util::ensureValidPath(OPT::strImportROIFileName);
 	Util::ensureValidPath(OPT::strCropROIFileName);
+#ifdef _USE_DMAP_INSTRUMENTATION
+	Util::ensureValidPath(OPT::strDMapInstrumentationConfig);
+	Util::ensureValidFolderPath(OPT::strDMapInstrumentationDir);
+#endif
 	if (OPT::strOutputFileName.empty())
 		OPT::strOutputFileName = Util::getFileFullName(OPT::strInputFileName) + _T("_dense.mvs");
 
@@ -275,6 +351,27 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	OPTDENSE::nEstimationIters = nEstimationIters;
 	OPTDENSE::nEstimationGeometricIters = nEstimationGeometricIters;
 	OPTDENSE::nPatchMatchCUDAInstances = nPatchMatchCUDAInstances;
+#ifdef _USE_DMAP_INSTRUMENTATION
+	{
+		const bool bDMapInstrumentation(!OPT::strDMapInstrumentationDir.empty());
+		const String level(OPT::strDMapInstrumentationLevel.ToLower());
+		OPTDENSE::nPatchMatchInstrumentLevel = !bDMapInstrumentation ? 0u :
+			(level == _T("maps") || level == _T("debug")) ? 2u : 1u;
+		OPTDENSE::strPatchMatchInstrumentConfig = OPT::strDMapInstrumentationConfig;
+		OPTDENSE::strPatchMatchInstrumentOutput = OPT::strDMapInstrumentationDir;
+		OPTDENSE::strDMapInstrumentationDir = OPT::strDMapInstrumentationDir;
+		OPTDENSE::strDMapInstrumentationLevel = OPT::strDMapInstrumentationLevel;
+		OPTDENSE::fDMapInstrumentationSampleRate = OPT::fDMapInstrumentationSampleRate;
+		OPTDENSE::nDMapInstrumentationSampleSeed = OPT::nDMapInstrumentationSampleSeed;
+		OPTDENSE::strDMapInstrumentationImageList = OPT::strDMapInstrumentationImageList;
+		OPTDENSE::bDMapInstrumentationWriteMaps =
+			bDMapInstrumentation && (OPT::bDMapInstrumentationWriteMaps || level == _T("maps"));
+		OPTDENSE::nDMapInstrumentationMaxDeviceMB = OPT::nDMapInstrumentationMaxDeviceMB;
+		OPTDENSE::nDMapInstrumentationMaxHostMB = OPT::nDMapInstrumentationMaxHostMB;
+		OPTDENSE::nDMapInstrumentationMaxFrameStorageMB = OPT::nDMapInstrumentationMaxFrameStorageMB;
+		OPTDENSE::strDMapInstrumentationBudgetPolicy = OPT::strDMapInstrumentationBudgetPolicy;
+	}
+#endif
 	OPTDENSE::nEstimateColors = nEstimateColors;
 	OPTDENSE::nEstimateNormals = nEstimateNormals;
 	OPTDENSE::nFuseFilter = nFuseFilter;

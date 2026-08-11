@@ -69,7 +69,11 @@ public:
 	DepthMapsData& operator=(const DepthMapsData&) = delete;
 
 	bool SelectViews(DepthData& depthData);
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	bool InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex numNeighbors, bool loadImages, int loadDepthMaps, int nGeometricIter=-1);
+	#else
 	bool InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex numNeighbors, bool loadImages, int loadDepthMaps);
+	#endif
 	bool FetchViewImage(DepthData::ViewData& view);
 	bool InitDepthMap(DepthData& depthData);
 	bool EstimateDepthMap(IIndex idxImage, int nGeometricIter);

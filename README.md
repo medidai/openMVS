@@ -22,6 +22,14 @@ Automatic Windows x64 binary builds can be found for each commit on its Artifact
 
 See the usage [example](https://github.com/cdcseacave/openMVS/wiki/Usage) wiki page.
 
+## Depth-map observability
+
+CUDA depth-map estimation and filtering can be built with optional,
+default-off observability support. See the
+[depth-map observability quickstart](docs/dmap_observability/01_quickstart.md)
+for capture profiles, report generation, interactive investigation, and the
+ephemeral test-scene demo.
+
 ## License
 
 See the [copyright](https://github.com/cdcseacave/openMVS/blob/master/COPYRIGHT.md) file.
