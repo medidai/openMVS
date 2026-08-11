@@ -12787,7 +12787,10 @@ def drilldown_run_command(
     command = [
         str(densify_bin),
         "--config-file", str(program_options_config.resolve()),
-        "--working-folder", str(dmap_working_folder(local_mvs)),
+        # The second Boost notify() for an existing config file reapplies this
+        # raw value after OpenMVS first normalizes it. Preserve the separator so
+        # DMAP paths remain inside the staged working directory.
+        "--working-folder", f"{dmap_working_folder(local_mvs)}{os.sep}",
         "--input-file", str(local_mvs),
         "--output-file", str(run_dir / "drilldown_dense.mvs"),
         "--patch-match-cuda-instances", "1",
