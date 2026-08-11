@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import shlex
 import sys
@@ -3160,6 +3161,10 @@ class DMapDevelopmentReportTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--config-file") + 1],
             "/tmp/run/generated/Densify.drilldown.cfg",
+        )
+        self.assertEqual(
+            command[command.index("--working-folder") + 1],
+            f"/tmp/work{os.sep}",
         )
         self.assertNotIn("99", command)
 
