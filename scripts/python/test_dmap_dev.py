@@ -668,6 +668,32 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             [("photometric", None), ("geometric_consistency", 3)],
         )
 
+    def test_stage_discovery_accepts_unbounded_geometric_iteration_indices(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            instrumentation = Path(directory) / "dmap_instrumentation"
+            for name in ("iteration100", "iteration02"):
+                (instrumentation / "geometric_iterations" / name).mkdir(parents=True)
+            run_scene = dmap_dev.RunScene(
+                label="base",
+                role="baseline",
+                repeat=0,
+                scene_id="scene",
+                instrumentation_dir=instrumentation,
+                depth_map_dir=None,
+                timing_dir=instrumentation,
+            )
+
+            expanded = dmap_dev.expand_instrumentation_stages(run_scene)
+
+            self.assertEqual(
+                [row.geometric_iteration for row in expanded],
+                [None, 2, 100],
+            )
+            self.assertEqual(
+                [stage[1] for stage in dmap_dev.instrumentation_stage_roots(instrumentation)],
+                [None, 2, 100],
+            )
+
     def test_same_production_signature_keeps_summary_quality_and_isolates_deep(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1500,12 +1526,21 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             (run_dir / "command.sh").write_text("true\n", encoding="utf-8")
             dmap_dev.write_json(run_dir / "repro.json", {
                 "return_code": 0, "dry_run": False,
+                "command": [
+                    "DensifyPointCloudDMapObserve", "--iters", "0",
+                    "--geometric-iters", "0", "--sub-resolution-levels", "0",
+                    "--fusion-mode", "1",
+                ],
             })
             dmap_dev.write_json(instrumentation / "run_metadata.json", {
                 "schema_name": "openmvs.dmap.run",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
             })
             dmap_dev.write_json(instrumentation / "scene_summary.json", {
                 "schema_name": "openmvs.dmap.scene_summary",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
             })
             dmap_dev.write_json(frame / "summary.json", {
                 "schema_version": 4, "image_id": 1,
@@ -1517,6 +1552,15 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             depth = run_dir / "depth_maps" / "depth0001.dmap"
             depth.parent.mkdir()
             depth.write_bytes(b"dmap")
+            (instrumentation / "resource_plans.jsonl").write_text(
+                json.dumps({
+                    "schema_name": "openmvs.dmap.resource_plan",
+                    "image_id": 1,
+                    "pyramid_level": 0,
+                    "num_logical_states": 1,
+                }) + "\n",
+                encoding="utf-8",
+            )
 
             with mock.patch.object(
                 dmap_dev.instrumentation_validator, "validate",
@@ -1538,12 +1582,21 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             (run_dir / "command.sh").write_text("true\n", encoding="utf-8")
             dmap_dev.write_json(run_dir / "repro.json", {
                 "return_code": 0, "dry_run": False,
+                "command": [
+                    "DensifyPointCloudDMapObserve", "--iters", "0",
+                    "--geometric-iters", "0", "--sub-resolution-levels", "1",
+                    "--fusion-mode", "1",
+                ],
             })
             dmap_dev.write_json(instrumentation / "run_metadata.json", {
                 "schema_name": "openmvs.dmap.run",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
             })
             dmap_dev.write_json(instrumentation / "scene_summary.json", {
                 "schema_name": "openmvs.dmap.scene_summary",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
             })
             dmap_dev.write_json(frame / "summary.json", {
                 "schema_version": 4, "image_id": 1,
@@ -1562,6 +1615,7 @@ class DMapDevelopmentReportTests(unittest.TestCase):
                     "schema_version": 4,
                     "image_id": 1,
                     "pyramid_level": level,
+                    "num_logical_states": 1,
                     "width": 2,
                     "height": 2,
                     "summary_available": True,
@@ -1652,6 +1706,97 @@ class DMapDevelopmentReportTests(unittest.TestCase):
 
             self.assertFalse(valid)
             self.assertIn("coarse compatibility resource tier", reason)
+
+    def test_capture_topology_requires_declared_geometric_stages_and_levels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            instrumentation = Path(directory) / "dmap_instrumentation"
+            command = [
+                "DensifyPointCloudDMapObserve", "--iters", "2",
+                "--geometric-iters", "1", "--sub-resolution-levels", "1",
+                "--fusion-mode", "1",
+            ]
+
+            def write_stage(
+                root: Path,
+                stage: str,
+                geometric_iteration: int | None,
+                plans: list[tuple[int, int]],
+            ) -> None:
+                dmap_dev.write_json(root / "run_metadata.json", {
+                    "schema_name": "openmvs.dmap.run",
+                    "estimation_stage": stage,
+                    "geometric_iteration": geometric_iteration,
+                })
+                dmap_dev.write_json(root / "scene_summary.json", {
+                    "schema_name": "openmvs.dmap.scene_summary",
+                    "estimation_stage": stage,
+                    "geometric_iteration": geometric_iteration,
+                })
+                dmap_dev.write_json(root / "depthmaps" / "0007" / "summary.json", {
+                    "image_id": 7,
+                })
+                (root / "resource_plans.jsonl").write_text(
+                    "".join(
+                        json.dumps({
+                            "schema_name": "openmvs.dmap.resource_plan",
+                            "image_id": 7,
+                            "pyramid_level": level,
+                            "num_logical_states": logical_states,
+                        }) + "\n"
+                        for level, logical_states in plans
+                    ),
+                    encoding="utf-8",
+                )
+
+            write_stage(instrumentation, "photometric", None, [(0, 3)])
+            valid, reason = dmap_dev.validate_instrumentation_capture_topology(
+                instrumentation, command
+            )
+            self.assertFalse(valid)
+            self.assertIn("geometric stage topology", reason)
+
+            geometric = instrumentation / "geometric_iterations" / "iteration00"
+            write_stage(geometric, "geometric_consistency", 0, [(0, 2)])
+            valid, reason = dmap_dev.validate_instrumentation_capture_topology(
+                instrumentation, command
+            )
+            self.assertFalse(valid)
+            self.assertIn("photometric pyramid topology", reason)
+
+            write_stage(instrumentation, "photometric", None, [(0, 3), (1, 3)])
+            valid, reason = dmap_dev.validate_instrumentation_capture_topology(
+                instrumentation, command
+            )
+            self.assertTrue(valid, reason)
+
+            valid, reason = dmap_dev.validate_instrumentation_capture_topology(
+                instrumentation, command, require_timings=True
+            )
+            self.assertFalse(valid)
+            self.assertIn("photometric stage has no timing rows", reason)
+
+            timing_header = (
+                "image_id,scale_number,pass_index,phase,iteration,kernel_ms\n"
+            )
+            (instrumentation / "timings.csv").write_text(
+                timing_header + "".join(
+                    f"7,{level},{pass_index},phase,0,1.0\n"
+                    for level in (0, 1)
+                    for pass_index in range(5)
+                ),
+                encoding="utf-8",
+            )
+            (geometric / "timings.csv").write_text(
+                timing_header + "".join(
+                    f"7,0,{pass_index},phase,0,1.0\n"
+                    for pass_index in range(3)
+                ),
+                encoding="utf-8",
+            )
+            valid, reason = dmap_dev.validate_instrumentation_capture_topology(
+                instrumentation, command, require_timings=True
+            )
+            self.assertTrue(valid, reason)
 
     def test_entity_scene_values_balances_scenes_after_pairing_entities(self) -> None:
         data = pd.DataFrame([
@@ -3005,12 +3150,17 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             Path("/tmp/work"),
             Path("/tmp/work/scene.mvs"),
             Path("/tmp/run/trace_config.json"),
+            Path("/tmp/run/generated/Densify.drilldown.cfg"),
         )
 
         self.assertEqual(command[command.index("--patch-match-cuda-instances") + 1], "1")
         self.assertEqual(command[command.index("--dmap-instrumentation-level") + 1], "maps")
         self.assertEqual(command[command.index("--dmap-instrumentation-image-list") + 1], "7")
         self.assertEqual(command[command.index("--dmap-instrumentation-write-maps") + 1], "1")
+        self.assertEqual(
+            command[command.index("--config-file") + 1],
+            "/tmp/run/generated/Densify.drilldown.cfg",
+        )
         self.assertNotIn("99", command)
 
     def test_trace_completion_requires_exact_maps_and_every_requested_row(self) -> None:
@@ -3022,12 +3172,25 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             dmap_dev.write_json(run_dir / "repro.json", {
                 "return_code": 0,
                 "dry_run": False,
+                "command": [
+                    "DensifyPointCloudDMapObserve", "--config-file",
+                    str(run_dir / "generated" / "Densify.drilldown.cfg"),
+                    "--geometric-iters", "0",
+                    "--fusion-mode", "1",
+                ],
             })
+            dmap_dev.write_immutable_text(
+                run_dir / "generated" / "Densify.drilldown.cfg", "", "test config"
+            )
             dmap_dev.write_json(instrumentation / "run_metadata.json", {
                 "schema_name": "openmvs.dmap.run",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
             })
             dmap_dev.write_json(instrumentation / "scene_summary.json", {
                 "schema_name": "openmvs.dmap.scene_summary",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
             })
             dmap_dev.write_json(frame / "summary.json", {"image_id": 7})
             dmap_dev.write_json(frame / "map_manifest.json", {
@@ -3054,8 +3217,16 @@ class DMapDevelopmentReportTests(unittest.TestCase):
                     dmap_dev.drilldown_run_complete(
                         run_dir, "trace", 7, pixels
                     ),
-                    (True, "validated 2 targeted trace pixels across 2 logical states"),
+                    (True, "validated 2 targeted trace pixels across 1 stage(s) and 2 logical states"),
                 )
+                controlled_config = run_dir / "generated" / "Densify.drilldown.cfg"
+                controlled_config.write_text("iters=99\n", encoding="utf-8")
+                valid, reason = dmap_dev.drilldown_run_complete(
+                    run_dir, "trace", 7, pixels
+                )
+                self.assertFalse(valid)
+                self.assertIn("empty drill-down program-options file", reason)
+                controlled_config.write_text("", encoding="utf-8")
                 dmap_dev.write_json(frame / "map_manifest.json", {
                     "exact_capture": {"requested": True, "available": False},
                     "num_iterations": 1,
@@ -3084,6 +3255,171 @@ class DMapDevelopmentReportTests(unittest.TestCase):
                 self.assertFalse(valid)
                 self.assertIn("missing 2 requested pixel/state rows", reason)
 
+    def test_trace_completion_validates_scaled_deduplicated_pyramid_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "trace"
+            instrumentation = run_dir / "dmap_instrumentation"
+            frame = instrumentation / "depthmaps" / "0007"
+            frame.mkdir(parents=True)
+            dmap_dev.write_json(run_dir / "repro.json", {
+                "return_code": 0,
+                "dry_run": False,
+                "command": [
+                    "DensifyPointCloudDMapObserve", "--config-file",
+                    str(run_dir / "generated" / "Densify.drilldown.cfg"),
+                    "--geometric-iters", "1",
+                    "--fusion-mode", "1",
+                ],
+            })
+            dmap_dev.write_immutable_text(
+                run_dir / "generated" / "Densify.drilldown.cfg", "", "test config"
+            )
+            dmap_dev.write_json(instrumentation / "run_metadata.json", {
+                "schema_name": "openmvs.dmap.run",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
+            })
+            dmap_dev.write_json(instrumentation / "scene_summary.json", {
+                "schema_name": "openmvs.dmap.scene_summary",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
+            })
+            dmap_dev.write_json(frame / "summary.json", {"image_id": 7})
+            dmap_dev.write_json(frame / "map_manifest.json", {
+                "exact_capture": {"requested": True, "available": True},
+                "num_iterations": 1,
+                "num_logical_states": 2,
+                "pyramid_level": 0,
+            })
+            plans = [
+                {
+                    "image_id": 7,
+                    "pyramid_level": 1,
+                    "width": 4,
+                    "height": 4,
+                    "num_trace_pixels": 2,
+                    "num_logical_states": 2,
+                    "trace_requested": True,
+                    "trace_available": True,
+                },
+                {
+                    "image_id": 7,
+                    "pyramid_level": 0,
+                    "width": 8,
+                    "height": 8,
+                    "num_trace_pixels": 3,
+                    "num_logical_states": 2,
+                    "trace_requested": True,
+                    "trace_available": True,
+                },
+            ]
+            (instrumentation / "resource_plans.jsonl").write_text(
+                "".join(json.dumps(plan) + "\n" for plan in plans),
+                encoding="utf-8",
+            )
+            traces_path = instrumentation / "instrumentation" / "traces.jsonl"
+            traces_path.parent.mkdir()
+            rows = [
+                {"image_id": 7, "trace_index": trace_index, "x": x, "y": y,
+                 "scale_number": level, "logical_iteration": iteration}
+                for level, coordinates in (
+                    (1, [(1, 1), (3, 2)]),
+                    (0, [(1, 2), (2, 2), (6, 4)]),
+                )
+                for trace_index, (x, y) in enumerate(coordinates)
+                for iteration in (-1, 0)
+            ]
+            traces_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            geometric = instrumentation / "geometric_iterations" / "iteration00"
+            geometric_frame = geometric / "depthmaps" / "0007"
+            geometric_frame.mkdir(parents=True)
+            dmap_dev.write_json(geometric / "run_metadata.json", {
+                "schema_name": "openmvs.dmap.run",
+                "estimation_stage": "geometric_consistency",
+                "geometric_iteration": 0,
+            })
+            dmap_dev.write_json(geometric / "scene_summary.json", {
+                "schema_name": "openmvs.dmap.scene_summary",
+                "estimation_stage": "geometric_consistency",
+                "geometric_iteration": 0,
+            })
+            dmap_dev.write_json(geometric_frame / "summary.json", {"image_id": 7})
+            dmap_dev.write_json(geometric_frame / "map_manifest.json", {
+                "exact_capture": {"requested": True, "available": True},
+                "num_iterations": 1,
+                "num_logical_states": 2,
+                "pyramid_level": 0,
+            })
+            (geometric / "resource_plans.jsonl").write_text(
+                json.dumps({
+                    "image_id": 7,
+                    "pyramid_level": 0,
+                    "width": 8,
+                    "height": 8,
+                    "num_trace_pixels": 3,
+                    "num_logical_states": 2,
+                    "trace_requested": True,
+                    "trace_available": True,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            geometric_traces = geometric / "instrumentation" / "traces.jsonl"
+            geometric_traces.parent.mkdir()
+            geometric_rows = [
+                {"image_id": 7, "trace_index": trace_index, "x": x, "y": y,
+                 "scale_number": 0, "logical_iteration": iteration}
+                for trace_index, (x, y) in enumerate([(1, 2), (2, 2), (6, 4)])
+                for iteration in (-1, 0)
+            ]
+            geometric_traces.write_text(
+                "".join(json.dumps(row) + "\n" for row in geometric_rows),
+                encoding="utf-8",
+            )
+            pixels = [
+                {"x": 1, "y": 2}, {"x": 2, "y": 2},
+                {"x": 1, "y": 2}, {"x": 6, "y": 4},
+            ]
+
+            with mock.patch.object(
+                dmap_dev, "validate_completed_run_mode", return_value=(True, "maps valid")
+            ):
+                self.assertEqual(
+                    dmap_dev.drilldown_run_complete(run_dir, "trace", 7, pixels),
+                    (True, "validated 3 targeted trace pixels across 2 stage(s) and 6 logical states"),
+                )
+                rows[0]["x"] = 2
+                traces_path.write_text(
+                    "".join(json.dumps(row) + "\n" for row in rows),
+                    encoding="utf-8",
+                )
+                valid, reason = dmap_dev.drilldown_run_complete(
+                    run_dir, "trace", 7, pixels
+                )
+                self.assertFalse(valid)
+                self.assertIn("does not bind its compact slot", reason)
+                rows[0]["x"] = 1
+                traces_path.write_text(
+                    "".join(json.dumps(row) + "\n" for row in rows),
+                    encoding="utf-8",
+                )
+                geometric.rename(geometric.with_name("iteration01"))
+                valid, reason = dmap_dev.drilldown_run_complete(
+                    run_dir, "trace", 7, pixels
+                )
+                self.assertFalse(valid)
+                self.assertIn("geometric stage topology", reason)
+                geometric.with_name("iteration01").rename(
+                    geometric.with_name("not-an-iteration")
+                )
+                valid, reason = dmap_dev.drilldown_run_complete(
+                    run_dir, "trace", 7, pixels
+                )
+                self.assertFalse(valid)
+                self.assertIn("unexpected geometric stage directory", reason)
+
     def test_reused_drilldown_preserves_execution_contract_and_complete_index(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -3102,28 +3438,42 @@ class DMapDevelopmentReportTests(unittest.TestCase):
                     "pixels": [{"x": 11, "y": 13}, {"x": 17, "y": 19}],
                     "trace_pixel_count": 2,
                 },
-                "runs": [{"label": "base"}],
+                "runs": [{
+                    "label": "base",
+                    "role": "baseline",
+                    "densify_args": [],
+                    "ini_overrides": {},
+                }, {
+                    "label": "candidate",
+                    "role": "variant",
+                    "densify_args": [],
+                    "ini_overrides": {},
+                }],
             }
             request_path = root / "drilldowns" / "requests" / f"{request_id}.yaml"
             request_path.parent.mkdir(parents=True)
             request_path.write_text(
                 yaml.safe_dump(request, sort_keys=True), encoding="utf-8"
             )
-            run_dir = (
-                root / "drilldowns" / "captures" / request_id
-                / "runs" / "base" / "scene-a"
-            )
-            run_dir.mkdir(parents=True)
-            dmap_dev.write_json(run_dir / "repro.json", {
-                "return_code": 0,
-                "dry_run": False,
-                "command": ["DensifyPointCloudDMapObserve"],
-            })
+            for label in ("base", "candidate"):
+                run_dir = (
+                    root / "drilldowns" / "captures" / request_id
+                    / "runs" / label / "scene-a"
+                )
+                run_dir.mkdir(parents=True)
+                dmap_dev.write_json(run_dir / "repro.json", {
+                    "return_code": 0,
+                    "dry_run": False,
+                    "command": ["DensifyPointCloudDMapObserve"],
+                })
             observer = root / "DensifyPointCloudDMapObserve"
             observer.write_bytes(b"observer")
             config = {
                 "_config_path": str(config_path),
-                "runs": [{"label": "base", "role": "baseline"}],
+                "runs": [
+                    {"label": "base", "role": "baseline"},
+                    {"label": "candidate", "role": "variant"},
+                ],
             }
             scene = {
                 "scan_id": "scene-a",
@@ -3149,6 +3499,7 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             self.assertEqual(executions[0]["capture_profile"], "trace")
             self.assertEqual(executions[0]["trace_pixels"], 2)
             self.assertTrue(executions[0]["reused"])
+            self.assertEqual(len(executions), 2)
             execution_manifest = dmap_dev.read_json(
                 root / "drilldowns" / "captures" / request_id / "executions.json"
             )
@@ -3190,6 +3541,7 @@ class DMapDevelopmentReportTests(unittest.TestCase):
                 work,
                 work / "scene.mvs",
                 None,
+                run_dir / "generated" / "Densify.drilldown.cfg",
                 {
                     "argument_overrides": {"--max-resolution": "1920"},
                     "ini_overrides": {"Speckle Size": "200"},

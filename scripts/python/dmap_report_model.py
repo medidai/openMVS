@@ -19,10 +19,10 @@ import numpy as np
 import pandas as pd
 
 try:
-    from dmap_observability import component_registry, region_metrics
+    from dmap_observability import component_registry, integrity, region_metrics
     import dmap_drilldown
 except ImportError:  # Imported as scripts.python.dmap_report_model in unit tests.
-    from scripts.python.dmap_observability import component_registry, region_metrics
+    from scripts.python.dmap_observability import component_registry, integrity, region_metrics
     from scripts.python import dmap_drilldown
 
 
@@ -91,7 +91,7 @@ PREVIEW_MAX_DIMENSION = 480
 INVESTIGATION_GUIDE_HEADING = "## How to Investigate a Change"
 COMPLETED_TRACE_SCHEMA_NAME = "openmvs.dmap.completed_trace_rows"
 COMPLETED_TRACE_SCHEMA_VERSION = 2
-MAX_COMPLETED_TRACE_ROWS = 4096
+MAX_COMPLETED_TRACE_ROWS = dmap_drilldown.MAX_TRACE_REPORT_ROWS
 MAX_TRACE_ARRAY_VALUES = 64
 MAX_TRACE_JSONL_LINE_BYTES = 1024 * 1024
 CANDIDATE_ACCOUNTING_UNAVAILABLE_MODE = "unavailable_post_pass_snapshot"
@@ -1312,28 +1312,119 @@ def _trace_command_option(command: list[Any], name: str) -> str | None:
     return None
 
 
-def _exact_trace_capture_evidence(
-    run_root: Path, target_image_id: int | None
+def _trace_stage_roots(
+    instrumentation_root: Path,
+) -> list[tuple[str, int | None, str, Path]]:
+    """Return the photometric root and every concrete geometric stage root."""
+
+    stages = [("photometric", None, ".", instrumentation_root)]
+    geometric_root = instrumentation_root / "geometric_iterations"
+    if not geometric_root.is_dir() or geometric_root.is_symlink():
+        return stages
+    geometric_stages: list[tuple[int, Path]] = []
+    for candidate in geometric_root.iterdir():
+        match = re.fullmatch(r"iteration(\d+)", candidate.name)
+        if match and candidate.is_dir() and not candidate.is_symlink():
+            geometric_stages.append((int(match.group(1)), candidate))
+    for geometric_iteration, candidate in sorted(geometric_stages):
+        stages.append((
+            "geometric_consistency",
+            geometric_iteration,
+            f"geometric_iterations/{candidate.name}",
+            candidate,
+        ))
+    return stages
+
+
+def _trace_stage_capture_evidence(
+    *,
+    stage_root: Path,
+    instrumentation_root: Path,
+    target_image_id: int | None,
+    estimation_stage: str,
+    geometric_iteration: int | None,
+    relative_root: str,
+    command_valid: bool,
 ) -> dict[str, Any]:
-    """Attest that trace rows came from a completed Process<true> maps run."""
-
     errors: list[str] = []
-    repro = _trace_json_object(run_root / "repro.json")
-    command = repro.get("command") if isinstance(repro.get("command"), list) else []
-    command_valid = (
-        repro.get("dry_run") is False
-        and _trace_integer(repro.get("return_code")) == 0
-        and _trace_command_option(command, "--dmap-instrumentation-level") == "maps"
-        and _trace_command_option(command, "--dmap-instrumentation-write-maps") == "1"
-    )
-    if not command_valid:
-        errors.append("repro.json does not attest a successful maps/write-maps=1 run")
-
-    instrumentation_root = run_root / "dmap_instrumentation"
     matching_frames = 0
     valid_frames = 0
-    expected_states: set[tuple[int, int]] = set()
-    for summary_path in sorted(instrumentation_root.rglob("summary.json")):
+    manifest_states: set[tuple[int, int]] = set()
+    trace_plans: list[dict[str, Any]] = []
+    resource_plan_errors: list[str] = []
+    plans_path = stage_root / "resource_plans.jsonl"
+    if plans_path.is_file() and not plans_path.is_symlink():
+        seen_levels: set[int] = set()
+        try:
+            with plans_path.open("r", encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if len(line.encode("utf-8")) > MAX_TRACE_JSONL_LINE_BYTES:
+                        resource_plan_errors.append(
+                            f"resource_plans.jsonl line {line_number} exceeds the line-size limit"
+                        )
+                        break
+                    plan = json.loads(line)
+                    if not isinstance(plan, dict):
+                        raise ValueError(f"line {line_number} is not a JSON object")
+                    if _trace_integer(plan.get("image_id")) != target_image_id:
+                        continue
+                    level = canonical_pyramid_level(plan)
+                    width = _trace_integer(plan.get("width"))
+                    height = _trace_integer(plan.get("height"))
+                    num_trace_pixels = _trace_integer(plan.get("num_trace_pixels"))
+                    num_logical_states = _trace_integer(plan.get("num_logical_states"))
+                    identity_valid = (
+                        plan.get("estimation_stage") in (None, estimation_stage)
+                        and (
+                            "geometric_iteration" not in plan
+                            or plan.get("geometric_iteration") == geometric_iteration
+                        )
+                    )
+                    valid = (
+                        plan.get("schema_name") == "openmvs.dmap.resource_plan"
+                        and _trace_integer(plan.get("schema_version")) == 4
+                        and identity_valid
+                        and level is not None and level not in seen_levels
+                        and width is not None and width > 0
+                        and height is not None and height > 0
+                        and num_trace_pixels is not None and num_trace_pixels >= 0
+                        and num_logical_states is not None and num_logical_states > 0
+                        and (
+                            (num_trace_pixels > 0
+                             and plan.get("trace_requested") is True
+                             and plan.get("trace_available") is True)
+                            or (num_trace_pixels == 0
+                                and plan.get("trace_requested") is False
+                                and plan.get("trace_available") is False)
+                        )
+                    )
+                    if not valid:
+                        resource_plan_errors.append(
+                            f"resource_plans.jsonl line {line_number} has invalid trace topology"
+                        )
+                        continue
+                    seen_levels.add(level)
+                    trace_plans.append({
+                        "estimation_stage": estimation_stage,
+                        "geometric_iteration": geometric_iteration,
+                        "pyramid_level": level,
+                        "width": width,
+                        "height": height,
+                        "num_trace_pixels": num_trace_pixels,
+                        "num_logical_states": num_logical_states,
+                    })
+        except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as exc:
+            resource_plan_errors.append(f"resource_plans.jsonl is invalid: {exc}")
+        if not trace_plans:
+            resource_plan_errors.append("no resource plan matches the requested image")
+
+    depthmaps_root = stage_root / "depthmaps"
+    summary_paths = (
+        sorted(depthmaps_root.glob("*/summary.json"))
+        if depthmaps_root.is_dir() and not depthmaps_root.is_symlink()
+        else []
+    )
+    for summary_path in summary_paths:
         try:
             summary_path.resolve().relative_to(instrumentation_root.resolve())
         except ValueError:
@@ -1367,6 +1458,13 @@ def _exact_trace_capture_evidence(
             num_iterations is not None
             and num_iterations >= 0
             and num_logical_states == num_iterations + 1
+            and all(level >= 0 for level in map_levels)
+        )
+        stage_identity_valid = (
+            summary.get("estimation_stage") == estimation_stage
+            and summary.get("geometric_iteration") == geometric_iteration
+            and marker.get("estimation_stage") == estimation_stage
+            and marker.get("geometric_iteration") == geometric_iteration
         )
         frame_valid = (
             summary.get("schema_name") == "openmvs.dmap.frame_summary"
@@ -1385,8 +1483,7 @@ def _exact_trace_capture_evidence(
             and marker.get("observer_sidecars_complete") is True
             and marker.get("image_id") == summary.get("image_id")
             and marker.get("image_name") == summary.get("image_name")
-            and marker.get("estimation_stage") == summary.get("estimation_stage")
-            and marker.get("geometric_iteration") == summary.get("geometric_iteration")
+            and stage_identity_valid
             and manifest_binding.get("path") == "map_manifest.json"
             and manifest_binding.get("schema_version") == 4
             and manifest_binding.get("complete") is True
@@ -1403,7 +1500,7 @@ def _exact_trace_capture_evidence(
         )
         if frame_valid:
             valid_frames += 1
-            expected_states.update(
+            manifest_states.update(
                 (level, iteration)
                 for level in map_levels
                 for iteration in range(-1, num_iterations)
@@ -1412,18 +1509,168 @@ def _exact_trace_capture_evidence(
             errors.append(
                 f"{summary_path.relative_to(instrumentation_root)} lacks valid schema-v4 exact completion evidence"
             )
+
+    plan_declared_states = {
+        (plan["pyramid_level"], iteration)
+        for plan in trace_plans
+        for iteration in range(-1, plan["num_logical_states"] - 1)
+    }
+    plan_trace_states = {
+        state
+        for plan in trace_plans
+        if plan["num_trace_pixels"] > 0
+        for state in (
+            (plan["pyramid_level"], iteration)
+            for iteration in range(-1, plan["num_logical_states"] - 1)
+        )
+    }
+    manifest_level_zero = {state for state in manifest_states if state[0] == 0}
+    plan_level_zero = {state for state in plan_declared_states if state[0] == 0}
+    if trace_plans and manifest_level_zero != plan_level_zero:
+        resource_plan_errors.append(
+            "resource plan and exact map manifest disagree on level-0 logical states"
+        )
+    # Exact map-manifest requirements are never replaced by a resource plan.
+    # Plans add only the coarse states that cannot be represented by level-0 maps.
+    expected_states = manifest_states | {
+        state for state in plan_trace_states if state[0] > 0
+    }
+    errors.extend(resource_plan_errors)
     if matching_frames == 0:
         errors.append("no schema-v4 map frame matches the requested image")
     return {
-        "valid": command_valid and matching_frames > 0 and valid_frames == matching_frames,
+        "valid": (
+            command_valid and matching_frames > 0
+            and valid_frames == matching_frames and not resource_plan_errors
+        ),
         "measurement_basis": "schema_v4_exact_map_completion",
+        "estimation_stage": estimation_stage,
+        "geometric_iteration": geometric_iteration,
+        "relative_root": relative_root,
         "matching_frame_count": matching_frames,
         "valid_frame_count": valid_frames,
         "command_maps_write_maps": command_valid,
+        "declared_exact_topology": bool(manifest_states),
         "expected_states": [
-            {"pyramid_level": level, "logical_iteration": iteration}
+            {
+                "estimation_stage": estimation_stage,
+                "geometric_iteration": geometric_iteration,
+                "pyramid_level": level,
+                "logical_iteration": iteration,
+            }
             for level, iteration in sorted(expected_states)
         ],
+        "manifest_states": [
+            {"pyramid_level": level, "logical_iteration": iteration}
+            for level, iteration in sorted(manifest_states)
+        ],
+        "trace_plans": sorted(trace_plans, key=lambda plan: plan["pyramid_level"]),
+        "errors": errors,
+    }
+
+
+def _exact_trace_capture_evidence(
+    run_root: Path, target_image_id: int | None
+) -> dict[str, Any]:
+    """Attest every estimation stage in a completed Process<true> maps run."""
+
+    repro = _trace_json_object(run_root / "repro.json")
+    command = repro.get("command") if isinstance(repro.get("command"), list) else []
+    command_valid = (
+        repro.get("dry_run") is False
+        and _trace_integer(repro.get("return_code")) == 0
+        and _trace_command_option(command, "--dmap-instrumentation-level") == "maps"
+        and _trace_command_option(command, "--dmap-instrumentation-write-maps") == "1"
+    )
+    instrumentation_root = run_root / "dmap_instrumentation"
+    topology_errors: list[str] = []
+    try:
+        geometric_iterations = int(
+            _trace_command_option(command, "--geometric-iters") or "2"
+        )
+        fusion_mode = int(_trace_command_option(command, "--fusion-mode") or "0")
+        if geometric_iterations < 0:
+            raise ValueError("--geometric-iters is negative")
+    except ValueError as exc:
+        geometric_iterations = 0
+        fusion_mode = 0
+        topology_errors.append(f"resolved stage topology is malformed: {exc}")
+    expected_geometric = (
+        set(range(geometric_iterations)) if fusion_mode >= 0 else set()
+    )
+    geometric_root = instrumentation_root / "geometric_iterations"
+    observed_geometric: list[int] = []
+    if geometric_root.exists() or geometric_root.is_symlink():
+        if geometric_root.is_symlink() or not geometric_root.is_dir():
+            topology_errors.append("geometric stage root is not a regular directory")
+        else:
+            for candidate in geometric_root.iterdir():
+                match = re.fullmatch(r"iteration(\d+)", candidate.name)
+                if candidate.is_symlink() or not candidate.is_dir():
+                    topology_errors.append(
+                        f"unexpected geometric stage artifact: {candidate.name}"
+                    )
+                elif match is None:
+                    topology_errors.append(
+                        f"unexpected geometric stage directory: {candidate.name}"
+                    )
+                else:
+                    observed_geometric.append(int(match.group(1)))
+    if len(observed_geometric) != len(set(observed_geometric)):
+        topology_errors.append("duplicate geometric stage index")
+    if set(observed_geometric) != expected_geometric:
+        topology_errors.append(
+            "geometric stage topology does not match the resolved command: "
+            f"expected {sorted(expected_geometric)}, observed "
+            f"{sorted(set(observed_geometric))}"
+        )
+    stages = [
+        _trace_stage_capture_evidence(
+            stage_root=stage_root,
+            instrumentation_root=instrumentation_root,
+            target_image_id=target_image_id,
+            estimation_stage=estimation_stage,
+            geometric_iteration=geometric_iteration,
+            relative_root=relative_root,
+            command_valid=command_valid,
+        )
+        for estimation_stage, geometric_iteration, relative_root, stage_root
+        in _trace_stage_roots(instrumentation_root)
+    ]
+    if topology_errors and stages:
+        stages[0]["valid"] = False
+        stages[0]["errors"] = [
+            *(stages[0].get("errors") or []), *topology_errors,
+        ]
+    errors = ([] if command_valid else [
+        "repro.json does not attest a successful maps/write-maps=1 run"
+    ])
+    errors.extend(
+        f"{stage['relative_root']}: {error}"
+        for stage in stages
+        for error in stage.get("errors") or []
+    )
+    expected_states = [
+        state for stage in stages for state in stage.get("expected_states") or []
+    ]
+    trace_plans = [
+        plan for stage in stages for plan in stage.get("trace_plans") or []
+    ]
+    return {
+        "valid": command_valid and bool(stages) and all(
+            stage.get("valid") is True for stage in stages
+        ),
+        "measurement_basis": "schema_v4_exact_map_completion",
+        "matching_frame_count": sum(
+            int(stage.get("matching_frame_count", 0)) for stage in stages
+        ),
+        "valid_frame_count": sum(
+            int(stage.get("valid_frame_count", 0)) for stage in stages
+        ),
+        "command_maps_write_maps": command_valid,
+        "expected_states": expected_states,
+        "trace_plans": trace_plans,
+        "stages": stages,
         "errors": errors,
     }
 
@@ -1456,6 +1703,8 @@ def _normalize_completed_trace_row(
     *,
     run: str,
     scene_id: str,
+    estimation_stage: str,
+    geometric_iteration: int | None,
     trace_source_path: str,
     exact_capture_evidence: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -1495,6 +1744,8 @@ def _normalize_completed_trace_row(
         "run": run,
         "scene_id": scene_id,
         "image_id": image_id,
+        "estimation_stage": estimation_stage,
+        "geometric_iteration": geometric_iteration,
         "trace_index": _trace_integer(raw.get("trace_index")),
         "label": str(raw.get("label") or ""),
         "x": x,
@@ -1558,203 +1809,387 @@ def _completed_trace_payload(
     requested_coordinates = [
         (int(pixel["x"]), int(pixel["y"])) for pixel in requested_pixels
     ]
-    requested_coordinate_set = set(requested_coordinates)
+
+    def closure_record(validation: integrity.ClosureValidation) -> dict[str, Any]:
+        return {
+            "valid": validation.valid,
+            "status": validation.status,
+            "required": validation.required,
+            "reason": validation.reason,
+            "source_path": relative_path(validation.manifest_path, output_dir),
+            "file_count": validation.file_count,
+            "total_bytes": validation.total_bytes,
+            "files_sha256": validation.files_sha256,
+        }
+
     for execution_index, execution in enumerate(executions):
         run, run_error = _safe_path_component(execution.get("run"), "run")
         scene_id, scene_error = _safe_path_component(execution.get("scene_id"), "scene_id")
-        source: dict[str, Any] = {
-            "run": run,
-            "scene_id": scene_id,
-            "image_id": target_image_id,
-            "source_path": None,
-            "contained": False,
-            "available": False,
-            "row_count": 0,
-            "truncated": False,
-            "error": None,
-            "source_quality_counts": {"exact": 0, "proxy": 0},
-            "exact_capture_evidence": {},
-            "coverage": {},
-        }
         if run_error or scene_error:
             message = "; ".join(value for value in (run_error, scene_error) if value)
-            source["error"] = message
-            errors.append({"kind": "unsafe_execution_identity", "execution_index": execution_index, "message": message})
-            sources.append(source)
-            continue
-        trace_path = (
-            capture_root / "runs" / run / scene_id / "dmap_instrumentation"
-            / "instrumentation" / "traces.jsonl"
-        ).resolve()
-        run_root = (capture_root / "runs" / run / scene_id).resolve()
-        try:
-            trace_path.relative_to(capture_root.resolve())
-        except ValueError:
-            message = "trace source escapes its capture root"
-            source["error"] = message
-            errors.append({"kind": "unsafe_trace_path", "execution_index": execution_index, "message": message})
-            sources.append(source)
-            continue
-        source_path = relative_path(trace_path, output_dir)
-        source["source_path"] = source_path
-        source["contained"] = True
-        exact_capture_evidence = _exact_trace_capture_evidence(
-            run_root, target_image_id
-        )
-        source["exact_capture_evidence"] = exact_capture_evidence
-        if not trace_path.is_file():
-            message = "trace source is unavailable"
-            source["error"] = message
             errors.append({
-                "kind": "trace_unavailable", "execution_index": execution_index,
-                "source_path": source_path, "message": message,
-            })
-            sources.append(source)
-            continue
-        source["available"] = True
-        source_row_start = len(rows)
-        try:
-            with trace_path.open("r", encoding="utf-8") as handle:
-                for line_number, line in enumerate(handle, start=1):
-                    if len(rows) >= MAX_COMPLETED_TRACE_ROWS:
-                        truncated = True
-                        source["truncated"] = True
-                        break
-                    if len(line.encode("utf-8")) > MAX_TRACE_JSONL_LINE_BYTES:
-                        message = f"line {line_number} exceeds the JSONL line-size limit"
-                        source["error"] = message
-                        errors.append({
-                            "kind": "trace_line_too_large", "execution_index": execution_index,
-                            "source_path": source_path, "line": line_number, "message": message,
-                        })
-                        break
-                    try:
-                        raw = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        message = f"line {line_number}: {exc}"
-                        source["error"] = message
-                        errors.append({
-                            "kind": "trace_parse_error", "execution_index": execution_index,
-                            "source_path": source_path, "line": line_number, "message": message,
-                        })
-                        break
-                    if not isinstance(raw, dict):
-                        message = f"line {line_number}: expected a JSON object"
-                        source["error"] = message
-                        errors.append({
-                            "kind": "trace_parse_error", "execution_index": execution_index,
-                            "source_path": source_path, "line": line_number, "message": message,
-                        })
-                        break
-                    normalized, normalize_error = _normalize_completed_trace_row(
-                        raw,
-                        run=run,
-                        scene_id=scene_id,
-                        trace_source_path=source_path,
-                        exact_capture_evidence=exact_capture_evidence,
-                    )
-                    if normalize_error:
-                        message = f"line {line_number}: {normalize_error}"
-                        source["error"] = message
-                        errors.append({
-                            "kind": "trace_row_error", "execution_index": execution_index,
-                            "source_path": source_path, "line": line_number, "message": message,
-                        })
-                        break
-                    if target_image_id is not None and normalized["image_id"] != target_image_id:
-                        message = (
-                            f"line {line_number}: image_id {normalized['image_id']} does not match "
-                            f"requested image {target_image_id}"
-                        )
-                        source["error"] = message
-                        errors.append({
-                            "kind": "trace_identity_error", "execution_index": execution_index,
-                            "source_path": source_path, "line": line_number, "message": message,
-                        })
-                        break
-                    row_trace_index = normalized.get("trace_index")
-                    if (
-                        row_trace_index is None
-                        or row_trace_index < 0
-                        or row_trace_index >= len(requested_coordinates)
-                        or requested_coordinates[row_trace_index]
-                        != (normalized["x"], normalized["y"])
-                    ):
-                        message = (
-                            f"line {line_number}: trace_index does not identify the immutable "
-                            "requested pixel"
-                        )
-                        source["error"] = message
-                        errors.append({
-                            "kind": "trace_request_identity_error",
-                            "execution_index": execution_index,
-                            "source_path": source_path,
-                            "line": line_number,
-                            "message": message,
-                        })
-                        break
-                    rows.append(normalized)
-                    source["row_count"] += 1
-                    source["source_quality_counts"][normalized["source_quality"]] += 1
-        except (OSError, UnicodeError) as exc:
-            message = str(exc)
-            source["error"] = message
-            errors.append({
-                "kind": "trace_read_error", "execution_index": execution_index,
-                "source_path": source_path, "message": message,
-            })
-        source_rows = rows[source_row_start:]
-        observed_coordinates = {
-            (row["x"], row["y"]) for row in source_rows
-        }
-        missing_pixels = requested_coordinate_set - observed_coordinates
-        unexpected_pixels = observed_coordinates - requested_coordinate_set
-        expected_states = {
-            (state["pyramid_level"], state["logical_iteration"])
-            for state in exact_capture_evidence.get("expected_states") or []
-        }
-        missing_states: list[dict[str, int]] = []
-        if expected_states:
-            observed = {
-                (row["x"], row["y"], row.get("pyramid_level"), row["logical_iteration"])
-                for row in source_rows
-            }
-            missing_states = [
-                {
-                    "x": x, "y": y, "pyramid_level": level,
-                    "logical_iteration": iteration,
-                }
-                for x, y in sorted(requested_coordinate_set)
-                for level, iteration in sorted(expected_states)
-                if (x, y, level, iteration) not in observed
-            ]
-        source["coverage"] = {
-            "requested_pixel_count": len(requested_coordinate_set),
-            "observed_pixel_count": len(observed_coordinates & requested_coordinate_set),
-            "expected_state_count_per_pixel": len(expected_states),
-            "missing_pixel_count": len(missing_pixels),
-            "unexpected_pixel_count": len(unexpected_pixels),
-            "missing_state_count": len(missing_states),
-        }
-        if missing_pixels or unexpected_pixels or missing_states:
-            message = (
-                "trace coverage does not match the immutable request: "
-                f"missing_pixels={len(missing_pixels)}, "
-                f"unexpected_pixels={len(unexpected_pixels)}, "
-                f"missing_states={len(missing_states)}"
-            )
-            source["error"] = source.get("error") or message
-            errors.append({
-                "kind": "trace_coverage_error",
+                "kind": "unsafe_execution_identity",
                 "execution_index": execution_index,
-                "source_path": source_path,
                 "message": message,
-                "missing_states": missing_states[:64],
             })
-        sources.append(source)
+            sources.append({
+                "run": run,
+                "scene_id": scene_id,
+                "image_id": target_image_id,
+                "estimation_stage": None,
+                "geometric_iteration": None,
+                "stage_key": None,
+                "source_path": None,
+                "contained": False,
+                "available": False,
+                "row_count": 0,
+                "truncated": False,
+                "error": message,
+                "source_quality_counts": {"exact": 0, "proxy": 0},
+                "exact_capture_evidence": {},
+                "coverage": {},
+            })
+            continue
+        run_root = (capture_root / "runs" / run / scene_id).resolve()
+        execution_row_start = len(rows)
+        execution_source_start = len(sources)
+        closure_before = integrity.validate_capture_artifact_closure(
+            run_root, "trace", required=False
+        )
+        closure_evidence = closure_record(closure_before)
+        exact_capture = _exact_trace_capture_evidence(run_root, target_image_id)
+        if closure_before.status != "verified":
+            closure_reason = (
+                "trace capture artifact closure is not verified: "
+                f"{closure_before.reason}"
+            )
+            for stage in exact_capture.get("stages") or []:
+                stage["valid"] = False
+                stage["errors"] = [
+                    *(stage.get("errors") or []), closure_reason,
+                ]
+        for stage_evidence in exact_capture.get("stages") or []:
+            estimation_stage = str(stage_evidence.get("estimation_stage") or "photometric")
+            geometric_iteration = _trace_integer(stage_evidence.get("geometric_iteration"))
+            relative_root = str(stage_evidence.get("relative_root") or ".")
+            stage_key = (
+                f"geometric_consistency:{geometric_iteration}"
+                if estimation_stage == "geometric_consistency"
+                else "photometric"
+            )
+            stage_root = (
+                run_root / "dmap_instrumentation"
+                if relative_root == "."
+                else run_root / "dmap_instrumentation" / relative_root
+            )
+            trace_path = (stage_root / "instrumentation" / "traces.jsonl").resolve()
+            source: dict[str, Any] = {
+                "run": run,
+                "scene_id": scene_id,
+                "image_id": target_image_id,
+                "estimation_stage": estimation_stage,
+                "geometric_iteration": geometric_iteration,
+                "stage_key": stage_key,
+                "source_path": None,
+                "contained": False,
+                "available": False,
+                "row_count": 0,
+                "truncated": False,
+                "error": None,
+                "source_quality_counts": {"exact": 0, "proxy": 0},
+                "exact_capture_evidence": stage_evidence,
+                "artifact_closure": closure_evidence,
+                "coverage": {},
+            }
+
+            def add_source_error(kind: str, message: str, **details: Any) -> None:
+                source["error"] = source.get("error") or message
+                errors.append({
+                    "kind": kind,
+                    "execution_index": execution_index,
+                    "source_path": source.get("source_path"),
+                    "estimation_stage": estimation_stage,
+                    "geometric_iteration": geometric_iteration,
+                    "message": message,
+                    **details,
+                })
+
+            try:
+                trace_path.relative_to(capture_root.resolve())
+            except ValueError:
+                add_source_error("unsafe_trace_path", "trace source escapes its capture root")
+                sources.append(source)
+                continue
+            source_path = relative_path(trace_path, output_dir)
+            source["source_path"] = source_path
+            source["contained"] = True
+            if closure_before.status == "invalid":
+                add_source_error(
+                    "trace_artifact_closure_error",
+                    "trace capture artifact closure is invalid: "
+                    f"{closure_before.reason}",
+                )
+                sources.append(source)
+                continue
+            if (
+                closure_before.status != "verified"
+                and stage_evidence.get("declared_exact_topology") is True
+            ):
+                add_source_error(
+                    "trace_artifact_closure_error",
+                    "exact trace artifacts require a verified capture artifact closure",
+                )
+                sources.append(source)
+                continue
+            if (
+                stage_evidence.get("declared_exact_topology") is True
+                and stage_evidence.get("valid") is not True
+            ):
+                add_source_error(
+                    "trace_topology_evidence_error",
+                    "declared exact trace topology is invalid: "
+                    + "; ".join(stage_evidence.get("errors") or ["unknown error"]),
+                )
+
+            trace_plans = {
+                plan["pyramid_level"]: plan
+                for plan in stage_evidence.get("trace_plans") or []
+            }
+            trace_layouts: dict[int, list[dmap_drilldown.TracePyramidSlot]] = {}
+
+            def trace_layout(
+                pyramid_level: int | None,
+            ) -> list[dmap_drilldown.TracePyramidSlot]:
+                if pyramid_level is None or pyramid_level < 0:
+                    return []
+                if pyramid_level not in trace_layouts:
+                    plan = trace_plans.get(pyramid_level)
+                    trace_layouts[pyramid_level] = dmap_drilldown.trace_pyramid_layout(
+                        requested_coordinates,
+                        pyramid_level,
+                        width=plan.get("width") if plan else None,
+                        height=plan.get("height") if plan else None,
+                    )
+                return trace_layouts[pyramid_level]
+
+            for level, plan in trace_plans.items():
+                resolved_count = len(trace_layout(level))
+                if resolved_count != plan["num_trace_pixels"]:
+                    add_source_error(
+                        "trace_resource_plan_identity_error",
+                        f"resource plan level {level} declares {plan['num_trace_pixels']} "
+                        f"trace pixels but the immutable request selects {resolved_count}",
+                    )
+            if not trace_path.is_file() or trace_path.is_symlink():
+                add_source_error("trace_unavailable", "trace source is unavailable")
+                sources.append(source)
+                continue
+            source["available"] = True
+            source_row_start = len(rows)
+            declared_states = {
+                (state["pyramid_level"], state["logical_iteration"])
+                for state in stage_evidence.get("expected_states") or []
+            }
+            try:
+                with trace_path.open("r", encoding="utf-8") as handle:
+                    for line_number, line in enumerate(handle, start=1):
+                        if len(rows) >= MAX_COMPLETED_TRACE_ROWS:
+                            truncated = True
+                            source["truncated"] = True
+                            break
+                        if len(line.encode("utf-8")) > MAX_TRACE_JSONL_LINE_BYTES:
+                            add_source_error(
+                                "trace_line_too_large",
+                                f"line {line_number} exceeds the JSONL line-size limit",
+                                line=line_number,
+                            )
+                            break
+                        try:
+                            raw = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            add_source_error(
+                                "trace_parse_error", f"line {line_number}: {exc}",
+                                line=line_number,
+                            )
+                            break
+                        if not isinstance(raw, dict):
+                            add_source_error(
+                                "trace_parse_error",
+                                f"line {line_number}: expected a JSON object",
+                                line=line_number,
+                            )
+                            break
+                        normalized, normalize_error = _normalize_completed_trace_row(
+                            raw,
+                            run=run,
+                            scene_id=scene_id,
+                            estimation_stage=estimation_stage,
+                            geometric_iteration=geometric_iteration,
+                            trace_source_path=source_path,
+                            exact_capture_evidence=stage_evidence,
+                        )
+                        if normalize_error:
+                            add_source_error(
+                                "trace_row_error",
+                                f"line {line_number}: {normalize_error}",
+                                line=line_number,
+                            )
+                            break
+                        if target_image_id is not None and normalized["image_id"] != target_image_id:
+                            add_source_error(
+                                "trace_identity_error",
+                                f"line {line_number}: image_id {normalized['image_id']} does not "
+                                f"match requested image {target_image_id}",
+                                line=line_number,
+                            )
+                            break
+                        row_state = (
+                            normalized.get("pyramid_level"),
+                            normalized["logical_iteration"],
+                        )
+                        if declared_states and row_state not in declared_states:
+                            add_source_error(
+                                "trace_undeclared_state_error",
+                                f"line {line_number}: trace row declares state {row_state} "
+                                "outside the exact manifest/resource-plan topology",
+                                line=line_number,
+                            )
+                            break
+                        row_trace_index = normalized.get("trace_index")
+                        level_layout = trace_layout(normalized.get("pyramid_level"))
+                        if (
+                            row_trace_index is None
+                            or row_trace_index < 0
+                            or row_trace_index >= len(level_layout)
+                            or level_layout[row_trace_index].coordinate
+                            != (normalized["x"], normalized["y"])
+                        ):
+                            add_source_error(
+                                "trace_request_identity_error",
+                                f"line {line_number}: trace_index does not identify the immutable "
+                                "requested pixel at this pyramid level",
+                                line=line_number,
+                            )
+                            break
+                        slot = level_layout[row_trace_index]
+                        normalized["request_identity"] = {
+                            "request_index": slot.request_indices[0],
+                            "x": slot.requested_coordinates[0][0],
+                            "y": slot.requested_coordinates[0][1],
+                            "alias_request_indices": list(slot.request_indices),
+                            "alias_coordinates": [
+                                {"x": coordinate[0], "y": coordinate[1]}
+                                for coordinate in slot.requested_coordinates
+                            ],
+                            "trace_x": slot.coordinate[0],
+                            "trace_y": slot.coordinate[1],
+                        }
+                        rows.append(normalized)
+                        source["row_count"] += 1
+                        source["source_quality_counts"][normalized["source_quality"]] += 1
+            except (OSError, UnicodeError) as exc:
+                add_source_error("trace_read_error", str(exc))
+
+            source_rows = rows[source_row_start:]
+            observed_request_indices = {
+                request_index
+                for row in source_rows
+                for request_index in trace_layout(row.get("pyramid_level"))[
+                    int(row["trace_index"])
+                ].request_indices
+            }
+            missing_pixels = {
+                coordinate
+                for request_index, coordinate in enumerate(requested_coordinates)
+                if request_index not in observed_request_indices
+            }
+            missing_states: list[dict[str, Any]] = []
+            if declared_states:
+                observed = {
+                    (row.get("pyramid_level"), row["trace_index"], row["logical_iteration"])
+                    for row in source_rows
+                }
+                missing_states = [
+                    {
+                        "estimation_stage": estimation_stage,
+                        "geometric_iteration": geometric_iteration,
+                        "x": coordinate[0],
+                        "y": coordinate[1],
+                        "trace_x": slot.coordinate[0],
+                        "trace_y": slot.coordinate[1],
+                        "trace_index": trace_index,
+                        "pyramid_level": level,
+                        "logical_iteration": iteration,
+                    }
+                    for level, iteration in sorted(declared_states)
+                    for trace_index, slot in enumerate(trace_layout(level))
+                    for coordinate in slot.requested_coordinates[:1]
+                    if (level, trace_index, iteration) not in observed
+                ]
+            source["coverage"] = {
+                "requested_pixel_count": len(requested_coordinates),
+                "observed_pixel_count": len(observed_request_indices),
+                "expected_state_count_per_pixel": len(declared_states),
+                "missing_pixel_count": len(missing_pixels),
+                "unexpected_pixel_count": 0,
+                "missing_state_count": len(missing_states),
+            }
+            if missing_pixels or missing_states:
+                add_source_error(
+                    "trace_coverage_error",
+                    "trace coverage does not match the immutable request: "
+                    f"missing_pixels={len(missing_pixels)}, unexpected_pixels=0, "
+                    f"missing_states={len(missing_states)}",
+                    missing_states=missing_states[:64],
+                )
+            state_counts: dict[tuple[int | None, int, int], int] = {}
+            for row in source_rows:
+                state = (
+                    row.get("pyramid_level"), int(row["trace_index"]),
+                    int(row["logical_iteration"]),
+                )
+                state_counts[state] = state_counts.get(state, 0) + 1
+            duplicate_states = [state for state, count in state_counts.items() if count > 1]
+            if duplicate_states:
+                add_source_error(
+                    "trace_duplicate_state_error",
+                    f"trace contains {len(duplicate_states)} duplicate logical states",
+                )
+            sources.append(source)
+        if closure_before.status == "verified":
+            closure_after = integrity.validate_capture_artifact_closure(
+                run_root, "trace", required=True
+            )
+            closure_stable = (
+                closure_after.valid
+                and closure_after.status == "verified"
+                and closure_after.files_sha256 == closure_before.files_sha256
+                and closure_after.file_count == closure_before.file_count
+                and closure_after.total_bytes == closure_before.total_bytes
+            )
+            if not closure_stable:
+                del rows[execution_row_start:]
+                message = (
+                    "trace capture artifact closure changed or became invalid while "
+                    f"building the report: {closure_after.reason}"
+                )
+                for source in sources[execution_source_start:]:
+                    source["available"] = False
+                    source["row_count"] = 0
+                    source["source_quality_counts"] = {"exact": 0, "proxy": 0}
+                    source["coverage"] = {}
+                    source["error"] = source.get("error") or message
+                errors.append({
+                    "kind": "trace_artifact_closure_changed",
+                    "execution_index": execution_index,
+                    "message": message,
+                })
     rows.sort(key=lambda row: (
-        row["run"], row["scene_id"], row["image_id"], row["y"], row["x"],
-        row.get("scale_number") if row.get("scale_number") is not None else -1,
+        row["run"], row["scene_id"], row["image_id"],
+        0 if row.get("estimation_stage") == "photometric" else 1,
+        row.get("geometric_iteration") if row.get("geometric_iteration") is not None else -1,
+        row.get("pyramid_level") if row.get("pyramid_level") is not None else -1,
+        row["y"], row["x"], row.get("trace_index", -1),
         row["logical_iteration"],
     ))
     unavailable_reason = None
@@ -2923,6 +3358,92 @@ def _portable_record(row: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     return result
 
 
+def _cuda_resource_plan_records(
+    dataframe: pd.DataFrame,
+    *,
+    experiment_root: Path,
+    output_dir: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Preserve schema-v4 coarse compatibility-map availability contracts."""
+
+    parsed_files: dict[Path, list[dict[str, Any]]] = {}
+    output: list[dict[str, Any]] = []
+    availability: list[dict[str, Any]] = []
+    for source_row in records(dataframe):
+        row = dict(source_row)
+        source_value = row.get("source_json")
+        source = Path(str(source_value)).expanduser() if source_value else None
+        if source is not None and not source.is_absolute():
+            source = experiment_root / source
+        plan: dict[str, Any] = {}
+        if source is not None and source.is_file() and not source.is_symlink():
+            resolved = source.resolve()
+            if resolved not in parsed_files:
+                parsed: list[dict[str, Any]] = []
+                try:
+                    with resolved.open("r", encoding="utf-8") as handle:
+                        for line in handle:
+                            if len(line.encode("utf-8")) > MAX_TRACE_JSONL_LINE_BYTES:
+                                parsed = []
+                                break
+                            value = json.loads(line)
+                            if isinstance(value, dict):
+                                parsed.append(value)
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    parsed = []
+                parsed_files[resolved] = parsed
+            target_image = _model_integer(row.get("image_id"))
+            target_level = canonical_pyramid_level(row)
+            target_stage = str(row.get("estimation_stage") or "photometric")
+            target_geometric = _model_integer(row.get("geometric_iteration"))
+            plan = next((
+                value for value in parsed_files[resolved]
+                if _trace_integer(value.get("image_id")) == target_image
+                and canonical_pyramid_level(value) == target_level
+                and str(value.get("estimation_stage") or "photometric") == target_stage
+                and _trace_integer(value.get("geometric_iteration")) == target_geometric
+            ), {})
+        contract = plan.get("compatibility_map_contract")
+        if isinstance(contract, dict):
+            row["compatibility_map_contract"] = json_value(contract)
+            level = canonical_pyramid_level(row)
+            if level is not None and level > 0:
+                cost_expected = contract.get("cost_map_expected")
+                cost_reason = str(contract.get("cost_map_unavailable_reason") or "")
+                entry = {
+                    "run": row.get("run"),
+                    "repeat": row.get("repeat"),
+                    "scene_id": row.get("scene_id"),
+                    "image_id": row.get("image_id"),
+                    "estimation_stage": row.get("estimation_stage"),
+                    "geometric_iteration": row.get("geometric_iteration"),
+                    "pyramid_level": level,
+                    "compatibility_maps_requested": plan.get(
+                        "compatibility_maps_requested"
+                    ),
+                    "update_source_map_expected": contract.get(
+                        "update_source_map_expected"
+                    ),
+                    "cost_map_expected": cost_expected,
+                    "cost_map_available": False if cost_expected is False else None,
+                    "cost_map_unavailable_reason": cost_reason or None,
+                    "measurement_basis": (
+                        "resource_plan.compatibility_map_contract"
+                    ),
+                    "source_json": relative_path(source, output_dir),
+                }
+                availability.append(json_value(entry))
+        output.append(_portable_record(row, output_dir))
+    availability.sort(key=lambda row: (
+        str(row.get("run")), int(row.get("repeat") or 0),
+        str(row.get("scene_id")), _identity_integer(row.get("image_id")),
+        str(row.get("estimation_stage")),
+        _identity_integer(row.get("geometric_iteration")),
+        _identity_integer(row.get("pyramid_level")),
+    ))
+    return output, availability
+
+
 def _exclude_diagnostic_quality_rows(
     dataframe: pd.DataFrame,
     diagnostic_labels: set[str],
@@ -3113,6 +3634,14 @@ def build_report_model(
     filter_resource_plans = filter_resource_plans if filter_resource_plans is not None else pd.DataFrame()
     resource_plan_validation = resource_plan_validation if resource_plan_validation is not None else pd.DataFrame()
     instrumentation_validation = instrumentation_validation if instrumentation_validation is not None else pd.DataFrame()
+    (
+        cuda_resource_plan_records,
+        coarse_compatibility_map_availability,
+    ) = _cuda_resource_plan_records(
+        cuda_resource_plans,
+        experiment_root=experiment_root,
+        output_dir=output_dir,
+    )
     map_rows, signal_rows, pixel_budget = build_map_assets(
         map_catalog, signal_availability, output_dir
     )
@@ -3810,7 +4339,12 @@ def build_report_model(
             "cpu_estimation_selection": [_portable_record(canonical_pyramid_record(row), output_dir) for row in records(cpu_estimation_selection)],
             "postprocess_filters": [_portable_record(canonical_pyramid_record(row), output_dir) for row in records(postprocess_filters)],
             "confidence_adjustment": [_portable_record(canonical_pyramid_record(row), output_dir) for row in records(confidence_adjustment)],
-            "cuda_resource_plans": [_portable_record(canonical_pyramid_record(row), output_dir) for row in records(cuda_resource_plans)],
+            "cuda_resource_plans": [
+                canonical_pyramid_record(row) for row in cuda_resource_plan_records
+            ],
+            "coarse_compatibility_map_availability": (
+                coarse_compatibility_map_availability
+            ),
             "filter_resource_plans": [_portable_record(canonical_pyramid_record(row), output_dir) for row in records(filter_resource_plans)],
             "resource_plan_validation": [_portable_record(canonical_pyramid_record(row), output_dir) for row in records(resource_plan_validation)],
             "availability": {
@@ -3959,6 +4493,68 @@ def validate_report_model(model: dict[str, Any], output_dir: Path) -> dict[str, 
         "component_registry_covers_signals",
         declared_signal_ids <= registry_signal_ids,
         {"missing": sorted(declared_signal_ids - registry_signal_ids)},
+    )
+    mechanics = model.get("mechanics") or {}
+    coarse_availability = mechanics.get(
+        "coarse_compatibility_map_availability"
+    ) or []
+    coarse_errors: list[str] = []
+    coarse_identities: set[tuple[Any, ...]] = set()
+    for index, row in enumerate(coarse_availability):
+        if not isinstance(row, dict):
+            coarse_errors.append(f"rows[{index}] is not an object")
+            continue
+        identity = (
+            row.get("run"), _identity_integer(row.get("repeat")),
+            row.get("scene_id"), _identity_integer(row.get("image_id")),
+            row.get("estimation_stage"),
+            _identity_integer(row.get("geometric_iteration")),
+            _identity_integer(row.get("pyramid_level")),
+        )
+        if identity in coarse_identities:
+            coarse_errors.append(f"rows[{index}] duplicates {identity!r}")
+        coarse_identities.add(identity)
+        if (
+            identity[-1] <= 0
+            or row.get("measurement_basis")
+            != "resource_plan.compatibility_map_contract"
+            or not isinstance(row.get("update_source_map_expected"), bool)
+            or not isinstance(row.get("cost_map_expected"), bool)
+            or (
+                row.get("cost_map_expected") is False
+                and (
+                    row.get("cost_map_available") is not False
+                    or not str(row.get("cost_map_unavailable_reason") or "").strip()
+                )
+            )
+        ):
+            coarse_errors.append(f"rows[{index}] has an invalid availability contract")
+    schema_v4_coarse_plans = [
+        row for row in mechanics.get("cuda_resource_plans") or []
+        if _identity_integer(row.get("schema_version")) == 4
+        and (canonical_pyramid_level(row) or 0) > 0
+    ]
+    declared_coarse_contracts = [
+        row for row in schema_v4_coarse_plans
+        if isinstance(row.get("compatibility_map_contract"), dict)
+    ]
+    if len(declared_coarse_contracts) != len(schema_v4_coarse_plans):
+        coarse_errors.append(
+            "one or more schema-v4 coarse resource plans lost their compatibility contract"
+        )
+    if len(coarse_availability) != len(schema_v4_coarse_plans):
+        coarse_errors.append(
+            "coarse availability cardinality does not match preserved resource-plan contracts"
+        )
+    add(
+        "coarse_compatibility_map_availability",
+        not coarse_errors,
+        {
+            "rows": len(coarse_availability),
+            "declared_contracts": len(declared_coarse_contracts),
+            "schema_v4_coarse_plans": len(schema_v4_coarse_plans),
+            "errors": coarse_errors,
+        },
     )
     profile_coverage = model.get("capture_profile_coverage") or {}
     profile_coverage_required = (
@@ -4167,6 +4763,7 @@ def validate_report_model(model: dict[str, Any], output_dir: Path) -> dict[str, 
         }
         for source_index, source in enumerate(trace_data.get("sources") or []):
             evidence = source.get("exact_capture_evidence") or {}
+            closure = source.get("artifact_closure") or {}
             coverage = source.get("coverage") or {}
             source_rows = [
                 trace for trace in trace_data.get("rows") or []
@@ -4195,10 +4792,50 @@ def validate_report_model(model: dict[str, Any], output_dir: Path) -> dict[str, 
                 or not isinstance(evidence.get("command_maps_write_maps"), bool)
                 or not isinstance(evidence.get("errors"), list)
                 or not isinstance(evidence.get("expected_states"), list)
+                or closure.get("status") not in {
+                    "verified", "legacy-unverified"
+                }
+                or not isinstance(closure.get("valid"), bool)
+                or not isinstance(closure.get("required"), bool)
+                or not isinstance(closure.get("reason"), str)
+                or (
+                    closure.get("status") == "verified"
+                    and (
+                        closure.get("valid") is not True
+                        or not closure.get("source_path")
+                        or _trace_integer(closure.get("file_count")) is None
+                        or _trace_integer(closure.get("total_bytes")) is None
+                        or not isinstance(closure.get("files_sha256"), str)
+                        or len(closure.get("files_sha256")) != 64
+                    )
+                )
+                or (
+                    evidence.get("declared_exact_topology") is True
+                    and closure.get("status") != "verified"
+                )
+                or source.get("estimation_stage") not in {
+                    "photometric", "geometric_consistency"
+                }
+                or source.get("estimation_stage") != evidence.get("estimation_stage")
+                or source.get("geometric_iteration") != evidence.get("geometric_iteration")
+                or source.get("stage_key") != (
+                    f"geometric_consistency:{source.get('geometric_iteration')}"
+                    if source.get("estimation_stage") == "geometric_consistency"
+                    else "photometric"
+                )
+                or (
+                    source.get("estimation_stage") == "photometric"
+                    and source.get("geometric_iteration") is not None
+                )
+                or (
+                    source.get("estimation_stage") == "geometric_consistency"
+                    and (
+                        _trace_integer(source.get("geometric_iteration")) is None
+                        or int(source.get("geometric_iteration")) < 0
+                    )
+                )
                 or coverage.get("requested_pixel_count") != len(request_pixels)
-                or coverage.get("observed_pixel_count") != len({
-                    (trace.get("x"), trace.get("y")) for trace in source_rows
-                })
+                or coverage.get("observed_pixel_count") != len(request_pixels)
                 or coverage.get("missing_pixel_count") != 0
                 or coverage.get("unexpected_pixel_count") != 0
                 or coverage.get("missing_state_count") != 0
@@ -4210,6 +4847,12 @@ def validate_report_model(model: dict[str, Any], output_dir: Path) -> dict[str, 
             arrays = trace.get("arrays") or {}
             trace_source = source_by_path.get(str(trace.get("trace_source_path"))) or {}
             exact_evidence = trace_source.get("exact_capture_evidence") or {}
+            request_identity = trace.get("request_identity") or {}
+            expected_states = {
+                (state.get("pyramid_level"), state.get("logical_iteration"))
+                for state in exact_evidence.get("expected_states") or []
+                if isinstance(state, dict)
+            }
             trace_valid = (
                 isinstance(trace.get("run"), str) and bool(trace.get("run"))
                 and isinstance(trace.get("scene_id"), str) and bool(trace.get("scene_id"))
@@ -4218,6 +4861,18 @@ def validate_report_model(model: dict[str, Any], output_dir: Path) -> dict[str, 
                 and _trace_integer(trace.get("y")) is not None
                 and _trace_integer(trace.get("logical_iteration")) is not None
                 and int(trace.get("logical_iteration")) >= -1
+                and trace.get("estimation_stage") == trace_source.get("estimation_stage")
+                and trace.get("geometric_iteration") == trace_source.get("geometric_iteration")
+                and _trace_integer(trace.get("pyramid_level")) is not None
+                and int(trace.get("pyramid_level")) >= 0
+                and _trace_integer(trace.get("trace_index")) is not None
+                and int(trace.get("trace_index")) >= 0
+                and (
+                    not expected_states
+                    or (
+                        trace.get("pyramid_level"), trace.get("logical_iteration")
+                    ) in expected_states
+                )
                 and trace.get("stage") in {"initialization", "iteration"}
                 and trace.get("source_quality") in {"exact", "proxy"}
                 and isinstance(trace.get("measurement_basis"), str)
@@ -4237,6 +4892,15 @@ def validate_report_model(model: dict[str, Any], output_dir: Path) -> dict[str, 
                 and isinstance(trace.get("normal"), dict)
                 and isinstance(trace.get("view"), dict)
                 and isinstance(arrays, dict)
+                and _trace_integer(request_identity.get("request_index")) is not None
+                and _trace_integer(request_identity.get("x")) is not None
+                and _trace_integer(request_identity.get("y")) is not None
+                and request_identity.get("trace_x") == trace.get("x")
+                and request_identity.get("trace_y") == trace.get("y")
+                and isinstance(request_identity.get("alias_request_indices"), list)
+                and isinstance(request_identity.get("alias_coordinates"), list)
+                and len(request_identity.get("alias_request_indices"))
+                == len(request_identity.get("alias_coordinates"))
                 and str(trace.get("trace_source_path")) in source_paths
                 and all(
                     isinstance(values, list) and len(values) <= MAX_TRACE_ARRAY_VALUES
@@ -4751,6 +5415,12 @@ def validate_report_model(model: dict[str, Any], output_dir: Path) -> dict[str, 
                 check_path(
                     f"drilldown:{index}:trace:{source_index}", source.get("source_path")
                 )
+                closure = source.get("artifact_closure") or {}
+                if closure.get("status") == "verified":
+                    check_path(
+                        f"drilldown:{index}:trace-closure:{source_index}",
+                        closure.get("source_path"),
+                    )
     add("referenced_artifacts_exist", not missing_paths, missing_paths)
 
     malformed_pixel_data = []

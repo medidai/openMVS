@@ -155,8 +155,12 @@ def write_completed_trace_drilldown(
     run: str = "base",
     scene_id: str = "scene-a",
     exact_capture: bool = True,
+    requested_pixels: list[dict[str, int]] | None = None,
 ) -> tuple[str, Path]:
     requested_coordinate = (rows[0]["x"], rows[0]["y"]) if rows else (11, 13)
+    request_pixels = requested_pixels or [
+        {"x": requested_coordinate[0], "y": requested_coordinate[1]}
+    ]
     request_value = {
         "schema_name": dmap_report_model.dmap_drilldown.SCHEMA_NAME,
         "schema_version": dmap_report_model.dmap_drilldown.SCHEMA_VERSION,
@@ -168,8 +172,8 @@ def write_completed_trace_drilldown(
         "capture_profile": "trace",
         "target": {
             "scene_id": scene_id, "image_id": 7,
-            "pixels": [{"x": requested_coordinate[0], "y": requested_coordinate[1]}],
-            "roi": None, "trace_pixel_count": 1,
+            "pixels": request_pixels,
+            "roi": None, "trace_pixel_count": len(request_pixels),
         },
         "runs": [{
             "label": run, "role": "baseline", "densify_args": [],
@@ -202,6 +206,8 @@ def write_completed_trace_drilldown(
             "/tmp/DensifyPointCloudDMapObserve",
             "--dmap-instrumentation-level", "maps",
             "--dmap-instrumentation-write-maps", "1",
+            "--fusion-mode", "1",
+            "--geometric-iters", "0",
         ],
         "return_code": 0,
         "dry_run": False,
@@ -278,7 +284,7 @@ def write_completed_trace_drilldown(
             "capture_profile": "trace",
             "scene_id": scene_id,
             "image_id": 7,
-            "trace_pixel_count": 1,
+            "trace_pixel_count": len(request_pixels),
             "run_labels": [run],
             "status": "complete",
             "request": str(request.relative_to(root)),
@@ -286,10 +292,133 @@ def write_completed_trace_drilldown(
             "executions": str(executions.relative_to(root)),
         }],
     }), encoding="utf-8")
+    dmap_report_model.integrity.write_capture_artifact_closure(run_root, "trace")
     return request_sha256, traces
 
 
+def write_trace_resource_plans(
+    root: Path,
+    request_sha256: str,
+    plans: list[dict[str, int | bool]],
+    *,
+    stage_relative_root: str = ".",
+) -> None:
+    stage_root = (
+        root / "drilldowns" / "captures" / request_sha256 / "runs" / "base"
+        / "scene-a" / "dmap_instrumentation"
+    )
+    if stage_relative_root != ".":
+        stage_root /= stage_relative_root
+    path = stage_root / "resource_plans.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps({
+        "schema_name": "openmvs.dmap.resource_plan",
+        "schema_version": 4,
+        "image_id": 7,
+        **plan,
+    }) + "\n" for plan in plans), encoding="utf-8")
+    run_root = (
+        root / "drilldowns" / "captures" / request_sha256 / "runs" / "base"
+        / "scene-a"
+    )
+    dmap_report_model.integrity.write_capture_artifact_closure(run_root, "trace")
+
+
+def write_additional_trace_stage(
+    root: Path,
+    request_sha256: str,
+    rows: list[dict],
+    *,
+    geometric_iteration: int,
+) -> Path:
+    run_root = (
+        root / "drilldowns" / "captures" / request_sha256 / "runs" / "base"
+        / "scene-a"
+    )
+    repro_path = run_root / "repro.json"
+    repro = json.loads(repro_path.read_text(encoding="utf-8"))
+    option_index = repro["command"].index("--geometric-iters")
+    repro["command"][option_index + 1] = str(geometric_iteration + 1)
+    repro_path.write_text(json.dumps(repro), encoding="utf-8")
+    stage_root = (
+        run_root / "dmap_instrumentation" / "geometric_iterations"
+        / f"iteration{geometric_iteration:02d}"
+    )
+    traces = stage_root / "instrumentation" / "traces.jsonl"
+    traces.parent.mkdir(parents=True, exist_ok=True)
+    traces.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    frame = stage_root / "depthmaps" / "depth0007"
+    frame.mkdir(parents=True)
+    completion_reference = {
+        "schema_name": "openmvs.dmap.capture_complete",
+        "schema_version": 1,
+        "path": "capture_complete.json",
+        "maps_complete": True,
+        "eligible": True,
+    }
+    (frame / "summary.json").write_text(json.dumps({
+        "schema_name": "openmvs.dmap.frame_summary",
+        "schema_version": 4,
+        "image_id": 7,
+        "image_name": "image0007.jpg",
+        "estimation_stage": "geometric_consistency",
+        "geometric_iteration": geometric_iteration,
+        "completion_marker": completion_reference,
+    }), encoding="utf-8")
+    (frame / "map_manifest.json").write_text(json.dumps({
+        "schema_name": "openmvs.dmap.map_manifest",
+        "schema_version": 4,
+        "complete": True,
+        "pyramid_level": 0,
+        "num_iterations": 1,
+        "num_logical_states": 2,
+        "write_errors": [],
+        "observer_sidecars": {"complete": True},
+        "exact_capture": {"requested": True, "available": True},
+    }), encoding="utf-8")
+    (frame / "capture_complete.json").write_text(json.dumps({
+        "schema_name": "openmvs.dmap.capture_complete",
+        "schema_version": 1,
+        "capture_kind": "maps",
+        "image_id": 7,
+        "image_name": "image0007.jpg",
+        "estimation_stage": "geometric_consistency",
+        "geometric_iteration": geometric_iteration,
+        "maps_complete": True,
+        "observer_sidecars_complete": True,
+        "map_manifest": {
+            "path": "map_manifest.json", "schema_version": 4, "complete": True,
+        },
+        "summary": {"path": "summary.json", "schema_version": 4},
+    }), encoding="utf-8")
+    dmap_report_model.integrity.write_capture_artifact_closure(run_root, "trace")
+    return traces
+
+
 class DMapReportModelTests(unittest.TestCase):
+    def test_trace_stage_discovery_accepts_three_digit_iterations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            geometric = root / "geometric_iterations"
+            (geometric / "iteration100").mkdir(parents=True)
+            (geometric / "iteration02").mkdir()
+
+            stages = dmap_report_model._trace_stage_roots(root)
+
+            self.assertEqual(
+                [
+                    (stage, iteration, relative)
+                    for stage, iteration, relative, _path in stages
+                ],
+                [
+                    ("photometric", None, "."),
+                    ("geometric_consistency", 2, "geometric_iterations/iteration02"),
+                    ("geometric_consistency", 100, "geometric_iterations/iteration100"),
+                ],
+            )
+
     def test_reference_thumbnail_rejects_symlink_and_malformed_image(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -507,6 +636,73 @@ class DMapReportModelTests(unittest.TestCase):
                 self.assertEqual(availability["confidence_adjustment"], expected_execution)
                 self.assertEqual(availability["postprocess_filter_contract"], expected_contract)
                 self.assertEqual(availability["confidence_adjustment_contract"], expected_contract)
+
+    def test_coarse_resource_plan_preserves_explicit_cost_unavailability(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports"
+            output.mkdir()
+            plans = root / "resource_plans.jsonl"
+            reason = "production confidence maps are retained at pyramid level 0 only"
+            plans.write_text(json.dumps({
+                "schema_name": "openmvs.dmap.resource_plan",
+                "schema_version": 4,
+                "image_id": 7,
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
+                "pyramid_level": 1,
+                "compatibility_maps_requested": True,
+                "compatibility_map_contract": {
+                    "update_source_map_expected": True,
+                    "cost_map_expected": False,
+                    "cost_map_unavailable_reason": reason,
+                },
+            }) + "\n", encoding="utf-8")
+            dataframe = pd.DataFrame([{
+                "run": "base", "repeat": 0, "scene_id": "scene-a",
+                "image_id": 7, "estimation_stage": "photometric",
+                "geometric_iteration": None, "pyramid_level": 1,
+                "schema_version": 4, "source_json": str(plans),
+            }])
+
+            resource_rows, availability = (
+                dmap_report_model._cuda_resource_plan_records(
+                    dataframe, experiment_root=root, output_dir=output
+                )
+            )
+
+            self.assertEqual(
+                resource_rows[0]["compatibility_map_contract"]
+                ["cost_map_unavailable_reason"],
+                reason,
+            )
+            self.assertEqual(availability[0]["cost_map_unavailable_reason"], reason)
+            self.assertFalse(availability[0]["cost_map_available"])
+            model = {
+                "schema_name": dmap_report_model.SCHEMA_NAME,
+                "schema_version": 1,
+                "runs": [], "scenes": [], "drilldowns": {"entries": []},
+                "aggregates": {"regressions": []},
+                "mechanics": {
+                    "cuda_resource_plans": resource_rows,
+                    "coarse_compatibility_map_availability": availability,
+                },
+            }
+            validation = dmap_report_model.validate_report_model(model, output)
+            check = next(
+                row for row in validation["checks"]
+                if row["name"] == "coarse_compatibility_map_availability"
+            )
+            self.assertTrue(check["passed"], check)
+            model["mechanics"]["coarse_compatibility_map_availability"][0][
+                "cost_map_unavailable_reason"
+            ] = None
+            invalid = dmap_report_model.validate_report_model(model, output)
+            check = next(
+                row for row in invalid["checks"]
+                if row["name"] == "coarse_compatibility_map_availability"
+            )
+            self.assertFalse(check["passed"])
 
     def test_summary_only_unavailable_signals_are_registered_and_model_valid(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1541,6 +1737,9 @@ class DMapReportModelTests(unittest.TestCase):
             self.assertIn('id="trace-pixel-request"', text)
             self.assertIn('id="drilldown-detail"', text)
             self.assertIn("renderCompletedTrace", text)
+            self.assertIn("traceStageKey(row) === state.captureStage", text)
+            self.assertIn("alias_request_indices", text)
+            self.assertIn("scaled trace coordinate", text)
             self.assertIn("full-frame Process&lt;true&gt; maps rerun", text)
             self.assertIn("classified per row", text)
             self.assertIn("valid schema-v4 exact-map completion evidence", text)
@@ -1558,6 +1757,8 @@ class DMapReportModelTests(unittest.TestCase):
             self.assertIn("pyramidLevelMatches", text)
             self.assertIn("pickAlignedArtifact", text)
             self.assertIn("View probability health", text)
+            self.assertIn("coarseCostUnavailability", text)
+            self.assertIn("Coarse compatibility-map availability", text)
             self.assertIn("Arithmetic subtraction is not meaningful for categorical status codes", text)
             self.assertIn("category_legend", text)
             self.assertIn("Pyramid level selects algorithm state", text)
@@ -1859,6 +2060,10 @@ if (!evidenceReference("interactive/maps/map.png", "map").includes("<a")) proces
             self.assertEqual(trace_data["source_count"], 1)
             self.assertTrue(trace_data["sources"][0]["contained"])
             self.assertTrue(trace_data["sources"][0]["source_path"].startswith("../../drilldowns/"))
+            self.assertEqual(
+                trace_data["sources"][0]["artifact_closure"]["status"],
+                "verified",
+            )
             initialization, iteration = trace_data["rows"]
             self.assertEqual(initialization["logical_iteration"], -1)
             self.assertEqual(initialization["stage"], "initialization")
@@ -1879,6 +2084,275 @@ if (!evidenceReference("interactive/maps/map.png", "map").includes("<a")) proces
             self.assertTrue(iteration["trace_source_path"].startswith("../../drilldowns/"))
             validation = self.validate_drilldowns(embedded, output)
             self.assertTrue(validation["valid"], validation)
+
+    def test_completed_trace_accepts_multiscale_coordinates_and_level_dedup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports" / "03_master"
+            output.mkdir(parents=True)
+            requested_pixels = [{"x": 10, "y": 10}, {"x": 9, "y": 10}]
+            rows = []
+            for iteration in (-1, 0):
+                first = trace_row(iteration, x=10, y=10)
+                first["trace_index"] = 0
+                second = trace_row(iteration, x=9, y=10)
+                second["trace_index"] = 1
+                rows.extend((first, second))
+                coarse = trace_row(iteration, x=5, y=5)
+                coarse["scale_number"] = 1
+                coarse["trace_index"] = 0
+                coarse["source_quality"] = "proxy"
+                coarse["measurement_basis"] = "post_pass_proxy"
+                rows.append(coarse)
+            request_sha256, _traces = write_completed_trace_drilldown(
+                root, rows, requested_pixels=requested_pixels
+            )
+            write_trace_resource_plans(root, request_sha256, [
+                {
+                    "pyramid_level": 0, "width": 100, "height": 100,
+                    "num_trace_pixels": 2, "num_logical_states": 2,
+                    "trace_requested": True, "trace_available": True,
+                },
+                {
+                    "pyramid_level": 1, "width": 50, "height": 50,
+                    "num_trace_pixels": 1, "num_logical_states": 2,
+                    "trace_requested": True, "trace_available": True,
+                },
+                {
+                    "pyramid_level": 2, "width": 2, "height": 2,
+                    "num_trace_pixels": 0, "num_logical_states": 2,
+                    "trace_requested": False, "trace_available": False,
+                },
+            ])
+
+            embedded = dmap_report_model.load_drilldown_index(root, output)
+
+            trace_data = embedded["entries"][0]["trace_data"]
+            self.assertTrue(trace_data["complete"], trace_data["errors"])
+            self.assertEqual(trace_data["row_count"], 6)
+            self.assertEqual(
+                {(row["pyramid_level"], row["trace_index"], row["x"], row["y"])
+                 for row in trace_data["rows"]},
+                {(0, 0, 10, 10), (0, 1, 9, 10), (1, 0, 5, 5)},
+            )
+            coarse_identity = next(
+                row["request_identity"] for row in trace_data["rows"]
+                if row["pyramid_level"] == 1
+            )
+            self.assertEqual(coarse_identity["alias_request_indices"], [0, 1])
+            self.assertEqual(
+                trace_data["sources"][0]["coverage"],
+                {
+                    "requested_pixel_count": 2,
+                    "observed_pixel_count": 2,
+                    "expected_state_count_per_pixel": 4,
+                    "missing_pixel_count": 0,
+                    "unexpected_pixel_count": 0,
+                    "missing_state_count": 0,
+                },
+            )
+            self.assertTrue(self.validate_drilldowns(embedded, output)["valid"])
+
+    def test_completed_trace_enumerates_photometric_and_geometric_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports" / "03_master"
+            output.mkdir(parents=True)
+            request_sha256, _traces = write_completed_trace_drilldown(
+                root, [trace_row(-1), trace_row(0)]
+            )
+            write_additional_trace_stage(
+                root,
+                request_sha256,
+                [trace_row(-1), trace_row(0)],
+                geometric_iteration=0,
+            )
+
+            embedded = dmap_report_model.load_drilldown_index(root, output)
+
+            trace_data = embedded["entries"][0]["trace_data"]
+            self.assertTrue(trace_data["complete"], trace_data["errors"])
+            self.assertEqual(trace_data["source_count"], 2)
+            self.assertEqual(trace_data["row_count"], 4)
+            self.assertEqual(
+                {
+                    (source["estimation_stage"], source["geometric_iteration"])
+                    for source in trace_data["sources"]
+                },
+                {("photometric", None), ("geometric_consistency", 0)},
+            )
+            self.assertEqual(
+                {
+                    (
+                        row["estimation_stage"], row["geometric_iteration"],
+                        row["pyramid_level"], row["trace_index"],
+                        row["logical_iteration"],
+                    )
+                    for row in trace_data["rows"]
+                },
+                {
+                    (stage, geometric, 0, 0, iteration)
+                    for stage, geometric in (
+                        ("photometric", None), ("geometric_consistency", 0)
+                    )
+                    for iteration in (-1, 0)
+                },
+            )
+            self.assertTrue(self.validate_drilldowns(embedded, output)["valid"])
+
+    def test_completed_trace_rejects_missing_commanded_geometric_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports" / "03_master"
+            output.mkdir(parents=True)
+            request_sha256, _traces = write_completed_trace_drilldown(
+                root, [trace_row(-1), trace_row(0)]
+            )
+            repro_path = (
+                root / "drilldowns" / "captures" / request_sha256 / "runs"
+                / "base" / "scene-a" / "repro.json"
+            )
+            repro = json.loads(repro_path.read_text(encoding="utf-8"))
+            option_index = repro["command"].index("--geometric-iters")
+            repro["command"][option_index + 1] = "1"
+            repro_path.write_text(json.dumps(repro), encoding="utf-8")
+            dmap_report_model.integrity.write_capture_artifact_closure(
+                repro_path.parent, "trace"
+            )
+
+            embedded = dmap_report_model.load_drilldown_index(root, output)
+
+            trace_data = embedded["entries"][0]["trace_data"]
+            self.assertFalse(trace_data["complete"])
+            topology_error = next(
+                error for error in trace_data["errors"]
+                if error["kind"] == "trace_topology_evidence_error"
+            )
+            self.assertIn("expected [0], observed []", topology_error["message"])
+
+    def test_completed_trace_rejects_level_zero_plan_manifest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports" / "03_master"
+            output.mkdir(parents=True)
+            request_sha256, _traces = write_completed_trace_drilldown(
+                root, [trace_row(-1), trace_row(0)]
+            )
+            write_trace_resource_plans(root, request_sha256, [{
+                "pyramid_level": 0,
+                "width": 100,
+                "height": 100,
+                "num_trace_pixels": 1,
+                "num_logical_states": 3,
+                "trace_requested": True,
+                "trace_available": True,
+            }])
+
+            embedded = dmap_report_model.load_drilldown_index(root, output)
+
+            trace_data = embedded["entries"][0]["trace_data"]
+            self.assertFalse(trace_data["complete"])
+            topology_error = next(
+                error for error in trace_data["errors"]
+                if error["kind"] == "trace_topology_evidence_error"
+            )
+            self.assertIn("disagree on level-0 logical states", topology_error["message"])
+            evidence = trace_data["sources"][0]["exact_capture_evidence"]
+            self.assertEqual(
+                {
+                    (state["pyramid_level"], state["logical_iteration"])
+                    for state in evidence["expected_states"]
+                },
+                {(0, -1), (0, 0)},
+            )
+            self.assertFalse(self.validate_drilldowns(embedded, output)["valid"])
+
+    def test_completed_trace_rejects_coarse_only_resource_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports" / "03_master"
+            output.mkdir(parents=True)
+            rows = [trace_row(-1), trace_row(0)]
+            for iteration in (-1, 0):
+                coarse = trace_row(iteration, x=6, y=7)
+                coarse["scale_number"] = 1
+                rows.append(coarse)
+            request_sha256, _traces = write_completed_trace_drilldown(root, rows)
+            write_trace_resource_plans(root, request_sha256, [{
+                "pyramid_level": 1,
+                "width": 50,
+                "height": 50,
+                "num_trace_pixels": 1,
+                "num_logical_states": 2,
+                "trace_requested": True,
+                "trace_available": True,
+            }])
+
+            embedded = dmap_report_model.load_drilldown_index(root, output)
+
+            trace_data = embedded["entries"][0]["trace_data"]
+            self.assertFalse(trace_data["complete"])
+            topology_error = next(
+                error for error in trace_data["errors"]
+                if error["kind"] == "trace_topology_evidence_error"
+            )
+            self.assertIn("disagree on level-0 logical states", topology_error["message"])
+
+    def test_completed_trace_rejects_row_outside_declared_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports" / "03_master"
+            output.mkdir(parents=True)
+            write_completed_trace_drilldown(
+                root, [trace_row(-1), trace_row(0), trace_row(1)]
+            )
+
+            embedded = dmap_report_model.load_drilldown_index(root, output)
+
+            trace_data = embedded["entries"][0]["trace_data"]
+            self.assertFalse(trace_data["complete"])
+            undeclared = next(
+                error for error in trace_data["errors"]
+                if error["kind"] == "trace_undeclared_state_error"
+            )
+            self.assertIn("(0, 1)", undeclared["message"])
+            self.assertEqual(trace_data["row_count"], 2)
+            self.assertFalse(self.validate_drilldowns(embedded, output)["valid"])
+
+    def test_completed_trace_rejects_malformed_multiscale_request_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports" / "03_master"
+            output.mkdir(parents=True)
+            rows = [trace_row(-1), trace_row(0)]
+            for iteration in (-1, 0):
+                malformed = trace_row(iteration, x=7, y=7)
+                malformed["scale_number"] = 1
+                rows.append(malformed)
+            request_sha256, _traces = write_completed_trace_drilldown(root, rows)
+            write_trace_resource_plans(root, request_sha256, [
+                {
+                    "pyramid_level": 0, "width": 100, "height": 100,
+                    "num_trace_pixels": 1, "num_logical_states": 2,
+                    "trace_requested": True, "trace_available": True,
+                },
+                {
+                    "pyramid_level": 1, "width": 50, "height": 50,
+                    "num_trace_pixels": 1, "num_logical_states": 2,
+                    "trace_requested": True, "trace_available": True,
+                },
+            ])
+
+            embedded = dmap_report_model.load_drilldown_index(root, output)
+
+            trace_data = embedded["entries"][0]["trace_data"]
+            self.assertFalse(trace_data["complete"])
+            identity_error = next(
+                error for error in trace_data["errors"]
+                if error["kind"] == "trace_request_identity_error"
+            )
+            self.assertIn("this pyramid level", identity_error["message"])
+            self.assertFalse(self.validate_drilldowns(embedded, output)["valid"])
 
     def test_completed_legacy_debug_trace_keeps_proxy_source_classification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1911,6 +2385,9 @@ if (!evidenceReference("interactive/maps/map.png", "map").includes("<a")) proces
             )
             with traces.open("a", encoding="utf-8") as handle:
                 handle.write("{not-json}\n")
+            dmap_report_model.integrity.write_capture_artifact_closure(
+                traces.parents[2], "trace"
+            )
 
             embedded = dmap_report_model.load_drilldown_index(root, output)
 
@@ -1926,6 +2403,33 @@ if (!evidenceReference("interactive/maps/map.png", "map").includes("<a")) proces
                 row for row in validation["checks"] if row["name"] == "drilldown_index"
             )
             self.assertFalse(check["passed"])
+
+    def test_completed_trace_rejects_artifacts_mutated_after_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports" / "03_master"
+            output.mkdir(parents=True)
+            _request_sha256, traces = write_completed_trace_drilldown(
+                root, [trace_row(-1), trace_row(0)]
+            )
+            with traces.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(trace_row(1)) + "\n")
+
+            embedded = dmap_report_model.load_drilldown_index(root, output)
+
+            trace_data = embedded["entries"][0]["trace_data"]
+            self.assertFalse(trace_data["available"])
+            self.assertEqual(trace_data["row_count"], 0)
+            closure_error = next(
+                error for error in trace_data["errors"]
+                if error["kind"] == "trace_artifact_closure_error"
+            )
+            self.assertIn("differs from its manifest", closure_error["message"])
+            self.assertEqual(
+                trace_data["sources"][0]["artifact_closure"]["status"],
+                "invalid",
+            )
+            self.assertFalse(self.validate_drilldowns(embedded, output)["valid"])
 
     def test_completed_trace_rejects_execution_identity_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

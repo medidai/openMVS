@@ -96,6 +96,37 @@ deterministic per-reference-image observer sampling. The default is `1.0`.
 duplicated in `default_densify_args`; use the YAML field so the resolved config,
 capture intent, and report provenance agree.
 
+Targeted trace requests are admitted against both a pixel limit and a
+conservative report-row limit:
+
+```yaml
+instrumentation:
+  max_trace_pixels_per_request: 4096
+  max_trace_rows_per_request: 4096
+```
+
+The row bound multiplies requested pixels by the logical states, photometric
+pyramid levels, geometric-consistency stages, and selected baseline/variant
+runs. The calculation applies the selected scene's `argument_overrides` and
+rebinds the immutable request to the current run definitions before every
+execution. `max_trace_rows_per_request` may lower the public report limit but
+cannot raise it. Oversized requests fail before CUDA work with guidance to
+reduce the ROI, run count, iterations, or pyramid/stage count. Coarse-level
+coordinate collisions can make the actual capture smaller; admission
+deliberately uses the safe upper bound.
+
+Targeted drill-downs reject program-options `--config-file` inputs because an
+external file can silently change `--iters`, `--sub-resolution-levels`, or
+`--geometric-iters` after admission. Execution also fails before CUDA if the
+observer's implicit `DensifyPointCloudDMapObserve.cfg` exists in the effective
+working directory, then binds the command to an immutable empty
+`generated/Densify.drilldown.cfg` so a default file cannot appear between
+admission and launch. Express program options in `default_densify_args`, run
+`densify_args`, or scene `argument_overrides` so they are captured by the
+immutable request and experiment lock. This restriction does not apply to
+`--dense-config-file`, whose densifier parameters do not define trace-row
+topology.
+
 For a broader benchmark, list every frozen scene explicitly and keep the same
 run labels and repeats across them. `capture` traverses the configured
 run/repeat/scene/profile matrix, reuses only validated completed captures, and
