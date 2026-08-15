@@ -5768,6 +5768,7 @@ void Scene::DenseReconstructionEstimate(void* pData)
 			DMapFilterStorageLease confidenceStorageLease;
 			bool confidenceSummaryAvailable(false);
 			ConfidenceMap confidenceInput;
+			const ConfidenceMap* confidenceInputMap(NULL);
 			IIndexArr observedNeighbors;
 			if (observeConfidenceAdjustment) {
 				confidenceSummaryAvailable = PrepareDMapFilterInstrumentation(*this, idx,
@@ -5783,10 +5784,15 @@ void Scene::DenseReconstructionEstimate(void* pData)
 						if (observedNeighbors.size() == 8)
 							break;
 					}
-					// A fused in-kernel adjustment has already replaced the raw confidence by this
-					// point. Preserve that limitation explicitly instead of presenting a proxy input.
-					if (!depthData.bConfAdjusted)
+					// A fused in-kernel adjustment has already replaced the live raw confidence by
+					// this point. Use the exact observer-only snapshot retained at that boundary;
+					// leave it unavailable when the producer could not retain one.
+					if (depthData.bConfAdjusted && !depthData.confMapBeforeAdjustmentInstrument.empty())
+						confidenceInputMap = &depthData.confMapBeforeAdjustmentInstrument;
+					else if (!depthData.bConfAdjusted) {
 						confidenceInput = depthData.confMap.clone();
+						confidenceInputMap = &confidenceInput;
+					}
 				}
 			}
 			#endif
@@ -5823,7 +5829,7 @@ void Scene::DenseReconstructionEstimate(void* pData)
 			}
 #ifdef _USE_DMAP_INSTRUMENTATION
 			if (observeConfidenceAdjustment) {
-				const bool inputAvailable(confidenceSummaryAvailable && !confidenceInput.empty());
+				const bool inputAvailable(confidenceSummaryAvailable && confidenceInputMap && !confidenceInputMap->empty());
 				const bool outputAvailable(confidenceSummaryAvailable && depthData.bConfAdjusted);
 				const char* status(
 					!confidenceSummaryAvailable ? "resource_unavailable" :
@@ -5836,13 +5842,14 @@ void Scene::DenseReconstructionEstimate(void* pData)
 					data.nEstimationGeometricIter,
 					confidenceSummaryAvailable ? &observedNeighbors : NULL,
 					confidenceSummaryAvailable ? &depthData.depthMap : NULL,
-					inputAvailable ? &confidenceInput : NULL,
+					inputAvailable ? confidenceInputMap : NULL,
 					NULL,
 					outputAvailable ? &depthData.confMap : NULL,
 					outputAvailable ? &depthData.confMap : NULL,
 					confidenceResourcePlan, status, reason));
 				FinishDMapFilterInstrumentation(*this, idx, data.nEstimationGeometricIter,
 					confidenceResourcePlan, confidenceStorageLease, confidenceUsage);
+				depthData.confMapBeforeAdjustmentInstrument.release();
 			}
 
 			if ((OPTDENSE::nOptimize & OPTDENSE::OPTIMIZE) == 0 &&

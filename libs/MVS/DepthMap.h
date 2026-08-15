@@ -272,6 +272,11 @@ struct MVS_API DepthData {
 	DepthMap depthMap; // depth-map
 	NormalMap normalMap; // normal-map in camera space
 	ConfidenceMap confMap; // confidence-map
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	ConfidenceMap confMapBeforeAdjustmentInstrument; // exact raw confidence consumed by the fused
+		// confidence-adjustment epilogue; retained only until its observer sidecar is written
+		// and compiled out of the production boundary
+	#endif
 	ConfidenceMap confMapAdjusted; // recalibrated confidence-map computed by AdjustConfidence(), held
 		// in memory until the deferred EVT_ADJUSTDEPTHMAP swap (confMap = move(confMapAdjusted));
 		// intentionally NOT cleared by Release() so it survives a cache eviction/reload of this
@@ -307,6 +312,9 @@ struct MVS_API DepthData {
 		depthMap.release();
 		normalMap.release();
 		confMap.release();
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		confMapBeforeAdjustmentInstrument.release();
+		#endif
 		priorMap.release();
 		viewsMap.release();
 	}

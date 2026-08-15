@@ -4648,6 +4648,17 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 			pConfRequest->computeNS += std::chrono::duration_cast<std::chrono::nanoseconds>(
 				std::chrono::steady_clock::now() - t0).count();
 			pConfRequest->done = bFusedConfDone;
+			#ifdef _USE_DMAP_INSTRUMENTATION
+			// RunConfidenceFusedCUDA consumes the resident production cost map directly.
+			// Preserve its exact cost-to-confidence input for the later sidecar before the
+			// adjusted result overwrites depthData.confMap. This observer-only snapshot is
+			// covered by the confidence producer's existing two-map host budget.
+			if (bFusedConfDone && instrumentEnabled && !instrumentCostMap.empty()) {
+				depthData.confMapBeforeAdjustmentInstrument = instrumentCostMap.clone();
+				for (float& confidence: depthData.confMapBeforeAdjustmentInstrument)
+					confidence = confidence >= 1.f ? 0.f : 1.f-confidence;
+			}
+			#endif
 		}
 
 		// load depth-map, normal-map and confidence-map from CUDA memory
