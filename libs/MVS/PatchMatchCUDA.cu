@@ -75,16 +75,14 @@ namespace CUDA {
 #define ImagePixels cudaTextureObject_t
 #define RandState curandState
 
-// nvcc rejects `__constant__ Camera[...]` in Debug because the Eigen-backed
-// Camera type is treated as needing dynamic initialization. Keep Release on
-// the direct Camera array, and use aligned byte storage only for Debug.
-#if defined(_DEBUG)
+// nvcc rejects `__constant__ Camera[...]` with newer toolchains because the
+// Eigen-backed Camera type is treated as needing dynamic initialization. Keep
+// constant memory as aligned byte storage and reinterpret it at use sites.
 struct alignas(Camera) CameraConstStorage {
 	unsigned char bytes[sizeof(Camera)];
 };
 static_assert(sizeof(CameraConstStorage) == sizeof(Camera), "Camera constant storage must preserve Camera size");
 static_assert(alignof(CameraConstStorage) == alignof(Camera), "Camera constant storage must preserve Camera alignment");
-#endif
 
 // Cameras and runtime params live in __constant__ memory: warp-broadcast
 // reads through the constant cache replace per-thread parameter-stack /
@@ -98,12 +96,8 @@ static_assert(alignof(CameraConstStorage) == alignof(Camera), "Camera constant s
 // PatchMatchCUDA::EstimateDepthMap). If multi-stream / multi-instance
 // parallel use is ever added, switch to per-instance device buffers
 // passed explicitly to kernels.
-#if defined(_DEBUG)
 __constant__ CameraConstStorage g_cameraStorage[MAX_VIEWS + 1];
 #define g_cameras reinterpret_cast<const Camera*>(g_cameraStorage)
-#else
-__constant__ Camera g_cameras[MAX_VIEWS + 1];
-#endif
 __constant__ PatchMatch::Params g_params;
 
 // set/check a bit
@@ -761,11 +755,7 @@ __host__ void PatchMatch::UploadCameras()
 {
 	const size_t n = cameras.size();
 	ASSERT(n <= MAX_VIEWS + 1);
-	#if defined(_DEBUG)
 	CUDA_CHECK(cudaMemcpyToSymbolAsync(g_cameraStorage, cameras.data(), sizeof(Camera) * n, 0, cudaMemcpyHostToDevice, cudaStream));
-	#else
-	CUDA_CHECK(cudaMemcpyToSymbolAsync(g_cameras, cameras.data(), sizeof(Camera) * n, 0, cudaMemcpyHostToDevice, cudaStream));
-	#endif
 }
 __host__ void PatchMatch::UploadParams()
 {
