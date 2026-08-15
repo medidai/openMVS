@@ -372,15 +372,22 @@ def _without_disabled_observer_blocks(text: str, path: str) -> list[str]:
 
 
 def _apply_patchmatch_cuda_compatibility(text: str) -> str:
-	"""Build the one reviewed non-observer CUDA compatibility delta."""
+	"""Normalize the one reviewed non-observer CUDA compatibility delta."""
 	for before, after in PATCHMATCH_CUDA_COMPATIBILITY_REPLACEMENTS:
-		count = text.count(before)
-		if count != 1:
-			raise ValueError(
-				"PatchMatch CUDA compatibility baseline changed: "
-				f"expected one exact source pattern, found {count}"
-			)
-		text = text.replace(before, after, 1)
+		before_count = text.count(before)
+		after_count = text.count(after)
+		if before_count == 1:
+			without_before = text.replace(before, "", 1)
+			if without_before.count(after) == 0:
+				text = text.replace(before, after, 1)
+				continue
+		elif after_count == 1:
+			continue
+		raise ValueError(
+			"PatchMatch CUDA compatibility baseline changed: expected exactly "
+			"one source or normalized compatibility pattern, found "
+			f"source={before_count}, normalized={after_count}"
+		)
 	return text
 
 

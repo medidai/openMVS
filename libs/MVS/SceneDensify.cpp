@@ -6019,7 +6019,7 @@ void Scene::DenseReconstructionFilter(void* pData)
 			}
 #else
 			if ((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE) != 0 && data.depthMaps.AdjustConfidence(depthData, idxNeighbors)) {
-				// load the filtered maps after all depth-maps were filtered
+				// load the filtered map after all depth-maps were filtered
 				data.events.AddEvent(new EVTAdjustDepthMap(evtImage.idxImage));
 			}
 #endif

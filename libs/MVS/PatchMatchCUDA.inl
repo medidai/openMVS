@@ -387,7 +387,7 @@ public:
 #ifdef _USE_DMAP_INSTRUMENTATION
 	void EstimateDepthMap(DepthData&, int geometricIteration=-1, ConfAdjustRequest* pConfRequest=NULL);
 #else
-	void EstimateDepthMap(DepthData&, ConfAdjustRequest* pConfRequest=NULL);
+	void EstimateDepthMap(DepthData&, ConfAdjustRequest* pConfRequest = NULL);
 #endif
 
 	float4 GetPlaneHypothesis(const int index);

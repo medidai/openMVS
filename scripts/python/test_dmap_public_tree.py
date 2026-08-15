@@ -178,6 +178,22 @@ second();
 			expected,
 		)
 
+	def test_cuda_compatibility_transform_accepts_already_applied_base(self) -> None:
+		expected = "\n".join(
+			after for _, after in CHECKER.PATCHMATCH_CUDA_COMPATIBILITY_REPLACEMENTS
+		)
+		self.assertEqual(
+			CHECKER._apply_patchmatch_cuda_compatibility(expected),
+			expected,
+		)
+
+	def test_cuda_compatibility_transform_rejects_duplicate_forms(self) -> None:
+		before, after = CHECKER.PATCHMATCH_CUDA_COMPATIBILITY_REPLACEMENTS[0]
+		with self.assertRaisesRegex(ValueError, "baseline changed"):
+			CHECKER._apply_patchmatch_cuda_compatibility(
+				f"{before}\n{after}"
+			)
+
 	def test_cuda_compatibility_transform_rejects_baseline_drift(self) -> None:
 		with self.assertRaisesRegex(ValueError, "baseline changed"):
 			CHECKER._apply_patchmatch_cuda_compatibility("unexpected source")
