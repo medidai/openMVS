@@ -60,12 +60,15 @@
 // Optional depth-map estimation/filtering observability build. The private
 // source guard must come only from the public CMake option, never compiler or
 // cache injection under its internal name.
+#ifndef OPENMVS_DMAP_INSTRUMENTATION_CONFIGURED
+#define OPENMVS_DMAP_INSTRUMENTATION_CONFIGURED
 #ifdef _USE_DMAP_INSTRUMENTATION
 #error "_USE_DMAP_INSTRUMENTATION is internal; use OpenMVS_DMAP_INSTRUMENTATION"
 #endif
 #cmakedefine01 OPENMVS_DMAP_INSTRUMENTATION_ENABLED
 #if OPENMVS_DMAP_INSTRUMENTATION_ENABLED
 #define _USE_DMAP_INSTRUMENTATION
+#endif
 #endif
 
 // Apple Metal compute backend
