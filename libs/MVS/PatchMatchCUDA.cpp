@@ -167,6 +167,7 @@ void PatchMatch::ReleaseCUDA()
 
 void PatchMatch::Init(bool bGeomConsistency)
 {
+	params.bCompat23 = OPTDENSE::bPatchMatchCUDACompat23;
 	if (bGeomConsistency) {
 		params.bGeomConsistency = true;
 		params.nEstimationIters = 1;
@@ -281,8 +282,10 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 		if (scaleNumber != totalScaleNumber) {
 			// all resolutions, but the smallest one, if multi-resolution is enabled
 			params.bLowResProcessed = true;
-			// INTER_NEAREST preserves [dMin, dMax] / normalized-normals / correct-view-IDs
-			cv::resize(lowResDepthMap, depthData.depthMap, size, 0, 0, cv::INTER_NEAREST);
+			// The compatibility path intentionally restores 2.3's interpolated
+			// coarse depth prior; discrete normals and view IDs remain nearest-neighbor.
+			cv::resize(lowResDepthMap, depthData.depthMap, size, 0, 0,
+				params.bCompat23 ? cv::INTER_LINEAR : cv::INTER_NEAREST);
 			cv::resize(lowResNormalMap, depthData.normalMap, size, 0, 0, cv::INTER_NEAREST);
 			cv::resize(lowResViewsMap, depthData.viewsMap, size, 0, 0, cv::INTER_NEAREST);
 			CUDA_CHECK(cudaMallocAsync((void**)&cudaLowDepths, sizeof(float) * size.area(), cudaStream));

@@ -138,6 +138,8 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	unsigned nEstimationIters;
 	unsigned nEstimationGeometricIters;
 	unsigned nPatchMatchCUDAInstances;
+	bool bPatchMatchCUDACompat23;
+	float fWeightPointInsideROI;
 	unsigned nEstimateColors;
 	unsigned nEstimateNormals;
 	unsigned nFuseFilter;
@@ -165,6 +167,8 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("iters", boost::program_options::value(&nEstimationIters)->default_value(numIters), "number of patch-match iterations")
 		("geometric-iters", boost::program_options::value(&nEstimationGeometricIters)->default_value(2), "number of geometric consistent patch-match iterations (0 - disabled)")
 		("patch-match-cuda-instances", boost::program_options::value(&nPatchMatchCUDAInstances)->default_value(4), "number of parallel CUDA PatchMatch worker instances (clamped to nMaxThreads)")
+		("patch-match-cuda-compat-23", boost::program_options::value(&bPatchMatchCUDACompat23)->default_value(false), "restore OpenMVS 2.3 CUDA proposal and coarse-to-fine prior behavior")
+		("weight-point-inside-roi", boost::program_options::value(&fWeightPointInsideROI)->default_value(0.7f), "weight a point inside ROI when estimating neighbor views")
 		("estimate-colors", boost::program_options::value(&nEstimateColors)->default_value(2), "estimate the colors for the dense point-cloud (0 - disabled, 1 - final, 2 - estimate)")
 		("estimate-normals", boost::program_options::value(&nEstimateNormals)->default_value(2), "estimate the normals for the dense point-cloud (0 - disabled, 1 - final, 2 - estimate)")
 		("estimate-scale", boost::program_options::value(&OPT::fEstimateScale)->default_value(0.f), "estimate the point-scale for the dense point-cloud (scale multiplier, 0 - disabled)")
@@ -275,6 +279,8 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	OPTDENSE::nEstimationIters = nEstimationIters;
 	OPTDENSE::nEstimationGeometricIters = nEstimationGeometricIters;
 	OPTDENSE::nPatchMatchCUDAInstances = nPatchMatchCUDAInstances;
+	OPTDENSE::bPatchMatchCUDACompat23 = bPatchMatchCUDACompat23;
+	OPTDENSE::fWeightPointInsideROI = fWeightPointInsideROI;
 	OPTDENSE::nEstimateColors = nEstimateColors;
 	OPTDENSE::nEstimateNormals = nEstimateNormals;
 	OPTDENSE::nFuseFilter = nFuseFilter;
