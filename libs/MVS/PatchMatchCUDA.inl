@@ -65,6 +65,7 @@ public:
 		int nInitTopK = 3;
 		bool bGeomConsistency = false;
 		bool bLowResProcessed = false;
+		bool bCompat23 = false;
 		float fThresholdKeepCost = 0;
 	};
 
