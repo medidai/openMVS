@@ -222,12 +222,49 @@ __device__ inline Point3 GeneratePerturbedNormal(const CUDA::Camera& camera, con
 	return normalPerturbed.dot(viewDirection) >= 0.f ? normal : normalPerturbed;
 }
 
+// OpenMVS 2.3 used Euler perturbation and consumed three random draws here.
+__device__ inline Point3 GeneratePerturbedNormal23(const CUDA::Camera& camera, const Point2i& p, const Point3& normal, RandState* randState, const float perturbation)
+{
+	const Point3 viewDirection = camera.model.ViewDirection(p);
+	const float a1 = (curand_uniform(randState) - 0.5f) * perturbation;
+	const float a2 = (curand_uniform(randState) - 0.5f) * perturbation;
+	const float a3 = (curand_uniform(randState) - 0.5f) * perturbation;
+	const float sinA1 = sin(a1);
+	const float sinA2 = sin(a2);
+	const float sinA3 = sin(a3);
+	const float cosA1 = cos(a1);
+	const float cosA2 = cos(a2);
+	const float cosA3 = cos(a3);
+	Matrix3 rotation; rotation <<
+		cosA2 * cosA3,
+		cosA3 * sinA1 * sinA2 - cosA1 * sinA3,
+		sinA1 * sinA3 + cosA1 * cosA3 * sinA2,
+		cosA2 * sinA3,
+		cosA1 * cosA3 + sinA1 * sinA2 * sinA3,
+		cosA1 * sinA2 * sinA3 - cosA3 * sinA1,
+		-sinA2,
+		cosA2 * sinA1,
+		cosA1 * cosA2;
+	const Point3 normalPerturbed = rotation * normal.topLeftCorner<3,1>();
+	if (normalPerturbed.dot(viewDirection) >= 0.f)
+		return normal;
+	return normalPerturbed.normalized();
+}
+
 // randomly perturb a depth, sampling uniformly from the intersection of the
 // perturbation window [(1-p)d, (1+p)d] with the valid range [fDepthMin, fDepthMax]
 __device__ inline float GeneratePerturbedDepth(float depth, RandState* randState, const float perturbation)
 {
 	const float lo = fmaxf((1.f - perturbation) * depth, g_params.fDepthMin);
 	const float hi = fminf((1.f + perturbation) * depth, g_params.fDepthMax);
+	return lo + curand_uniform(randState) * (hi - lo);
+}
+
+// OpenMVS 2.3 sampled the complete perturbation window without range clamping.
+__device__ inline float GeneratePerturbedDepth23(float depth, RandState* randState, const float perturbation)
+{
+	const float lo = (1.f - perturbation) * depth;
+	const float hi = (1.f + perturbation) * depth;
 	return lo + curand_uniform(randState) * (hi - lo);
 }
 
@@ -429,7 +466,7 @@ __device__ float ScorePlane(const RefPatchCache& cache, const CUDA::Camera& refC
 	// apply depth prior weight based on patch textureless;
 	// hard-cap the prior on medium to well-textured patches:
 	// 0.0025 is the optimum tested on several GT datasets
-	if (lowDepth > 0 && cache.varRef < 0.0025f) {
+	if (lowDepth > 0 && (g_params.bCompat23 || cache.varRef < 0.0025f)) {
 		const float depth(plane.w());
 		const float deltaDepth(min((fabsf(lowDepth-depth) / lowDepth), 0.5f));
 		constexpr float smoothSigmaDepth(-1.f / (1.f * 0.02f)); // 0.12: patch texture variance below 0.02 (0.12^2) is considered texture-less
@@ -631,8 +668,12 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	// refine estimate
 	constexpr float perturbationDepth = 0.005f;
 	constexpr float perturbationNormal = 0.01f * (float)M_PI;
-	const float depthPerturbed = GeneratePerturbedDepth(depth, randState, perturbationDepth);
-	const Point3 perturbedNormal = GeneratePerturbedNormal(g_cameras[0], p, plane.topLeftCorner<3,1>(), randState, perturbationNormal);
+	const float depthPerturbed = g_params.bCompat23
+		? GeneratePerturbedDepth23(depth, randState, perturbationDepth)
+		: GeneratePerturbedDepth(depth, randState, perturbationDepth);
+	const Point3 perturbedNormal = g_params.bCompat23
+		? GeneratePerturbedNormal23(g_cameras[0], p, plane.topLeftCorner<3,1>(), randState, perturbationNormal)
+		: GeneratePerturbedNormal(g_cameras[0], p, plane.topLeftCorner<3,1>(), randState, perturbationNormal);
 	const Point3 normalRand = GenerateRandomNormal(g_cameras[0], p, randState);
 	int numValidPlanes = 3;
 	Point3 surfaceNormal = Point3::Zero();
