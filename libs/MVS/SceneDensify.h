@@ -36,12 +36,13 @@
 // I N C L U D E S /////////////////////////////////////////////////
 
 #include "SemiGlobalMatcher.h"
+#include "ImageCache.h"
 
 
 // S T R U C T S ///////////////////////////////////////////////////
 
 namespace MVS {
-	
+
 // Forward declarations
 class MVS_API Scene;
 #ifdef _USE_CUDA
@@ -49,6 +50,11 @@ namespace CUDA {
 class PatchMatch;
 } // namespace CUDA
 #endif // _USE_CUDA
+#ifdef _USE_METAL
+namespace METAL {
+class PatchMatch;
+} // namespace METAL
+#endif // _USE_METAL
 
 // structure used to compute all depth-maps
 class MVS_API DepthMapsData
@@ -57,23 +63,76 @@ public:
 	DepthMapsData(Scene& _scene);
 	~DepthMapsData();
 
+	// pmCUDAPool holds move-only std::unique_ptrs; explicitly forbid copy so the
+	// MSVC dllexport instantiator does not try to synthesize a copy constructor.
+	DepthMapsData(const DepthMapsData&) = delete;
+	DepthMapsData& operator=(const DepthMapsData&) = delete;
+
 	bool SelectViews(DepthData& depthData);
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	bool InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex numNeighbors, bool loadImages, int loadDepthMaps, int nGeometricIter=-1);
+	#else
 	bool InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex numNeighbors, bool loadImages, int loadDepthMaps);
+	#endif
+	bool FetchViewImage(DepthData::ViewData& view);
 	bool InitDepthMap(DepthData& depthData);
 	bool EstimateDepthMap(IIndex idxImage, int nGeometricIter);
+
+	#ifdef _USE_CUDA
+	// Construct poolSize PatchMatch instances ready for the depth-map phase.
+	// First construction probes CUDA::initDevices(); returns false if the
+	// device set is still empty afterwards (caller falls back to CPU).
+	bool AllocateCudaPool(unsigned poolSize);
+	// Tear down per-instance state and re-init for the geometric-consistency
+	// phase, resetting the slot counter and bumping the epoch so worker threads
+	// re-claim slots cleanly even if the OS reuses them across the boundary.
+	void ReinitCudaPoolForGeom();
+	#endif // _USE_CUDA
+
+	#ifdef _USE_METAL
+	// Construct poolSize Metal PatchMatch instances; returns false if no Metal
+	// device is available (caller falls back to CPU).
+	bool AllocateMetalPool(unsigned poolSize);
+	// Re-init each instance for the geometric-consistency phase (bump epoch).
+	void ReinitMetalPoolForGeom();
+	#endif // _USE_METAL
 
 	bool RemoveSmallSegments(DepthData& depthData);
 	bool GapInterpolation(DepthData& depthData);
 
 	void EstimateNormalMaps();
 
-	bool AdjustConfidenceFast(DepthData& depthData, const IIndexArr& idxNeighbors);
+	void ComputeIntraMapPrior(const DepthData& depthData, ConfidenceMap& priorMap, bool bParallel) const;
+	// compute-if-absent accessor: returns depthData.priorMap, computing (and caching) it only if not
+	// already present. bParallel selects ComputeIntraMapPrior's inner OpenMP loop: AdjustConfidence
+	// passes false -- it runs inside one of nMaxThreads already-parallel pool-worker threads, where
+	// an inner "#pragma omp parallel for" would spawn a fresh OMP team PER worker (the pthread is
+	// not an OMP thread, so nesting rules do not gate it), violating this codebase's
+	// no-per-view-threading rule. DenseFuseDepthMaps passes true -- single serial caller, idle cores.
+	const ConfidenceMap& GetIntraMapPrior(DepthData& depthData, bool bParallel) const;
 	bool AdjustConfidence(DepthData& depthDataRef, const IIndexArr& idxNeighbors);
+	// integrated fusion-faithful confidence -- epilogue of the LAST geometric-consistency
+	// iteration, run from the CALLER (DenseReconstructionEstimate's EVT_SAVEDEPTHMAP handler) while
+	// depthDataRef.images[] (this reference's own already-loaded neighbor depth/normal/conf, see
+	// InitViews' loadDepthMaps==2 path) is still resident, before ReleaseImages()/Release()/Save().
+	// No idxNeighbors argument -- the neighbor set and its data come entirely from depthDataRef.images
+	// (index 0 is the reference itself), not from the shared arrDepthData[] the standalone overload
+	// above indexes into. Writes depthDataRef.confMap directly (no confMapAdjusted deferred swap: see
+	// the .cpp comment for why the standalone phase's race does not apply here).
+	bool AdjustConfidence(DepthData& depthDataRef);
+	#ifdef _USE_CUDA
+	// GPU counterpart of AdjustConfidence(DepthData&) -- same neighbor build, the prior +
+	// confirmation sweep run in ConfidenceCUDA.cu. Returns false on any CUDA error (CPU fallback).
+	bool AdjustConfidenceCUDA(DepthData& depthDataRef);
+	#endif
 	void MergeDepthMaps(PointCloud& pointcloud, bool bEstimateColor, bool bEstimateNormal);
 	void FuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, bool bEstimateNormal);
 	void DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, bool bEstimateNormal);
 
 	static DepthData ScaleDepthData(const DepthData& inputDeptData, float scale);
+
+	// Bytes the image cache may hold for the whole depth-map estimation.
+	size_t ComputeImageCacheMemory(const IIndexArr& images) const;
 
 protected:
 	static void* STCALL ScoreDepthMapTmp(void*);
@@ -85,6 +144,12 @@ public:
 
 	DepthDataArr arrDepthData;
 
+	// Images decoded on demand by InitViews, so a large scene does not have to
+	// hold every one of them for the whole reconstruction. Sized once for the
+	// whole estimation, and left disabled for the SGM fusion modes, which work
+	// directly on the color images.
+	ImageCache imageCache;
+
 	// used internally to estimate the depth-maps
 	Image8U::Size prevDepthMapSize; // remember the size of the last estimated depth-map
 	Image8U::Size prevDepthMapSizeTrg; // ... same for target image
@@ -92,9 +157,23 @@ public:
 	DepthEstimator::MapRefArr coordsTrg; // ... same for target image
 
 	#ifdef _USE_CUDA
-	// used internally to estimate the depth-maps using CUDA
-	CAutoPtr<MVS::CUDA::PatchMatch> pmCUDA;
+	// One PatchMatch instance per worker thread; each worker claims a slot via
+	// thread-local index gated by pmCUDAEpoch. Lets the {UploadCameras + kernel
+	// launch} window stay mutex-serialized via the global event chain while the
+	// per-instance host prep (image upload, depth-prior packing, result unpack)
+	// runs lock-free in parallel across the SceneDensify ThreadPool workers.
+	std::vector<std::unique_ptr<MVS::CUDA::PatchMatch>> pmCUDAPool;
+	mutable volatile Thread::safe_t pmCUDANextIdx;
+	mutable volatile Thread::safe_t pmCUDAEpoch;
 	#endif // _USE_CUDA
+
+	#ifdef _USE_METAL
+	// One Metal PatchMatch instance per worker thread; claimed via thread-local
+	// slot. No global serialization needed (kernels take all state via buffers).
+	std::vector<std::unique_ptr<MVS::METAL::PatchMatch>> pmMetalPool;
+	mutable volatile Thread::safe_t pmMetalNextIdx;
+	mutable volatile Thread::safe_t pmMetalEpoch;
+	#endif // _USE_METAL
 };
 /*----------------------------------------------------------------*/
 
@@ -109,9 +188,21 @@ struct MVS_API DenseDepthMapData {
 	CAutoPtr<Util::Progress> progress;
 	int nEstimationGeometricIter;
 	int nFusionMode;
+	float fSampleMeshNeighbors;
+	// atomic shutdown latch for an estimate phase, reset to 0 before each phase:
+	// the first worker to reach the end-of-work branch increments it from 0 to 1
+	// and enqueues exactly one EVT_CLOSE per worker. Keeps the EVT_CLOSE count
+	// balanced so the queue ends empty (see DenseReconstructionEstimate), which is
+	// what lets a non-empty queue stay a reliable failure signal.
+	volatile Thread::safe_t nClosing;
 	STEREO::SemiGlobalMatcher sgm;
+	// number of workers in the dense-reconstruction ThreadPool; set by
+	// DenseReconstruction once the CUDA pool size is known. Used by the worker
+	// EVT_PROCESSIMAGE handler to broadcast EVT_CLOSE to all sibling workers
+	// (the old single-EVT_CLOSE pattern hung when nWorkers > 2).
+	unsigned nDenseWorkers;
 
-	DenseDepthMapData(Scene& _scene, int _nFusionMode=0);
+	DenseDepthMapData(Scene& _scene, int _nFusionMode=0, float _fSampleMeshNeighbors=0);
 	~DenseDepthMapData();
 
 	void SignalCompleteDepthmapFilter();

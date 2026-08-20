@@ -1,0 +1,73 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_CLASSES_ROOT\\.mvs]
+@="OpenMVS.mvs"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.mvs]
+@="OpenMVS Scene"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.mvs\\DefaultIcon]
+@="%~dp0\\Viewer.ico,0"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.mvs\\shell\\open\\command]
+@='"%INSTALL_PATH%\\Viewer.exe" "%1"'
+
+[HKEY_CLASSES_ROOT\\.dmap]
+@="OpenMVS.dmap"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.dmap]
+@="OpenMVS Depth Map"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.dmap\\DefaultIcon]
+@="%~dp0\\Viewer.ico,0"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.dmap\\shell\\open\\command]
+@='"%INSTALL_PATH%\\Viewer.exe" "%1"'
+
+[HKEY_CLASSES_ROOT\\.ply]
+@="OpenMVS.ply"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.ply]
+@="Polygon File Format"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.ply\\DefaultIcon]
+@="%~dp0\\Viewer.ico,0"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.ply\\shell\\open\\command]
+@='"%INSTALL_PATH%\\Viewer.exe" "%1"'
+
+[HKEY_CLASSES_ROOT\\.obj]
+@="OpenMVS.obj"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.obj]
+@="Wavefront OBJ File"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.obj\\DefaultIcon]
+@="%~dp0\\Viewer.ico,0"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.obj\\shell\\open\\command]
+@='"%INSTALL_PATH%\\Viewer.exe" "%1"'
+
+[HKEY_CLASSES_ROOT\\.gltf]
+@="OpenMVS.gltf"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.gltf]
+@="GL Transmission Format"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.gltf\\DefaultIcon]
+@="%~dp0\\Viewer.ico,0"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.gltf\\shell\\open\\command]
+@='"%INSTALL_PATH%\\Viewer.exe" "%1"'
+
+[HKEY_CLASSES_ROOT\\.glb]
+@="OpenMVS.glb"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.glb]
+@="GL Transmission Format Binary"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.glb\\DefaultIcon]
+@="%~dp0\\Viewer.ico,0"
+
+[HKEY_CLASSES_ROOT\\OpenMVS.glb\\shell\\open\\command]
+@='"%INSTALL_PATH%\\Viewer.exe" "%1"'

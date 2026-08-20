@@ -67,8 +67,14 @@ using namespace MVS;
 #define DST_Image(var)
 #endif
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("ScnRefne"));
 
 typedef float Real;
 typedef Mesh::Vertex Vertex;
@@ -487,14 +493,13 @@ void MeshRefine::SubdivideMesh(uint32_t maxArea, float fDecimate, unsigned nClos
 	if (!bNoDecimation) {
 		if (fDecimate > 0.f) {
 			// decimate to the desired resolution
-			scene.mesh.Clean(fDecimate, 0.f, false, nCloseHoles, 0u, 0.f, false);
-			scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+			scene.mesh.Clean(fDecimate, 0.f, false, nCloseHoles, 0u, 0.f);
 
 			#ifdef MESHOPT_ENSUREEDGESIZE
 			// make sure there are no edges too small or too long
 			if (nEnsureEdgeSize > 0 && bNoSimplification) {
 				scene.mesh.EnsureEdgeSize();
-				scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+				scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f);
 			}
 			#endif
 
@@ -514,14 +519,13 @@ void MeshRefine::SubdivideMesh(uint32_t maxArea, float fDecimate, unsigned nClos
 				maxAreas.Empty();
 
 				// decimate to the auto detected resolution
-				scene.mesh.Clean(MAXF(0.1f, fMedianArea/fMaxArea), 0.f, false, nCloseHoles, 0u, 0.f, false);
-				scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+				scene.mesh.Clean(MAXF(0.1f, fMedianArea/fMaxArea), 0.f, false, nCloseHoles, 0u, 0.f);
 
 				#ifdef MESHOPT_ENSUREEDGESIZE
 				// make sure there are no edges too small or too long
 				if (nEnsureEdgeSize > 0 && bNoSimplification) {
 					scene.mesh.EnsureEdgeSize();
-					scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+					scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f);
 				}
 				#endif
 
@@ -553,7 +557,7 @@ void MeshRefine::SubdivideMesh(uint32_t maxArea, float fDecimate, unsigned nClos
 	#endif
 	{
 		scene.mesh.EnsureEdgeSize();
-		scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f, true);
+		scene.mesh.Clean(1.f, 0.f, false, nCloseHoles, 0u, 0.f);
 	}
 	#endif
 
@@ -1046,7 +1050,7 @@ void MeshRefine::ThSelectNeighbors(uint32_t idxImage, std::unordered_set<uint64_
 	// keep only best neighbor views
 	const float fMinArea(0.1f);
 	const float fMinScale(0.2f), fMaxScale(3.2f);
-	const float fMinAngle(FD2R(2.5f)), fMaxAngle(FD2R(45.f));
+	const float fMinAngle(D2R(2.5f)), fMaxAngle(D2R(45.f));
 	Image& imageData = images[idxImage];
 	if (!imageData.IsValid())
 		return;
@@ -1283,10 +1287,15 @@ bool Scene::RefineMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsig
 					   unsigned nScales, float fScaleStep,
 					   unsigned nAlternatePair, float fRegularityWeight, float fRatioRigidityElasticity, float fGradientStep, float fThPlanarVertex, unsigned nReduceMemory)
 {
-	if (pointcloud.IsEmpty() && !ImagesHaveNeighbors())
+	bool bGeneratedPointcloud(false);
+	if (pointcloud.IsEmpty() && !ImagesHaveNeighbors()) {
 		SampleMeshWithVisibility();
+		bGeneratedPointcloud = true;
+	}
 
 	MeshRefine refine(*this, nReduceMemory, nAlternatePair, fRegularityWeight, fRatioRigidityElasticity, nResolutionLevel, nMinResolution, nMaxViews, nMaxThreads);
+	if (bGeneratedPointcloud)
+		pointcloud.Release();
 	if (!refine.IsValid())
 		return false;
 
@@ -1319,7 +1328,11 @@ bool Scene::RefineMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsig
 			// DefineProblem
 			refine.ratioRigidityElasticity = 1.f;
 			ceres::MeshProblem* problemData(new ceres::MeshProblem(refine));
+			#if CERES_VERSION_MAJOR > 2 || (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 3)
+			ceres::GradientProblem problem{std::unique_ptr<ceres::FirstOrderFunction>(problemData)};
+			#else
 			ceres::GradientProblem problem(problemData);
+			#endif
 			// SetMinimizerOptions
 			ceres::GradientProblemSolver::Options options;
 			if (VERBOSITY_LEVEL > 1) {
@@ -1426,3 +1439,5 @@ bool Scene::RefineMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsig
 	return true;
 } // RefineMesh
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

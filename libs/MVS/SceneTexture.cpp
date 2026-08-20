@@ -31,7 +31,7 @@
 
 #include "Common.h"
 #include "Scene.h"
-#include "RectsBinPack.h"
+#include "AtlasPacker.h"
 // connected components
 #include <boost/graph/adjacency_list.hpp>
 #include <boost/graph/connected_components.hpp>
@@ -64,11 +64,71 @@ using namespace MVS;
 #define TEXOPT_INFERENCE_LBP 1
 #define TEXOPT_INFERENCE TEXOPT_INFERENCE_LBP
 
+// Spatially coherent texture atlas partitioning.
+//
+// When rendering large reconstructed scenes, loading all texture pages into GPU memory at once
+// is impractical. This feature partitions texture patches into spatially coherent groups so that
+// each texture atlas page corresponds to a localized surface region. A renderer can then load
+// only the texture pages needed for the currently visible portion of the mesh, enabling efficient
+// view-dependent texture streaming.
+//
+// The algorithm operates after face-view assignment and seam leveling, taking the set of texture
+// patches (each a connected component of faces assigned to the same view) and their 2D bounding
+// rectangles in source-image space. It produces spatial groups of patches, where each group
+// becomes exactly one texture atlas page.
+//
+// === Spatial Approximation (PatchApprox / ComputePatchApproximation) ===
+//
+// Each texture patch is approximated by its 3D centroid — the average position of all vertices
+// in the patch. This centroid is used to sort patches spatially and determine which patches
+// belong to the same surface region. Additional OBB fields (U, V, bounds, surfaceArea) are
+// computed for potential future use in more advanced partitioning strategies.
+//
+// === Greedy Spatial Batching (SplitPatchesSpatially) ===
+//
+// The algorithm uses a single-pass greedy approach that interleaves spatial sorting with
+// packing verification:
+//
+// 1. SPATIAL SORT:
+//    All patches are sorted by centroid position along the longest axis of the overall
+//    centroid AABB. This ensures that adjacent patches in the sorted order are spatially
+//    close on the mesh surface.
+//
+// 2. BATCH ESTIMATION:
+//    Walking the sorted list from front to back, patches are accumulated until their total
+//    2D rect area reaches ~85% of the maxTextureSize page capacity. This produces a batch
+//    that is a contiguous slice of the spatial sort — inherently spatially coherent.
+//
+// 3. TRIAL PACKING & SHRINKING:
+//    The batch is verified by trial bin packing using the exact same packer and heuristic
+//    that the actual packing loop will use. If the trial fails (the area estimate was too
+//    optimistic), the batch is shrunk by removing ~10% of patches from the end — the spatial
+//    border toward the next region. This is repeated until the trial succeeds.
+//
+//    Shrinking from the end (not arbitrary bin-packer overflow) is the key property: it
+//    guarantees the packed page is a contiguous spatial region, and the trimmed patches are
+//    at the boundary, becoming the natural start of the next page.
+//
+// 4. GROUP EMISSION & ADVANCE:
+//    The verified batch becomes a spatial group. The remaining patches (still in sorted order)
+//    become the input for the next iteration. When the remaining patches fit in one texture
+//    (checked via ComputeTextureSize), they are accepted as the final group without trial
+//    packing.
+//
+// === Special Handling: Unmapped Faces ===
+//
+// The last entry in texturePatches collects faces with no valid view assignment (label=NO_ID).
+// These faces are scattered across the scene with no meaningful spatial centroid. They are
+// excluded from spatial partitioning to avoid distorting the sort. After partitioning, the
+// unmapped-faces patch (a tiny uniform-color rect) is appended to the last spatial group.
+#define TEXOPT_GROUP_PATCHES 1
+
 // inference algorithm
 #if TEXOPT_INFERENCE == TEXOPT_INFERENCE_LBP
 #include "../Math/LBP.h"
 namespace MVS {
 constexpr LBPInference::EnergyType LBPMaxEnergy(1);
+constexpr LBPInference::EnergyType LBPMinWeight(0.5f);
 // Potts model as smoothness function
 LBPInference::EnergyType STCALL SmoothnessPotts(LBPInference::NodeID, LBPInference::NodeID, LBPInference::LabelID l1, LBPInference::LabelID l2) {
 	return l1 == l2 && l1 != 0 && l2 != 0 ? LBPInference::EnergyType(0) : LBPMaxEnergy;
@@ -76,8 +136,14 @@ LBPInference::EnergyType STCALL SmoothnessPotts(LBPInference::NodeID, LBPInferen
 }
 #endif
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("ScnTextr"));
 
 typedef Mesh::Vertex Vertex;
 typedef Mesh::VIndex VIndex;
@@ -105,10 +171,15 @@ struct MeshTexture {
 		FIndex idxFace;
 		Image8U mask;
 		bool validFace;
+		const float scaleMaskX, scaleMaskY;
 
-		RasterMesh(const Mesh::VertexArr& _vertices, const Camera& _camera, DepthMap& _depthMap, FaceMap& _faceMap)
-			: Base(_vertices, _camera, _depthMap), faceMap(_faceMap) {}
-		void Clear() {
+		RasterMesh(const Mesh::VertexArr& _vertices, const Camera& _camera, DepthMap& _depthMap, FaceMap& _faceMap, const cv::Size& maskSize)
+			: Base(_vertices, _camera, _depthMap), faceMap(_faceMap), scaleMaskX((float)maskSize.width / _faceMap.cols), scaleMaskY((float)maskSize.height / _faceMap.rows) {}
+		inline bool ProjectVertex(const Point3f& pt, int v, Triangle& t) {
+			return (t.ptc[v] = camera.TransformPointW2C(Cast<REAL>(pt))).z > 0 &&
+				depthMap.isInsideWithBorder<float,5>(t.pti[v] = camera.TransformPointC2I(t.ptc[v]));
+		}
+		inline void Clear() {
 			Base::Clear();
 			faceMap.memset((uint8_t)NO_ID);
 		}
@@ -119,7 +190,7 @@ struct MeshTexture {
 			Depth& depth = depthMap(pt);
 			if (depth == 0 || depth > z) {
 				depth = z;
-				faceMap(pt) = validFace && (validFace = (mask(pt) != 0)) ? idxFace : NO_ID;
+				faceMap(pt) = validFace && (validFace = (mask((int)(pt.y * scaleMaskY), (int)(pt.x * scaleMaskX)) != 0)) ? idxFace : NO_ID;
 			}
 		}
 	};
@@ -149,7 +220,7 @@ struct MeshTexture {
 	struct TexturePatch {
 		Label label; // view index
 		Mesh::FaceIdxArr faces; // indices of the faces contained by the patch
-		RectsBinPack::Rect rect; // the bounding box in the view containing the patch
+		AtlasPacker::Rect rect; // the bounding box in the view containing the patch
 	};
 	typedef cList<TexturePatch,const TexturePatch&,1,1024,FIndex> TexturePatchArr;
 
@@ -204,39 +275,6 @@ struct MeshTexture {
 	};
 	typedef cList<SeamVertex,const SeamVertex&,1,256,uint32_t> SeamVertices;
 
-	// used to iterate vertex labels
-	struct PatchIndex {
-		bool bIndex;
-		union {
-			uint32_t idxPatch;
-			uint32_t idxSeamVertex;
-		};
-	};
-	typedef CLISTDEF0(PatchIndex) PatchIndices;
-	struct VertexPatchIterator {
-		uint32_t idx;
-		uint32_t idxPatch;
-		const SeamVertex::Patches* pPatches;
-		inline VertexPatchIterator(const PatchIndex& patchIndex, const SeamVertices& seamVertices) : idx(NO_ID) {
-			if (patchIndex.bIndex) {
-				pPatches = &seamVertices[patchIndex.idxSeamVertex].patches;
-			} else {
-				idxPatch = patchIndex.idxPatch;
-				pPatches = NULL;
-			}
-		}
-		inline operator uint32_t () const {
-			return idxPatch;
-		}
-		inline bool Next() {
-			if (pPatches == NULL)
-				return (idx++ == NO_ID);
-			if (++idx >= pPatches->size())
-				return false;
-			idxPatch = (*pPatches)[idx].idxPatch;
-			return true;
-		}
-	};
 
 	// used to sample seam edges
 	typedef TAccumulator<Color> AccumColor;
@@ -283,16 +321,16 @@ public:
 	#if TEXOPT_FACEOUTLIER != TEXOPT_FACEOUTLIER_NA
 	bool FaceOutlierDetection(FaceDataArr& faceDatas, float fOutlierThreshold) const;
 	#endif
-	
+
 	void CreateVirtualFaces(const FaceDataViewArr& facesDatas, FaceDataViewArr& virtualFacesDatas, VirtualFaceIdxsArr& virtualFaces, unsigned minCommonCameras=2, float thMaxNormalDeviation=25.f) const;
 	IIndexArr SelectBestView(const FaceDataArr& faceDatas, FIndex fid, unsigned minCommonCameras, float ratioAngleToQuality) const;
 
 	bool FaceViewSelection(unsigned minCommonCameras, float fOutlierThreshold, float fRatioDataSmoothness, int nIgnoreMaskLabel, const IIndexArr& views);
-	
+
 	void CreateSeamVertices();
 	void GlobalSeamLeveling();
 	void LocalSeamLeveling();
-	void GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, unsigned nRectPackingHeuristic, Pixel8U colEmpty, float fSharpnessWeight, int maxTextureSize);
+	void GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, Pixel8U colEmpty, float fSharpnessWeight, int maxTextureSize);
 
 	template <typename PIXEL>
 	static inline PIXEL RGB2YCBCR(const PIXEL& v) {
@@ -452,7 +490,18 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 			++progress;
 			continue;
 		}
-		// load image
+		// load image at full native resolution
+		if (!imageData.ReloadImage(0, false)) {
+			#ifdef TEXOPT_USE_OPENMP
+			bAbort = true;
+			#pragma omp flush (bAbort)
+			continue;
+			#else
+			return false;
+			#endif
+		}
+		const cv::Size fullSize(imageData.GetSize());
+		// load image at requested working resolution
 		unsigned level(nResolutionLevel);
 		const unsigned imageSize(imageData.RecomputeMaxResolution(level, nMinResolution));
 		if ((imageData.image.empty() || MAXF(imageData.width,imageData.height) != imageSize) && !imageData.ReloadImage(imageSize)) {
@@ -490,24 +539,26 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 		// select faces inside view frustum
 		Mesh::FaceIdxArr cameraFaces;
 		Mesh::FacesInserter inserter(cameraFaces);
-		const TFrustum<float,5> frustum(Matrix3x4f(imageData.camera.P), (float)imageData.width, (float)imageData.height);
+		const cv::Size highResSize(fullSize.width*2, fullSize.height*2);
+		const Camera cameraHighRes(imageData.GetCamera(scene.platforms, highResSize));
+		const TFrustum<float,5> frustum(Matrix3x4f(cameraHighRes.P), (float)highResSize.width, (float)highResSize.height);
 		octree.Traverse(frustum, inserter);
 		// project all triangles in this view and keep the closest ones
-		faceMap.create(imageData.GetSize());
-		depthMap.create(imageData.GetSize());
-		RasterMesh rasterer(vertices, imageData.camera, depthMap, faceMap);
+		faceMap.create(highResSize);
+		depthMap.create(highResSize);
+		RasterMesh rasterer(vertices, cameraHighRes, depthMap, faceMap, fullSize);
 		RasterMesh::Triangle triangle;
 		RasterMesh::TriangleRasterizer triangleRasterizer(triangle, rasterer);
 		if (nIgnoreMaskLabel >= 0) {
 			// import mask
 			BitMatrix bmask;
-			DepthEstimator::ImportIgnoreMask(imageData, imageData.GetSize(), (uint8_t)OPTDENSE::nIgnoreMaskLabel, bmask, &rasterer.mask);
+			DepthEstimator::ImportIgnoreMask(imageData, fullSize, (uint8_t)OPTDENSE::nIgnoreMaskLabel, bmask, &rasterer.mask);
 		} else if (nIgnoreMaskLabel == -1) {
 			// creating mask to discard invalid regions created during image radial undistortion
 			rasterer.mask = DetectInvalidImageRegions(imageData.image);
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			if (VERBOSITY_LEVEL > 3)
-				cv::imwrite(String::FormatString("umask%04d.png", idxView), rasterer.mask);
+				SaveImage(rasterer.mask, String::FormatString("umask%04d.png", idxView));
 			#endif
 		}
 		rasterer.Clear();
@@ -534,6 +585,8 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 		// + sharpness: sharper image or image resolution or how close is to the face will result in higher gradient on the same face
 		//				ON GLOSS IMAGES it happens to have a high volatile sharpness depending on how the light reflects under different angles
 		// + angle: low angle increases the surface area
+		const float scaleWeightX((float)imageData.width / highResSize.width);
+		const float scaleWeightY((float)imageData.height / highResSize.height);
 		for (int j=0; j<faceMap.rows; ++j) {
 			for (int i=0; i<faceMap.cols; ++i) {
 				const FIndex& idxFace = faceMap(j,i);
@@ -541,6 +594,8 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 				if (idxFace == NO_ID)
 					continue;
 				FaceDataArr& faceDatas = facesDatas[idxFace];
+				const int imgY((int)(j*scaleWeightY));
+				const int imgX((int)(i*scaleWeightX));
 				#if TEXOPT_FACEOUTLIER != TEXOPT_FACEOUTLIER_NA
 				uint32_t& area = areas[idxFace];
 				if (area++ == 0) {
@@ -550,18 +605,18 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 					// create new face-data
 					FaceData& faceData = faceDatas.emplace_back();
 					faceData.idxView = idxView;
-					faceData.quality = imageGradMag(j,i);
+					faceData.quality = imageGradMag(imgY,imgX);
 					#if TEXOPT_FACEOUTLIER != TEXOPT_FACEOUTLIER_NA
-					faceData.color = imageData.image(j,i);
+					faceData.color = imageData.image(imgY,imgX);
 					#endif
 				} else {
 					// update face-data
 					ASSERT(!faceDatas.empty());
 					FaceData& faceData = faceDatas.back();
 					ASSERT(faceData.idxView == idxView);
-					faceData.quality += imageGradMag(j,i);
+					faceData.quality += imageGradMag(imgY,imgX);
 					#if TEXOPT_FACEOUTLIER != TEXOPT_FACEOUTLIER_NA
-					faceData.color += Color(imageData.image(j,i));
+					faceData.color += Color(imageData.image(imgY,imgX));
 					#endif
 				}
 			}
@@ -617,7 +672,7 @@ IIndexArr MeshTexture::SelectBestView(const FaceDataArr& faceDatas, FIndex fid, 
 {
 	ASSERT(!faceDatas.empty());
 	#if 1
-	
+
 	// compute scores based on the view quality and its angle to the face normal
 	float maxQuality = 0;
 	for (const FaceData& faceData: faceDatas)
@@ -641,7 +696,7 @@ IIndexArr MeshTexture::SelectBestView(const FaceDataArr& faceDatas, FIndex fid, 
 	});
 
 	#else
-	
+
 	// sort qualityPodium in relation to faceDatas[index].quality decreasing
 	IIndexArr qualityPodium(faceDatas.size());
 	std::iota(qualityPodium.begin(), qualityPodium.end(), 0);
@@ -679,9 +734,9 @@ IIndexArr MeshTexture::SelectBestView(const FaceDataArr& faceDatas, FIndex fid, 
 	scorePodium.Sort([&scores](IIndex i, IIndex j) {
 		return scores[i] < scores[j];
 	});
-	
+
 	#endif
-	IIndexArr cameras(MIN(minCommonCameras, faceDatas.size()));
+	IIndexArr cameras(MINF(minCommonCameras, faceDatas.size()));
 	FOREACH(i, cameras)
 		cameras[i] = faceDatas[scorePodium[i]].idxView;
 	return cameras;
@@ -694,7 +749,7 @@ static bool IsFaceVisible(const MeshTexture::FaceDataArr& faceDatas, const IInde
 		for (IIndex camId : cameraList) {
 			if (cfCam == camId) {
 				if (++camFoundCounter == cameraList.size())
-					return true;	
+					return true;
 				break;
 			}
 		}
@@ -708,7 +763,7 @@ static bool IsFaceVisible(const MeshTexture::FaceDataArr& faceDatas, const IInde
 void MeshTexture::CreateVirtualFaces(const FaceDataViewArr& facesDatas, FaceDataViewArr& virtualFacesDatas, VirtualFaceIdxsArr& virtualFaces, unsigned minCommonCameras, float thMaxNormalDeviation) const
 {
 	const float ratioAngleToQuality(0.67f);
-	const float cosMaxNormalDeviation(COS(FD2R(thMaxNormalDeviation)));
+	const float cosMaxNormalDeviation(COS(D2R(thMaxNormalDeviation)));
 	Mesh::FaceIdxArr remainingFaces(faces.size());
 	std::iota(remainingFaces.begin(), remainingFaces.end(), 0);
 	std::vector<bool> selectedFaces(faces.size(), false);
@@ -989,6 +1044,19 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 		// compute face normals and smoothen them
 		scene.mesh.SmoothNormalFaces();
 
+		#if TEXOPT_INFERENCE == TEXOPT_INFERENCE_LBP
+		// compute average face area and average edge length for scale-independent MRF optimization
+		double sumArea(0);
+		double sumEdgeLength(0);
+		FOREACH(f, faces) {
+			sumArea += scene.mesh.ComputeArea(f);
+			for (int i=0; i<3; ++i)
+				sumEdgeLength += norm(scene.mesh.vertices[faces[f][i]] - scene.mesh.vertices[faces[f][(i+1)%3]]);
+		}
+		const float avgFaceArea((float)(sumArea / faces.size()));
+		const float avgEdgeLength((float)(sumEdgeLength / (faces.size() * 3)));
+		#endif
+
 		// list all views for each face
 		FaceDataViewArr facesDatas;
 		if (!ListCameraFaces(facesDatas, fOutlierThreshold, nIgnoreMaskLabel, views))
@@ -1009,12 +1077,15 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 			FaceDataViewArr virtualFacesDatas;
 			VirtualFaceIdxsArr virtualFaces; // stores each virtual face as an array of mesh face ID
 			CreateVirtualFaces(facesDatas, virtualFacesDatas, virtualFaces, minCommonCameras);
+			FloatArr virtualFaceAreas(virtualFaces.size());
+			virtualFaceAreas.Memset(0);
 			Mesh::FaceIdxArr mapFaceToVirtualFace(faces.size()); // for each mesh face ID, store the virtual face ID witch contains it
 			size_t controlCounter(0);
 			FOREACH(idxVF, virtualFaces) {
 				const Mesh::FaceIdxArr& vf = virtualFaces[idxVF];
 				for (FIndex idxFace : vf) {
 					mapFaceToVirtualFace[idxFace] = idxVF;
+					virtualFaceAreas[idxVF] += scene.mesh.ComputeArea(idxFace);
 					++controlCounter;
 				}
 			}
@@ -1087,8 +1158,24 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 						for (boost::tie(ei, eie) = boost::out_edges(f, graph); ei != eie; ++ei) {
 							ASSERT(f == (FIndex)ei->m_source);
 							const FIndex fAdj((FIndex)ei->m_target);
-							if (f < fAdj) // add edges only once
-								inference.SetNeighbors(f, fAdj);
+							ASSERT(fAdj != NO_ID);
+							if (f < fAdj) { // add edges only once
+								float edgeLength = 0.f;
+								// compute total shared edge length between virtual faces f and fAdj
+								for (FIndex idxFace : virtualFaces[f]) {
+									for (int i=0; i<3; ++i) {
+										const FIndex neighborFace = faceFaces[idxFace][i];
+										if (mapFaceToVirtualFace[neighborFace] == fAdj) {
+											// this edge is shared with virtual face fAdj
+											const VIndex v0 = faces[idxFace][i];
+											const VIndex v1 = faces[idxFace][(i+1)%3];
+											edgeLength += (float)norm(scene.mesh.vertices[v0] - scene.mesh.vertices[v1]);
+										}
+									}
+								}
+								const float edgeWeight = LBPMinWeight + edgeLength / avgEdgeLength;
+								inference.SetNeighbors(f, fAdj, edgeWeight);
+							}
 						}
 					}
 				}
@@ -1096,15 +1183,16 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 				// set data costs for all labels (except label 0 - undefined)
 				FOREACH(f, virtualFacesDatas) {
 					const FaceDataArr& faceDatas = virtualFacesDatas[f];
+					const float faceWeight = virtualFaceAreas[f] / avgFaceArea;
 					if (faceDatas.empty()) {
 						// set costs for label 0 (undefined)
-						inference.SetDataCost(Label(0), f, MaxEnergy);
+						inference.SetDataCost(Label(0), f, MaxEnergy * (faceWeight + LBPMinWeight));
 						continue;
 					}
 					for (const FaceData& faceData: faceDatas) {
 						const Label label((Label)faceData.idxView+1);
 						const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
-						const float dataCost((1.f-normalizedQuality)*MaxEnergy);
+						const float dataCost((1.f-normalizedQuality)*MaxEnergy * faceWeight);
 						inference.SetDataCost(label, f, dataCost);
 					}
 				}
@@ -1130,7 +1218,7 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 
 			graph.clear();
 		}
-		
+
 		// create the graph of faces: each vertex is a face and the edges are the edges shared by the faces
 		FOREACH(idxFace, faces) {
 			MAYBEUNUSED const Mesh::FIndex idx((Mesh::FIndex)boost::add_vertex(graph));
@@ -1184,8 +1272,14 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 						for (boost::tie(ei, eie) = boost::out_edges(f, graph); ei != eie; ++ei) {
 							ASSERT(f == (FIndex)ei->m_source);
 							const FIndex fAdj((FIndex)ei->m_target);
-							if (f < fAdj) // add edges only once
-								inference.SetNeighbors(f, fAdj);
+							if (f < fAdj) { // add edges only once
+								VIndex shared[2];
+								MAYBEUNUSED const bool bShared(scene.mesh.GetEdgeVertices(f, fAdj, shared));
+								ASSERT(bShared);
+								const float edgeLength = (float)norm(scene.mesh.vertices[shared[0]] - scene.mesh.vertices[shared[1]]);
+								const float edgeWeight = LBPMinWeight + edgeLength / avgEdgeLength;
+								inference.SetNeighbors(f, fAdj, edgeWeight);
+							}
 						}
 					}
 				}
@@ -1193,15 +1287,16 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 				// set data costs for all labels (except label 0 - undefined)
 				FOREACH(f, facesDatas) {
 					const FaceDataArr& faceDatas = facesDatas[f];
+					const float faceWeight = scene.mesh.ComputeArea(f) / avgFaceArea;
 					if (faceDatas.empty()) {
 						// set costs for label 0 (undefined)
-						inference.SetDataCost(Label(0), f, MaxEnergy);
+						inference.SetDataCost(Label(0), f, MaxEnergy * (faceWeight + LBPMinWeight));
 						continue;
 					}
 					for (const FaceData& faceData: faceDatas) {
 						const Label label((Label)faceData.idxView+1);
 						const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
-						const float dataCost((1.f-normalizedQuality)*MaxEnergy);
+						const float dataCost((1.f-normalizedQuality)*MaxEnergy * faceWeight);
 						inference.SetDataCost(label, f, dataCost);
 					}
 				}
@@ -1358,45 +1453,26 @@ void MeshTexture::GlobalSeamLeveling()
 	ASSERT(!seamVertices.empty());
 	const unsigned numPatches(texturePatches.size()-1);
 
-	// find the patch ID for each vertex
-	PatchIndices patchIndices(vertices.size());
-	patchIndices.Memset(0);
-	FOREACH(f, faces) {
-		const uint32_t idxPatch(mapIdxPatch[components[f]]);
-		const Face& face = faces[f];
-		for (int v=0; v<3; ++v)
-			patchIndices[face[v]].idxPatch = idxPatch;
-	}
-	FOREACH(i, seamVertices) {
-		const SeamVertex& seamVertex = seamVertices[i];
-		ASSERT(!seamVertex.patches.empty());
-		PatchIndex& patchIndex = patchIndices[seamVertex.idxVertex];
-		patchIndex.bIndex = true;
-		patchIndex.idxSeamVertex = i;
-	}
-
 	// assign a row index within the solution vector x to each vertex/patch
 	ASSERT(vertices.size() < static_cast<VIndex>(std::numeric_limits<MatIdx>::max()));
-	MatIdx rowsX(0);
 	typedef std::unordered_map<uint32_t,MatIdx> VertexPatch2RowMap;
 	cList<VertexPatch2RowMap> vertpatch2rows(vertices.size());
-	FOREACH(i, vertices) {
-		const PatchIndex& patchIndex = patchIndices[i];
-		VertexPatch2RowMap& vertpatch2row = vertpatch2rows[i];
-		if (patchIndex.bIndex) {
-			// vertex is part of multiple patches
-			const SeamVertex& seamVertex = seamVertices[patchIndex.idxSeamVertex];
-			ASSERT(seamVertex.idxVertex == i);
-			for (const SeamVertex::Patch& patch: seamVertex.patches) {
-				ASSERT(patch.idxPatch != numPatches);
-				vertpatch2row[patch.idxPatch] = rowsX++;
-			}
-		} else
-		if (patchIndex.idxPatch < numPatches) {
-			// vertex is part of only one patch
-			vertpatch2row[patchIndex.idxPatch] = rowsX++;
-		}
+
+	// find the patch IDs for each vertex
+	FOREACH(f, faces) {
+		const uint32_t idxPatch(mapIdxPatch[components[f]]);
+		if (idxPatch == numPatches)
+			continue;
+		const Face& face = faces[f];
+		for (int v=0; v<3; ++v)
+			vertpatch2rows[face[v]][idxPatch] = 0;
 	}
+
+	// assign a row to each vertex/patch
+	MatIdx rowsX(0);
+	FOREACH(i, vertices)
+		for (auto& [idxPatch, row] : vertpatch2rows[i])
+			row = rowsX++;
 
 	// fill Tikhonov's Gamma matrix (regularization constraints)
 	const float lambda(0.1f);
@@ -1406,24 +1482,17 @@ void MeshTexture::GlobalSeamLeveling()
 	FOREACH(v, vertices) {
 		adjVerts.Empty();
 		scene.mesh.GetAdjVertices(v, adjVerts);
-		VertexPatchIterator itV(patchIndices[v], seamVertices);
-		while (itV.Next()) {
-			const uint32_t idxPatch(itV);
-			if (idxPatch == numPatches)
-				continue;
-			const MatIdx col(vertpatch2rows[v].at(idxPatch));
+		for (const auto& [idxPatch, col] : vertpatch2rows[v]) {
+			ASSERT(idxPatch < numPatches);
 			for (const VIndex vAdj: adjVerts) {
 				if (v >= vAdj)
 					continue;
-				VertexPatchIterator itVAdj(patchIndices[vAdj], seamVertices);
-				while (itVAdj.Next()) {
-					const uint32_t idxPatchAdj(itVAdj);
-					if (idxPatch == idxPatchAdj) {
-						const MatIdx colAdj(vertpatch2rows[vAdj].at(idxPatchAdj));
-						rows.emplace_back(rowsGamma, col, lambda);
-						rows.emplace_back(rowsGamma, colAdj, -lambda);
-						++rowsGamma;
-					}
+				const auto itVAdj(vertpatch2rows[vAdj].find(idxPatch));
+				if (itVAdj != vertpatch2rows[vAdj].end()) {
+					const MatIdx colAdj(itVAdj->second);
+					rows.emplace_back(rowsGamma, col, lambda);
+					rows.emplace_back(rowsGamma, colAdj, -lambda);
+					++rowsGamma;
 				}
 			}
 		}
@@ -1893,29 +1962,21 @@ void MeshTexture::LocalSeamLeveling()
 			if (idxVertPatch0 == SeamVertex::Patches::NO_INDEX)
 				continue;
 			const SeamVertex::Patch& patch0 = seamVertex0.patches[idxVertPatch0];
-			const TexCoord p0(patch0.proj-offset);
+			const TexCoord p0(patch0.proj - offset);
 			// for each edge of this vertex belonging to this patch...
 			for (const SeamVertex::Patch::Edge& edge0: patch0.edges) {
 				// select the same edge leaving from the adjacent vertex
 				const SeamVertex& seamVertex1 = seamVertices[edge0.idxSeamVertex];
-				const uint32_t idxVertPatch0Adj(seamVertex1.patches.Find(idxPatch));
-				ASSERT(idxVertPatch0Adj != SeamVertex::Patches::NO_INDEX);
-				const SeamVertex::Patch& patch0Adj = seamVertex1.patches[idxVertPatch0Adj];
-				const TexCoord p0Adj(patch0Adj.proj-offset);
-				// find the other patch sharing the same edge (edge with same adjacent vertex)
-				FOREACH(idxVertPatch1, seamVertex0.patches) {
-					if (idxVertPatch1 == idxVertPatch0)
+				const SeamVertex::Patch& patch0Adj = seamVertex1.patches[seamVertex1.patches.Find(idxPatch)];
+				const TexCoord p0Adj(patch0Adj.proj - offset);
+				// find the other patch sharing the same edge
+				for (const SeamVertex::Patch& patch1: seamVertex0.patches) {
+					if (patch1.idxPatch == idxPatch)
 						continue;
-					const SeamVertex::Patch& patch1 = seamVertex0.patches[idxVertPatch1];
-					const uint32_t idxEdge1(patch1.edges.Find(edge0.idxSeamVertex));
-					if (idxEdge1 == SeamVertex::Patch::Edges::NO_INDEX)
-						continue;
-					const TexCoord& p1(patch1.proj);
+					if (patch1.edges.Find(edge0.idxSeamVertex) == SeamVertex::Patch::Edges::NO_INDEX)
+						continue; // edge not shared with this patch
 					// select the same edge belonging to the second patch leaving from the adjacent vertex
-					const uint32_t idxVertPatch1Adj(seamVertex1.patches.Find(patch1.idxPatch));
-					ASSERT(idxVertPatch1Adj != SeamVertex::Patches::NO_INDEX);
-					const SeamVertex::Patch& patch1Adj = seamVertex1.patches[idxVertPatch1Adj];
-					const TexCoord& p1Adj(patch1Adj.proj);
+					const SeamVertex::Patch& patch1Adj = seamVertex1.patches[seamVertex1.patches.Find(patch1.idxPatch)];
 					// this is an edge separating two (valid) patches;
 					// draw it on this patch as the mean color of the two patches
 					const Image8U3& image1(images[texturePatches[patch1.idxPatch].label].image);
@@ -1931,19 +1992,17 @@ void MeshTexture::LocalSeamLeveling()
 						inline RasterPatch(Image32F3& _image, Image8U& _mask, const Image32F3& _image0, const Image8U3& _image1,
 							const TexCoord& _p0, const TexCoord& _p0Adj, const TexCoord& _p1, const TexCoord& _p1Adj)
 							: image(_image), mask(_mask), image0(_image0), image1(_image1),
-							p0(_p0), p0Dir(_p0Adj-_p0), p1(_p1), p1Dir(_p1Adj-_p1), length((float)norm(p0Dir)), sampler() {}
+							p0(_p0), p0Dir(_p0Adj-_p0), p1(_p1), p1Dir(_p1Adj-_p1), length((float)norm(p0Dir)) {}
 						inline void operator()(const ImageRef& pt) {
-							const float l((float)norm(TexCoord(pt)-p0)/length);
 							// compute mean color
-							const TexCoord samplePos0(p0 + p0Dir * l);
-							const Color color0(image0.sample<Sampler,Color>(sampler, samplePos0));
-							const TexCoord samplePos1(p1 + p1Dir * l);
-							const Color color1(image1.sample<Sampler,Color>(sampler, samplePos1)/255.f);
+							const float l((float)norm(TexCoord(pt)-p0)/length);
+							const Color color0(image0.sample<Sampler,Color>(sampler, p0 + p0Dir * l));
+							const Color color1(image1.sample<Sampler,Color>(sampler, p1 + p1Dir * l)/255.f);
 							image(pt) = Color((color0 + color1) * 0.5f);
 							// set mask edge also
 							mask(pt) = border;
 						}
-					} data(image, mask, imageOrg, image1, p0, p0Adj, p1, p1Adj);
+					} data(image, mask, imageOrg, image1, p0, p0Adj, patch1.proj, patch1Adj.proj);
 					Image32F3::DrawLine(p0, p0Adj, data);
 					// skip remaining patches,
 					// as a manifold edge is shared by maximum two face (one in each patch), which we found already
@@ -1958,7 +2017,7 @@ void MeshTexture::LocalSeamLeveling()
 				const Image8U3& img(images[texturePatches[patch.idxPatch].label].image);
 				accumColor.Add(img.sample<Sampler,Color>(sampler, patch.proj)/255.f, 1.f);
 			}
-			const ImageRef pt(ROUND2INT(patch0.proj-offset));
+			const ImageRef pt(ROUND2INT(p0));
 			image(pt) = accumColor.Normalized();
 			mask(pt) = border;
 		}
@@ -1982,7 +2041,145 @@ void MeshTexture::LocalSeamLeveling()
 	}
 }
 
-void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, unsigned nRectPackingHeuristic, Pixel8U colEmpty, float fSharpnessWeight, int maxTextureSize)
+#if TEXOPT_GROUP_PATCHES == 1
+struct PatchApprox {
+	Point3f centroid;
+	Point3f U, V;
+	float uMin, uMax, vMin, vMax;
+	float surfaceArea; // OBB surface area: (uMax - uMin) * (vMax - vMin)
+};
+typedef CLISTDEF0IDX(PatchApprox, uint32_t) PatchApproxArr;
+
+// Compute the 3D centroid and average normal of a patch, then project its
+// vertices onto its local 2D tangent plane to get an accurate Oriented Bounding Box area.
+static PatchApprox ComputePatchApproximation(const Mesh::VertexArr& vertices, const Mesh::FaceArr& faces, const MeshTexture::TexturePatch& patch) {
+	// compute average centroid and average normal
+	Point3f centroid(0, 0, 0);
+	Point3f normal(0, 0, 0);
+	for (const FIndex idxFace : patch.faces) {
+		const Mesh::Face& face = faces[idxFace];
+		const Point3f& v0 = vertices[face[0]];
+		const Point3f& v1 = vertices[face[1]];
+		const Point3f& v2 = vertices[face[2]];
+		centroid += v0 + v1 + v2;
+		normal += normalized((v1 - v0).cross(v2 - v0));
+	}
+	centroid /= (float)(patch.faces.size() * 3);
+	normalize(normal);
+
+	// Create local 2D basis on the tangent plane
+	Point3f U= ABS(normal.x) < 0.9f ?
+		normalized(normal.cross(Point3f(1, 0, 0))) :
+		normalized(normal.cross(Point3f(0, 1, 0)));
+	Point3f V = normalized(normal.cross(U));
+
+	// Project all vertices to the local 2D plane to compute exact OBB bounds
+	AABB2f localBounds(true);
+	for (const FIndex idxFace : patch.faces) {
+		const Mesh::Face& face = faces[idxFace];
+		for (int i = 0; i < 3; ++i) {
+			const Point3f diff(vertices[face[i]] - centroid);
+			localBounds.InsertFull(Point2f(diff.dot(U), diff.dot(V)));
+		}
+	}
+
+	return {centroid, U, V, localBounds.ptMin[0], localBounds.ptMax[0], localBounds.ptMin[1], localBounds.ptMax[1],
+		(localBounds.ptMax[0] - localBounds.ptMin[0]) * (localBounds.ptMax[1] - localBounds.ptMin[1])};
+}
+
+// Sort patches spatially, then greedily extract contiguous batches verified by trial packing.
+// Each batch is a prefix of the spatially sorted list, sized so that actual bin packing at
+// maxTextureSize confirms all patches fit. If the initial area estimate is too optimistic,
+// the batch is shrunk from the end (spatial border) until packing succeeds. This guarantees
+// that each group is spatially contiguous AND fits in exactly one texture page, with overflow
+// patches always at the spatial boundary — ready for the next page.
+static void SplitPatchesSpatially(
+	const PatchApproxArr& approximations,
+	AtlasPacker::RectWIdxArr& allRects,
+	int maxTextureSize,
+	int nTextureSizeMultiple,
+	std::vector<AtlasPacker::RectWIdxArr>& spatialGroups)
+{
+	if (allRects.empty())
+		return;
+	if (maxTextureSize <= 0) {
+		spatialGroups.emplace_back(std::move(allRects));
+		return;
+	}
+
+	// Sort all patches spatially along the longest axis of the overall centroid AABB
+	AABB3f bounds(true);
+	for (const auto& rect : allRects)
+		bounds.InsertFull(approximations[rect.patchIdx].centroid);
+	const Point3f dims(bounds.GetSize());
+	int sortAxis = 0;
+	if (dims.y > dims.x && dims.y > dims.z) sortAxis = 1;
+	else if (dims.z > dims.x && dims.z > dims.y) sortAxis = 2;
+
+	allRects.Sort([sortAxis, &approximations](const AtlasPacker::RectWIdx& a, const AtlasPacker::RectWIdx& b) {
+		return approximations[a.patchIdx].centroid[sortAxis] < approximations[b.patchIdx].centroid[sortAxis];
+	});
+
+	// Trial pack: check if all rects fit at maxTextureSize
+	auto canFit = [&](const AtlasPacker::RectWIdxArr& rects) -> bool {
+		AtlasPacker::RectWIdxArr trial(rects);
+		AtlasPacker pack(maxTextureSize, maxTextureSize);
+		pack.Insert(trial);
+		return trial.empty();
+	};
+
+	// Greedily extract contiguous batches from the front of the sorted list
+	while (!allRects.empty()) {
+		// If all remaining patches fit in one texture, accept as the final group
+		if (AtlasPacker::ComputeTextureSize(allRects, nTextureSizeMultiple) <= maxTextureSize) {
+			spatialGroups.emplace_back(std::move(allRects));
+			break;
+		}
+
+		// Estimate batch size: accumulate area from the front until ~85% of page capacity
+		const uint64_t maxArea = (uint64_t)maxTextureSize * maxTextureSize * 85 / 100;
+		uint64_t cumArea = 0;
+		uint32_t batchEnd = 0;
+		for (uint32_t i = 0; i < allRects.size(); ++i) {
+			cumArea += (unsigned)allRects[i].rect.area();
+			batchEnd = i + 1;
+			if (cumArea >= maxArea)
+				break;
+		}
+
+		// Verify the batch fits by trial packing; if not, shrink from the end
+		// (removing border patches) until packing succeeds
+		for (;;) {
+			AtlasPacker::RectWIdxArr trial(0u, batchEnd);
+			for (uint32_t i = 0; i < batchEnd; ++i)
+				trial.emplace_back(allRects[i]);
+			if (canFit(trial))
+				break;
+			// shrink by ~10% from the spatial border; always keep at least 1
+			batchEnd = MAXF(1u, batchEnd * 9 / 10);
+		}
+
+		// Extract the verified batch as a spatial group
+		AtlasPacker::RectWIdxArr batch(0u, batchEnd);
+		for (uint32_t i = 0; i < batchEnd; ++i)
+			batch.emplace_back(allRects[i]);
+		spatialGroups.emplace_back(std::move(batch));
+
+		// Remove batch from the front, keeping the rest in sorted order
+		if (batchEnd >= allRects.size()) {
+			allRects.Release();
+			break;
+		}
+		const uint32_t remaining = allRects.size() - batchEnd;
+		AtlasPacker::RectWIdxArr rest(0u, remaining);
+		for (uint32_t i = batchEnd; i < allRects.size(); ++i)
+			rest.emplace_back(allRects[i]);
+		allRects = std::move(rest);
+	}
+}
+#endif
+
+void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, Pixel8U colEmpty, float fSharpnessWeight, int maxTextureSize)
 {
 	// project patches in the corresponding view and compute texture-coordinates and bounding-box
 	const int border(2);
@@ -2003,7 +2200,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 			const Face& face = faces[idxFace];
 			TexCoord* texcoords = faceTexcoords.data()+idxFace*3;
 			for (int i=0; i<3; ++i) {
-				texcoords[i] = imageData.camera.ProjectPointP(vertices[face[i]]);
+				texcoords[i] = std::get<0>(imageData.camera.ProjectPointP(vertices[face[i]]));
 				ASSERT(imageData.image.isInsideWithBorder(texcoords[i], border));
 				aabb.InsertFull(texcoords[i]);
 			}
@@ -2065,7 +2262,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 			TexturePatch& texturePatchSmall = texturePatches[j];
 			if (texturePatchBig.label != texturePatchSmall.label)
 				continue;
-			if (!RectsBinPack::IsContainedIn(texturePatchSmall.rect, texturePatchBig.rect))
+			if (!AtlasPacker::IsContainedIn(texturePatchSmall.rect, texturePatchBig.rect))
 				continue;
 			// translate texture coordinates
 			const TexCoord offset(texturePatchSmall.rect.tl()-texturePatchBig.rect.tl());
@@ -2084,60 +2281,64 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 	// create texture
 	{
 		// arrange texture patches to fit the smallest possible texture image
-		RectsBinPack::RectWIdxArr unplacedRects(texturePatches.size());
-		FOREACH(i, texturePatches) {
+		// exclude the last patch (unmapped faces with label=NO_ID) from spatial grouping
+		// as its faces can be scattered across the entire scene with a meaningless centroid
+		const uint32_t numValidPatches(texturePatches.size() - 1);
+		AtlasPacker::RectWIdxArr fullUnplacedRects(numValidPatches);
+		for (uint32_t i = 0; i < numValidPatches; ++i) {
 			if (maxTextureSize > 0 && (texturePatches[i].rect.width > maxTextureSize || texturePatches[i].rect.height > maxTextureSize)) {
 			    DEBUG("error: a patch of size %u x %u does not fit the texture", texturePatches[i].rect.width, texturePatches[i].rect.height);
 			    ABORT("the maximum texture size chosen cannot fit a patch");
 			}
-			unplacedRects[i] = {texturePatches[i].rect, i};
+			fullUnplacedRects[i] = {texturePatches[i].rect, i};
 		}
+		std::vector<AtlasPacker::RectWIdxArr> spatialGroups;
+		#if TEXOPT_GROUP_PATCHES == 1
+		// compute spatial approximations and partition the patches recursively
+		PatchApproxArr approximations(0u, numValidPatches + 1); // +1 for the unmapped-faces patch
+		for (uint32_t i = 0; i < numValidPatches; ++i)
+			approximations.push_back(ComputePatchApproximation(vertices, faces, texturePatches[i]));
+		SplitPatchesSpatially(approximations, fullUnplacedRects, maxTextureSize, nTextureSizeMultiple, spatialGroups);
+		// add approximation for the unmapped-faces patch so it has a valid index
+		// (needed if packing overflow triggers sub-splitting of a group containing it)
+		if (texturePatches.back().faces.empty())
+			approximations.push_back({Point3f(0,0,0), Point3f(1,0,0), Point3f(0,1,0), 0, 0, 0, 0, 0});
+		else
+			approximations.push_back(ComputePatchApproximation(vertices, faces, texturePatches.back()));
+		#else
+		spatialGroups.emplace_back(std::move(fullUnplacedRects));
+		#endif
+		// append the unmapped-faces patch to the last spatial group for packing
+		spatialGroups.back().emplace_back(AtlasPacker::RectWIdx{texturePatches.back().rect, numValidPatches});
 
 		// pack patches: one pack per texture file
-		CLISTDEF2IDX(RectsBinPack::RectWIdxArr, TexIndex) placedRects; {
-			// increase texture size till all patches fit
-			const unsigned typeRectsBinPack(nRectPackingHeuristic/100);
-			const unsigned typeSplit((nRectPackingHeuristic-typeRectsBinPack*100)/10);
-			const unsigned typeHeuristic(nRectPackingHeuristic%10);
-			int textureSize = 0;
-			while (!unplacedRects.empty()) {
-				TD_TIMER_STARTD();
-				if (textureSize == 0) {
-					textureSize = RectsBinPack::ComputeTextureSize(unplacedRects, nTextureSizeMultiple);
-					if (maxTextureSize > 0 && textureSize > maxTextureSize)
-						textureSize = maxTextureSize;
-				}
+		CLISTDEF2IDX(AtlasPacker::RectWIdxArr, TexIndex) placedRects; {
+			for (auto& unplacedRects : spatialGroups) {
+				int textureSize = 0;
+				while (!unplacedRects.empty()) {
+					TD_TIMER_STARTD();
+					if (textureSize == 0) {
+						textureSize = AtlasPacker::ComputeTextureSize(unplacedRects, nTextureSizeMultiple);
+						if (maxTextureSize > 0 && textureSize > maxTextureSize)
+							textureSize = maxTextureSize;
+					}
 
-				RectsBinPack::RectWIdxArr newPlacedRects;
-				switch (typeRectsBinPack) {
-				case 0: {
-					MaxRectsBinPack pack(textureSize, textureSize);
-					newPlacedRects = pack.Insert(unplacedRects, (MaxRectsBinPack::FreeRectChoiceHeuristic)typeHeuristic);
-					break; }
-				case 1: {
-					SkylineBinPack pack(textureSize, textureSize, typeSplit!=0);
-					newPlacedRects = pack.Insert(unplacedRects, (SkylineBinPack::LevelChoiceHeuristic)typeHeuristic);
-					break; }
-				case 2: {
-					GuillotineBinPack pack(textureSize, textureSize);
-					newPlacedRects = pack.Insert(unplacedRects, false, (GuillotineBinPack::FreeRectChoiceHeuristic)typeHeuristic, (GuillotineBinPack::GuillotineSplitHeuristic)typeSplit);
-					break; }
-				default:
-					ABORT("error: unknown RectsBinPack type");
-				}
-				DEBUG_ULTIMATE("\tpacking texture completed: %u initial patches, %u placed patches, %u texture-size, %u textures (%s)", texturePatches.size(), newPlacedRects.size(), textureSize, placedRects.size(), TD_TIMER_GET_FMT().c_str());
+					AtlasPacker pack(textureSize, textureSize);
+					AtlasPacker::RectWIdxArr newPlacedRects(pack.Insert(unplacedRects));
+					DEBUG_ULTIMATE("\tpacking texture completed: %u initial patches, %u placed patches, %u texture-size, %u textures (%s)", texturePatches.size(), newPlacedRects.size(), textureSize, placedRects.size(), TD_TIMER_GET_FMT().c_str());
 
-				if (textureSize == maxTextureSize || unplacedRects.empty()) {
-					// create texture image
-					placedRects.emplace_back(std::move(newPlacedRects));
-					texturesDiffuse.emplace_back(textureSize, textureSize).setTo(cv::Scalar(colEmpty.b, colEmpty.g, colEmpty.r));
-					textureSize = 0;
-				} else {
-					// try again with a bigger texture
-					textureSize *= 2;
-					if (maxTextureSize > 0)
-						textureSize = std::max(textureSize, maxTextureSize);
-					unplacedRects.JoinRemove(newPlacedRects);
+					if (textureSize == maxTextureSize || unplacedRects.empty()) {
+						// create texture image
+						placedRects.emplace_back(std::move(newPlacedRects));
+						texturesDiffuse.emplace_back(textureSize, textureSize).setTo(cv::Scalar(colEmpty.b, colEmpty.g, colEmpty.r));
+						textureSize = 0;
+					} else {
+						// try again with a bigger texture
+						textureSize *= 2;
+						if (maxTextureSize > 0)
+							textureSize = MINF(textureSize, maxTextureSize);
+						unplacedRects.JoinRemove(newPlacedRects);
+					}
 				}
 			}
 		}
@@ -2153,7 +2354,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 			FOREACH(idxPlacedPatch, placedRects[idxTexture]) {
 		#endif
 				const TexturePatch& texturePatch = texturePatches[placedRects[idxTexture][idxPlacedPatch].patchIdx];
-				const RectsBinPack::Rect& rect = placedRects[idxTexture][idxPlacedPatch].rect;
+				const AtlasPacker::Rect& rect = placedRects[idxTexture][idxPlacedPatch].rect;
 				// copy patch image
 				ASSERT((rect.width == texturePatch.rect.width && rect.height == texturePatch.rect.height) ||
 					(rect.height == texturePatch.rect.width && rect.width == texturePatch.rect.height));
@@ -2202,7 +2403,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 //  - fSharpnessWeight: sharpness weight to be applied on the texture (0 - disabled, 0.5 - good value)
 //  - nIgnoreMaskLabel: label value to ignore in the image mask, stored in the MVS scene or next to each image with '.mask.png' extension (-1 - auto estimate mask for lens distortion, -2 - disabled)
 bool Scene::TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsigned minCommonCameras, float fOutlierThreshold, float fRatioDataSmoothness,
-	bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, unsigned nRectPackingHeuristic, Pixel8U colEmpty, float fSharpnessWeight,
+	bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, Pixel8U colEmpty, float fSharpnessWeight,
 	int nIgnoreMaskLabel, int maxTextureSize, const IIndexArr& views)
 {
 	MeshTexture texture(*this, nResolutionLevel, nMinResolution);
@@ -2218,10 +2419,12 @@ bool Scene::TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsi
 	// generate the texture image and atlas
 	{
 		TD_TIMER_STARTD();
-		texture.GenerateTexture(bGlobalSeamLeveling, bLocalSeamLeveling, nTextureSizeMultiple, nRectPackingHeuristic, colEmpty, fSharpnessWeight, maxTextureSize);
+		texture.GenerateTexture(bGlobalSeamLeveling, bLocalSeamLeveling, nTextureSizeMultiple, colEmpty, fSharpnessWeight, maxTextureSize);
 		DEBUG_EXTRA("Generating texture atlas and image completed: %u patches, %u image size, %u textures (%s)", texture.texturePatches.size(), mesh.texturesDiffuse[0].width(), mesh.texturesDiffuse.size(), TD_TIMER_GET_FMT().c_str());
 	}
 
 	return true;
 } // TextureMesh
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

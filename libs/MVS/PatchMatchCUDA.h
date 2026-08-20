@@ -48,6 +48,53 @@
 
 namespace MVS {
 
+/**
+ * @brief Propagate and refine the depth/normal estimate for a single pixel.
+ *
+ * This is the core PatchMatch iteration step, implementing the AMHMVS algorithm
+ * (Asymmetric Multi-Hypothesis Multi-View Stereo). Each call processes one pixel
+ * in a red-black checkerboard pattern, allowing parallel execution on GPU.
+ *
+ * The algorithm has four main phases:
+ *
+ * **Phase 1: Neighbor Hypothesis Gathering**
+ * - Search 8 directional patterns (4 near + 4 far) to find best neighbor in each
+ * - For each neighbor found, interpolate its plane to current pixel and compute
+ *   per-view matching costs -> costArray[8][MAX_VIEWS]
+ *
+ * **Phase 2: Multi-Hypothesis Joint View Selection (AMHMVS)**
+ * - Build view priors from 4-connected neighbors' selectedViews
+ * - Compute sampling probability for each view based on:
+ *   - Prior from neighbors (which views they found useful)
+ *   - Cost performance across the 8 hypotheses (Gaussian-weighted)
+ *   - Iteration-dependent threshold (stricter over time)
+ * - Sample views via PDF->CDF to get viewWeights[]
+ *
+ * **Phase 3: Propagation**
+ * - Aggregate each neighbor's costs using viewWeights
+ * - Compare best neighbor against current estimate
+ * - Adopt neighbor's plane if it gives lower cost
+ *
+ * **Phase 4: Refinement**
+ * - Test 4 candidate planes to escape local minima:
+ *   0. Perturbed depth + current normal
+ *   1. Current depth + perturbed normal
+ *   2. Current depth + random normal
+ *   3. Current depth + surface normal (estimated from 4-connected neighbors)
+ * - Adopt any candidate that improves the cost
+ *
+ * @see InitializePixelScore() for initial setup before iterations
+ * @see ScorePlane() for the photometric matching cost computation
+ * @see ProcessPixel() reads selectedViews from 4-connected neighbors processed in the
+ *      previous kernel call (red reads black, black reads red). It writes selectedViews
+ *      for the current pixel only when a better neighbor is adopted.
+ *      The depth prior (lowDepths) does not directly influence propagation decisions.
+ *      It only affects the cost computation inside ScorePlane() by blending NCC cost
+ *      with depth-prior cost in textureless regions.
+ * @see "Multi-View Stereo with Asymmetric Checkerboard Propagation and Multi-Hypothesis
+ *       Joint View Selection" (https://arxiv.org/abs/1805.07920)
+ */
+
 } // namespace MVS
 
 #endif // _USE_CUDA

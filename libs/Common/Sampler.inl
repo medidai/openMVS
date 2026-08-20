@@ -227,8 +227,8 @@ struct Spline64 {
 // @param sampler used to make the sampling
 // @param pt X and Y-coordinate of sampling
 // @return sampled value
-template <typename IMAGE, typename SAMPLER, typename POINT, typename TYPE>
-inline TYPE Sample(const IMAGE& image, const SAMPLER& sampler, const POINT& pt)
+template <typename ITYPE, typename OTYPE, typename IMAGE, typename SAMPLER, typename POINT>
+inline OTYPE Sample(const IMAGE& image, const SAMPLER& sampler, const POINT& pt)
 {
 	typedef typename SAMPLER::Type T;
 
@@ -237,8 +237,8 @@ inline TYPE Sample(const IMAGE& image, const SAMPLER& sampler, const POINT& pt)
 	const int grid_y(FLOOR2INT(pt.y));
 
 	// compute difference between exact pixel location and sample
-	const T dx(pt.x-(T)grid_x);
-	const T dy(pt.y-(T)grid_y);
+	const T dx((T)pt.x-(T)grid_x);
+	const T dy((T)pt.y-(T)grid_y);
 
 	// get sampler weights
 	T coefs_x[SAMPLER::width];
@@ -247,7 +247,7 @@ inline TYPE Sample(const IMAGE& image, const SAMPLER& sampler, const POINT& pt)
 	sampler(dy, coefs_y);
 
 	// Sample a grid around specified grid point
-	TYPE res(0);
+	OTYPE res(0);
 	for (int i = 0; i < SAMPLER::width; ++i) {
 		// get current i value
 		// +1 for correct scheme (draw it to be convinced)
@@ -264,7 +264,7 @@ inline TYPE Sample(const IMAGE& image, const SAMPLER& sampler, const POINT& pt)
 				continue;
 			// sample input image and weight according to sampler
 			const T w = coefs_x[j] * coefs_y[i];
-			const TYPE pixel = image(cur_i, cur_j);
+			const OTYPE pixel = image.template at<ITYPE>(cur_i, cur_j);
 			res += pixel * w;
 		}
 	}

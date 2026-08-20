@@ -376,14 +376,14 @@ void CImageTIFF::Close()
 }
 /*----------------------------------------------------------------*/
 
-HRESULT CImageTIFF::ReadHeader()
+bool CImageTIFF::ReadHeader()
 {
 	TIFF* tif = static_cast<TIFF*>(m_state);
 	if (!tif) {
 		tif = TIFFStreamOpen("ReadTIFF", (ISTREAM*)m_pStream);
 		if (!tif) {
 			LOG(LT_IMAGE, "error: unsupported TIFF image");
-			return _INVALIDFILE;
+			return false;
 		}
 	}
 	m_state = tif;
@@ -407,7 +407,7 @@ HRESULT CImageTIFF::ReadHeader()
 			//TODO: implement
 			ASSERT("error: not implemented" == NULL);
 			Close();
-			return _FAIL;
+			return false;
 		}
 		if (bpp > 8 &&
 			((photometric != 2 && photometric != 1) ||
@@ -432,19 +432,19 @@ HRESULT CImageTIFF::ReadHeader()
 			ASSERT("error: not implemented" == NULL);
 			LOG(LT_IMAGE, "error: unsupported TIFF image");
 			Close();
-			return _INVALIDFILE;
+			return false;
 		}
 		m_lineWidth = m_width * m_stride;
 
-		return _OK;
+		return true;
 	}
 
 	Close();
-	return _FAIL;
+	return false;
 } // ReadHeader
 /*----------------------------------------------------------------*/
 
-HRESULT CImageTIFF::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageTIFF::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	if (m_state && m_width && m_height) {
 		TIFF* tif = (TIFF*)m_state;
@@ -461,7 +461,7 @@ HRESULT CImageTIFF::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 			char errmsg[1024];
 			if (!TIFFRGBAImageOK(tif, errmsg)) {
 				Close();
-				return _INVALIDFILE;
+				return false;
 			}
 		}
 
@@ -486,7 +486,7 @@ HRESULT CImageTIFF::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 				for (Size j=0; j<m_height; ++j, data+=lineWidth)
 					if (!TIFFReadRGBAStrip(tif, j, (uint32_t*)data)) {
 						Close();
-						return _INVALIDFILE;
+						return false;
 					}
 			} else {
 				// read image to a buffer and convert it
@@ -518,7 +518,7 @@ HRESULT CImageTIFF::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 							}
 							if (!ok) {
 								Close();
-								return _INVALIDFILE;
+								return false;
 							}
 
 							for (uint32_t i = 0; i < tile_height; ++i) {
@@ -526,7 +526,7 @@ HRESULT CImageTIFF::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 								uint8_t* src = bstart + i*tile_width0*4;
 								if (!FilterFormat(dst, dataFormat, nStride, src, m_format, m_stride, tile_width)) {
 									Close();
-									return _FAIL;
+									return false;
 								}
 							}
 							break;
@@ -534,33 +534,33 @@ HRESULT CImageTIFF::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 						default:
 						{
 							Close();
-							return _INVALIDFILE;
+							return false;
 						}
 						}
 					}
 				}
 			}
 
-			return _OK;
+			return true;
 		}
 	}
 
 	Close();
-	return _FAIL;
+	return false;
 } // Read
 /*----------------------------------------------------------------*/
 
-HRESULT CImageTIFF::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
+bool CImageTIFF::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
 {
 	//TODO: to implement the TIFF encoder
-	return _OK;
+	return true;
 } // WriteHeader
 /*----------------------------------------------------------------*/
 
-HRESULT CImageTIFF::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageTIFF::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	//TODO: to implement the TIFF encoder
-	return _OK;
+	return true;
 } // WriteData
 /*----------------------------------------------------------------*/
 

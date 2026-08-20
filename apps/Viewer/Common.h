@@ -43,6 +43,9 @@
 #define GLFW_INCLUDE_NONE 
 #include <GLFW/glfw3.h>
 
+// OpenGL debugging utilities
+#include "OpenGLDebug.h"
+
 
 // D E F I N E S ///////////////////////////////////////////////////
 

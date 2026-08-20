@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Depth-map Investigation</title>
+  <style>__DMAP_REPORT_CSS__</style>
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <p class="eyebrow">OPENMVS / DEPTH-MAP OBSERVABILITY</p>
+      <h1 id="report-title">Depth-map Investigation</h1>
+      <p id="report-subtitle" class="subtitle"></p>
+    </div>
+    <nav class="report-links" aria-label="Report outputs">
+      <button id="guide-open" class="guide-open" type="button" aria-haspopup="dialog" aria-controls="guide-dialog">
+        <span class="guide-mark" aria-hidden="true">?</span>
+        Guide
+      </button>
+      <a href="01_development_report.md">Markdown</a>
+      <a href="01_development_report.html">Static report</a>
+      <a href="report_model.json">Report model</a>
+    </nav>
+  </header>
+
+  <dialog id="guide-dialog" class="guide-dialog" aria-labelledby="guide-title" aria-describedby="guide-introduction">
+    <div class="guide-shell">
+      <header class="guide-header">
+        <div>
+          <p class="eyebrow">INVESTIGATION HELP</p>
+          <h2 id="guide-title">Investigation guide</h2>
+        </div>
+        <button id="guide-close" class="guide-close" type="button" aria-label="Close guide" title="Close guide">&times;</button>
+      </header>
+      <div class="guide-layout">
+        <nav id="guide-navigation" class="guide-navigation" aria-label="Guide sections"></nav>
+        <div id="guide-content" class="guide-content"></div>
+      </div>
+    </div>
+  </dialog>
+  <div id="ui-announcer" class="sr-only" role="status" aria-live="polite"></div>
+
+  <main>
+    <section id="contract-alerts" class="status-band" aria-label="Report status"></section>
+
+    <section id="capture-profile-coverage-section" class="capture-profile-band" aria-labelledby="capture-profile-coverage-heading">
+      <div class="capture-profile-heading">
+        <div>
+          <p class="eyebrow">CAPTURE PROVENANCE</p>
+          <h2 id="capture-profile-coverage-heading">Capture profile coverage</h2>
+        </div>
+        <p id="capture-profile-coverage-summary" class="context"></p>
+      </div>
+      <div id="capture-profile-coverage-content"></div>
+    </section>
+
+    <section id="evidence-context-section" class="evidence-context-band" aria-labelledby="evidence-context-heading" hidden>
+      <div class="evidence-context-heading">
+        <div>
+          <p class="eyebrow">EVIDENCE AUTHORITY CONTRACT</p>
+          <h2 id="evidence-context-heading">Mechanics and quality evidence</h2>
+        </div>
+        <span id="evidence-context-id" class="evidence-context-id"></span>
+      </div>
+      <p id="evidence-context-summary" class="evidence-context-summary"></p>
+      <div id="evidence-context-content"></div>
+    </section>
+
+    <section class="control-band" aria-label="Investigation controls">
+      <div class="control-grid">
+        <label>Baseline<select id="baseline-select"></select></label>
+        <label>Baseline repeat<select id="baseline-repeat-select"></select></label>
+        <label>Variant<select id="variant-select"></select></label>
+        <label>Variant repeat<select id="variant-repeat-select"></select></label>
+        <label>Scene<select id="scene-select"></select></label>
+        <label>Frame<select id="frame-select"></select></label>
+        <label>Capture stage<select id="capture-stage-select"></select></label>
+        <label>Pyramid level<select id="pyramid-level-select"></select></label>
+        <label>Run alignment<select id="alignment-select"></select></label>
+        <label>Logical state<select id="iteration-select"></select></label>
+        <label>Map preset<select id="map-preset-select"></select></label>
+        <label>Mechanism<select id="mechanism-select"></select></label>
+        <label>Component<select id="component-select"></select></label>
+        <label>Source view<select id="source-view-select"></select></label>
+        <label>Channel<select id="channel-select"></select></label>
+      </div>
+      <div class="control-row">
+        <fieldset class="segmented" aria-label="Map scale">
+          <legend>Map scale</legend>
+          <label><input type="radio" name="scale" value="shared" checked><span>Shared</span></label>
+          <label><input type="radio" name="scale" value="local"><span>Local</span></label>
+        </fieldset>
+        <details class="signal-menu">
+          <summary>Visible signals</summary>
+          <div id="signal-picker" class="signal-picker"></div>
+        </details>
+        <label class="toggle-control" title="Show positions derived from the validated fixed reference-patch contract">
+          <input id="patch-layout-toggle" type="checkbox" checked>
+          <span>Derived patch grid</span>
+        </label>
+        <button id="clear-crosshair" type="button">Clear crosshair</button>
+      </div>
+    </section>
+
+    <section id="accuracy-ledger-section" class="section-band" aria-labelledby="accuracy-ledger-heading" hidden>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">ACCURACY FIRST / COVERAGE SECOND</p>
+          <h2 id="accuracy-ledger-heading">Candidate ledger</h2>
+        </div>
+      </div>
+      <p class="context">Paired line-noise evidence determines the ordering. Coverage losses are advisory and all candidates remain visible. Coverage deltas use pp: percentage points, so 40% to 43% is +3 pp.</p>
+      <div class="table-wrap">
+        <table id="accuracy-ledger-table">
+          <thead><tr>
+            <th>Rank</th><th>Candidate</th><th>Noise</th><th>Availability</th>
+            <th>Scenes</th><th>Worst loss / tolerance</th><th>Effective coverage</th>
+            <th>Spatial coverage</th><th>Estimator validity</th>
+            <th>Terminal endpoint validity</th><th>Runtime</th><th>Inspect</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section-band" aria-labelledby="impact-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">OBSERVABILITY COVERAGE</p>
+          <h2 id="impact-heading">Mechanism impact matrix</h2>
+        </div>
+      </div>
+      <div id="mechanism-impact" class="mechanism-impact"></div>
+    </section>
+
+    <section class="section-band" aria-labelledby="regression-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">AGGREGATE TO FRAME</p>
+          <h2 id="regression-heading">Ranked regressions</h2>
+        </div>
+        <label class="search-label">Filter<input id="regression-filter" type="search" placeholder="metric, scene, status"></label>
+      </div>
+      <div class="table-wrap">
+        <table id="regression-table">
+          <thead><tr>
+            <th><button data-sort="status">Status</button></th>
+            <th><button data-sort="metric">Metric</button></th>
+            <th><button data-sort="regression_score">Regression score</button></th>
+            <th><button data-sort="delta">Delta</button></th>
+            <th><button data-sort="scene_id">Scene</button></th>
+            <th><button data-sort="image_id">Frame</button></th>
+            <th>Inspect</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="regression-empty" class="empty" hidden>No matching regression evidence.</p>
+    </section>
+
+    <section class="section-band" aria-labelledby="mechanics-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">PRODUCTION MECHANICS</p>
+          <h2 id="mechanics-heading">Exact cost, candidate, and view decisions</h2>
+        </div>
+      </div>
+      <div id="mechanics-content" class="mechanics-content"></div>
+    </section>
+
+    <section class="section-band map-section" aria-labelledby="maps-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">SYNCHRONIZED EVIDENCE</p>
+          <h2 id="maps-heading">Map investigation</h2>
+        </div>
+        <div class="section-actions">
+          <p id="frame-context" class="context"></p>
+          <button id="deep-frame-request" class="command-button" type="button" title="Export a full-frame deep capture request">Deep capture frame</button>
+        </div>
+      </div>
+      <div id="drilldown-status" class="drilldown-status"></div>
+      <div id="drilldown-detail" class="drilldown-detail"></div>
+      <section id="patch-inspector" class="patch-inspector" aria-labelledby="patch-inspector-heading" hidden>
+        <div class="patch-inspector-heading">
+          <div>
+            <p class="eyebrow">DERIVED REFERENCE SUPPORT</p>
+            <h3 id="patch-inspector-heading">Reference patch layout</h3>
+          </div>
+          <span id="patch-inspector-quality" class="quality derived_exact">derived_exact</span>
+        </div>
+        <p class="patch-inspector-note">Select a map pixel to inspect the validated fixed reference grid. This is visual context from the report thumbnail, not recorded CUDA sample values or a source-view footprint.</p>
+        <div id="patch-inspector-grid" class="patch-inspector-grid"></div>
+      </section>
+      <div id="map-grid" class="map-grid"></div>
+    </section>
+
+    <section class="section-band" aria-labelledby="pixel-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">SHARED CROSSHAIR</p>
+          <h2 id="pixel-heading">Pixel inspection</h2>
+        </div>
+        <div class="section-actions">
+          <p id="pixel-coordinate" class="context">Select a point in any map.</p>
+          <button id="trace-pixel-request" class="command-button" type="button" title="Export an exact trace request for the selected pixel" disabled>Trace pixel</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="pixel-table">
+          <thead><tr><th>Run</th><th>Signal</th><th>Stage</th><th>Quality</th><th>Value</th><th>Provenance</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section-band" aria-labelledby="annotation-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">END METRICS</p>
+          <h2 id="annotation-heading">Annotation consistency</h2>
+        </div>
+        <p id="annotation-context" class="context"></p>
+      </div>
+      <div class="annotation-introduction">
+        <p><strong>3D self-consistency proxy.</strong> Higher valid coverage, effective inliers, and threshold AUC are better; lower residual P95 is better. These metrics do not measure absolute depth accuracy.</p>
+        <div class="annotation-controls" aria-label="Annotation evidence controls">
+          <label>Evaluation stage<select id="annotation-stage-select"></select></label>
+          <label>Geometry<select id="annotation-kind-select"></select></label>
+        </div>
+      </div>
+      <div id="annotation-content"></div>
+    </section>
+  </main>
+
+  <footer>
+    Generated from <code>report_model.json</code>. Markdown remains the canonical report.
+  </footer>
+
+  <script id="dmap-report-model" type="application/json">__DMAP_REPORT_MODEL__</script>
+  <script>__DMAP_REPORT_JS__</script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 /*
  * Window.h
  *
- * Copyright (c) 2014-2015 SEACAVE
+ * Copyright (c) 2014-2025 SEACAVE
  *
  * Author(s):
  *
@@ -29,69 +29,77 @@
  *      containing it.
  */
 
-#ifndef _VIEWER_WINDOW_H_
-#define _VIEWER_WINDOW_H_
-
-
-// I N C L U D E S /////////////////////////////////////////////////
+#pragma once
 
 #include "Camera.h"
-#include "Image.h"
-
-
-// D E F I N E S ///////////////////////////////////////////////////
-
-
-// S T R U C T S ///////////////////////////////////////////////////
+#include "ArcballControls.h"
+#include "FirstPersonControls.h"
+#include "SelectionController.h"
+#include "BoundingBoxEdit.h"
+#include "Renderer.h"
+#include "UI.h"
 
 namespace VIEWER {
 
-class Window
-{
+// Forward declarations
+class Scene;
+
+class Window {
 public:
-	GLFWwindow* window; // window handle
-	Camera camera; // current camera
-	Eigen::Vector2d pos, prevPos; // current and previous mouse position (normalized)
-	Eigen::Matrix4d transform; // view matrix corresponding to the currently selected image
-	cv::Size size; // resolution in pixels, sometimes not equal to window resolution, ex. on Retina display
-	double sizeScale; // window/screen resolution scale
-
-	enum INPUT : unsigned {
-		INP_NA = 0,
-		INP_MOUSE_LEFT    = (1 << 0),
-		INP_MOUSE_MIDDLE  = (1 << 1),
-		INP_MOUSE_RIGHT   = (1 << 2),
+	enum ControlMode {
+		CONTROL_ARCBALL,
+		CONTROL_FIRST_PERSON,
+		CONTROL_SELECTION,
+		CONTROL_BBOX_EDIT,
+		CONTROL_NONE
 	};
-	Flags inputType;
-
-	enum SPARSE {
-		SPR_NONE   = 0,
-		SPR_POINTS = (1 << 0),
-		SPR_LINES  = (1 << 1),
-		SPR_ALL    = SPR_POINTS|SPR_LINES
+	enum CameraDisplayType {
+		CAMERA_DISPLAY_FRUSTUM = 0,
+		CAMERA_DISPLAY_DOT
 	};
-	SPARSE sparseType;
-	unsigned minViews;
-	float pointSize;
-	float cameraBlend;
-	bool bRenderCameras;
-	bool bRenderCameraTrajectory;
-	bool bRenderImageVisibility;
-	bool bRenderViews;
-	bool bRenderSolid;
-	bool bRenderTexture;
-	bool bRenderBounds;
 
-	enum COLORSOURCE {
-		COL_IMAGE = 0,
-		COL_DEPTH,
-		COL_CONFIDENCE,
-		COL_COMPOSITE,
-		COL_NORMAL
-	};
-	COLORSOURCE colorSource;
-	float colorThreshold;
+private:
+	GLFWwindow* window;
+	String title;
 
+	#ifdef _MSC_VER
+	// Cached Windows icon handles
+	HICON hIconBig;
+	HICON hIconSmall;
+	#endif
+
+	// Device pixel ratio for Retina/high-DPI displays
+	Eigen::Vector2d devicePixelRatio;
+
+	// Window framebuffer size (decoupled from the camera viewport size, which can be
+	// half the window while the compare split view is active)
+	cv::Size windowSize;
+
+	// Core systems
+	Camera camera; // camera of the active layer's compare side (the only camera outside compare mode)
+	Camera cameraB; // camera of the other compare side (used only when cameras are not synchronized)
+	std::unique_ptr<ArcballControls> arcballControls;
+	std::unique_ptr<ArcballControls> arcballControlsB; // drives cameraB
+	std::unique_ptr<FirstPersonControls> firstPersonControls;
+	std::unique_ptr<SelectionController> selectionController;
+	std::unique_ptr<BoundingBoxEditController> bboxEditController;
+	std::unique_ptr<Renderer> renderer;
+	std::unique_ptr<UI> ui;
+
+	// Control mode
+	ControlMode currentControlMode;
+
+	// Input state
+	Eigen::Vector2d lastMousePos;
+	int compareDragSide; // compare side owning the current mouse drag (-1 = none)
+	int compareActiveSide; // cached active-layer side, to detect side changes (-1 = untracked)
+
+	// Timing
+	double lastFrame;
+	bool closeConfirmed;
+
+public:
+	// Selection state
 	enum SELECTION {
 		SEL_NA = 0,
 		SEL_POINT,
@@ -101,76 +109,160 @@ public:
 	SELECTION selectionType;
 	Point3f selectionPoints[4];
 	double selectionTimeClick, selectionTime;
-	IDX selectionIdx;
+	IDXArr selectionIdx; // indices of selected point/triangle/camera (empty if none) (if camera, the indices are in the Viewer scene images)
+	MVS::IIndex selectedNeighborCamera; // index of neighbor camera to highlight (NO_ID if none) (index is in the Viewer scene images)
 
-	typedef DELEGATE<bool (LPCTSTR, LPCTSTR)> ClbkOpenScene;
-	ClbkOpenScene clbkOpenScene;
-	typedef DELEGATE<bool (LPCTSTR, bool)> ClbkSaveScene;
-	ClbkSaveScene clbkSaveScene;
-	typedef DELEGATE<bool (LPCTSTR, LPCTSTR)> ClbkExportScene;
-	ClbkExportScene clbkExportScene;
-	typedef DELEGATE<void (void)> ClbkCenterScene;
-	ClbkCenterScene clbkCenterScene;
-	typedef DELEGATE<void (const Ray3&, int)> ClbkRayScene;
-	ClbkRayScene clbkRayScene;
-	typedef DELEGATE<void (void)> ClbkCompilePointCloud;
-	ClbkCompilePointCloud clbkCompilePointCloud;
-	typedef DELEGATE<void (void)> ClbkCompileMesh;
-	ClbkCompileMesh clbkCompileMesh;
-	typedef DELEGATE<void (void)> ClbkCompileBounds;
-	ClbkCompileBounds clbkCompileBounds;
-	typedef DELEGATE<void (void)> ClbkTogleSceneBox;
-	ClbkTogleSceneBox clbkTogleSceneBox;
-	typedef DELEGATE<void (void)> ClbkCropToBounds;
-	ClbkCropToBounds clbkCropToBounds;
-
-	typedef std::unordered_map<GLFWwindow*,Window*> WindowsMap;
-	static WindowsMap g_mapWindows;
+	// Settings
+	Eigen::Vector4f clearColor;
+	MVS::IIndex minViews;
+	float userFontScale; // UI font scale
+	float cameraSize;
+	float uncertaintyEllipsoidScale; // multiplies the 1-sigma pose-uncertainty ellipsoid radii
+	CameraDisplayType cameraDisplayType;
+	bool showCameraLookAt;
+	float pointSize;
+	float pointNormalLength;
+	float imageOverlayOpacity;
+	bool renderOnlyOnChange;
+	bool showCameras;
+	bool showPointCloud;
+	bool showPointCloudNormals;
+	bool showMesh;
+	bool showMeshWireframe;
+	bool showMeshTextured;
+	bool showBounds; // draw the scene oriented bounding-box wireframe
+	bool showUncertaintyEllipsoids; // draw the per-camera pose-uncertainty ellipsoids (when loaded)
+	// Compare view (A|B): each layer renders only on its assigned side. Two flavors:
+	//  - swipe: both sides share the full-window projection and are separated by a
+	//    draggable divider (scissor), so aligned scenes match pixel-exact across it;
+	//  - split: two equal side-by-side viewports, each scene centered in its own
+	//    full frustum.
+	// Cameras are synchronized by default (both sides render the same view); when
+	// unsynchronized each side keeps its own camera, driven by the viewport under
+	// the cursor. The main camera always follows the active layer's side, so every
+	// active-layer interaction (selection, bbox edit, camera view) stays correct.
+	enum CompareMode {
+		COMPARE_DISABLED = 0,
+		COMPARE_SWIPE,
+		COMPARE_SPLIT
+	};
+	CompareMode compareMode;
+	float compareSplitPos; // divider position as a fraction of the window width (fixed at 0.5 in split mode)
+	bool compareSyncCameras; // move the cameras of both sides together
+	std::vector<bool> meshSubMeshVisible; // control visibility of individual sub-meshes (using unsigned char instead of bool for ImGui compatibility)
+	String pendingScreenshotPath;
+	bool pendingScreenshotIncludeUI;
+	bool pendingScreenshotQuit; // close the window once the pending screenshot has been saved
+	unsigned pendingScreenshotWarmupFrames;
 
 public:
 	Window();
 	~Window();
 
+	bool Initialize(const cv::Size& size, const String& title, Scene& scene);
 	void Release();
-	void ReleaseClbk();
+	void ResetView();
+	void Reset();
 	inline bool IsValid() const { return window != NULL; }
 
-	inline GLFWwindow* GetWindow() { return window; }
+	// Main loop
+	void Run();
+	bool ShouldClose() const;
 
-	bool Init(const cv::Size&, LPCTSTR name);
-	void SetCamera(const Camera&);
-	void SetName(LPCTSTR);
-	void SetVisible(bool);
-	bool IsVisible() const;
-	void Reset(SPARSE sparseType=SPR_ALL, unsigned minViews=2);
+	// Rendering
+	void UploadRenderData();
+	void Render();
 
-	void CenterCamera(const Point3&);
+	// Camera access
+	Camera& GetCamera() { return camera; }
+	const Camera& GetCamera() const { return camera; }
 
-	void UpdateView(const ImageArr&, const MVS::ImageArr&);
-	void UpdateView(const Eigen::Matrix3d& R, const Eigen::Vector3d& t);
-	void UpdateMousePosition(double xpos, double ypos);
+	// Compare view helpers
+	bool IsCompareEnabled() const { return compareMode != COMPARE_DISABLED; }
+	int GetCompareSplitX() const; // divider position in framebuffer pixels
+	cv::Rect GetCompareViewport(int side) const; // viewport rect of a side in split mode (framebuffer pixels)
+	int GetCompareActiveSide() const; // side of the active layer (0 = A/left, 1 = B/right)
+	int GetCompareSideAt(double xpos) const; // side under a cursor position (logical window coordinates)
+	Camera& GetSideCamera(int side); // camera rendering the given side
+	const Camera& GetSideCamera(int side) const;
+	void SetCompareSyncCameras(bool sync);
 
-	cv::Size GetSize() const;
-	void Resize(const cv::Size&);
-	static void Resize(GLFWwindow* window, int width, int height);
-	void Key(int k, int scancode, int action, int mod);
-	static void Key(GLFWwindow* window, int k, int scancode, int action, int mod);
-	void MouseButton(int button, int action, int mods);
-	static void MouseButton(GLFWwindow* window, int button, int action, int mods);
-	void MouseMove(double xpos, double ypos);
-	static void MouseMove(GLFWwindow* window, double xpos, double ypos);
-	void Scroll(double xoffset, double yoffset);
-	static void Scroll(GLFWwindow* window, double xoffset, double yoffset);
-	void Drop(int count, const char** paths);
-	static void Drop(GLFWwindow* window, int count, const char** paths);
+	// Control access
+	void SetControlMode(ControlMode mode);
+	ControlMode GetControlMode() const { return currentControlMode; }
+	ArcballControls& GetArcballControls() const { return *arcballControls; }
+	FirstPersonControls& GetFirstPersonControls() { return *firstPersonControls; }
+	SelectionController& GetSelectionController() const { return *selectionController; }
+	BoundingBoxEditController& GetBBoxEditController() const { return *bboxEditController; }
 
-protected:
-	bool IsShiftKeyPressed() const;
-	bool IsCtrlKeyPressed() const;
-	bool IsAltKeyPressed() const;
+	// Selection helpers
+	bool HasSelectionIds() const { return !selectionIdx.empty(); }
+	size_t GetSelectionCount() const { return selectionIdx.size(); }
+	IDX GetSelectionId(size_t index = 0) const { return index < selectionIdx.size() ? selectionIdx[index] : IDX(NO_IDX); }
+	const IDXArr& GetSelectionIds() const { return selectionIdx; }
+	void ClearSelectionIds() { selectionIdx.clear(); }
+	void SetSelectionId(IDX idx) {
+		if (idx == IDX(NO_IDX) || idx == IDX(NO_ID))
+			selectionIdx.clear();
+		else
+			selectionIdx.assign(1, idx);
+	}
+	void SetSelectionIds(IDXArr& indices) { selectionIdx = std::move(indices); }
+
+	// Renderer access
+	Renderer& GetRenderer() { return *renderer; }
+	const Renderer& GetRenderer() const { return *renderer; }
+
+	// UI access
+	UI& GetUI() { return *ui; }
+	const UI& GetUI() const { return *ui; }
+
+	// Utility
+	void SetTitle(const String& title);
+	void SetVisible(bool visible);
+	void ConfirmClose(); // close without another unsaved-changes prompt
+	void RequestAttention(); // request window attention (flash in taskbar)
+	void Focus(); // bring window to front and give it focus
+	const Eigen::Vector2d& GetDevicePixelRatio() const { return devicePixelRatio; }
+	const cv::Size& GetSize() const { return windowSize; }
+	void SetSceneBounds(const Point3f& center, const Point3f& size);
+	void RequestScreenshot(const String& filename, bool includeUI = false, bool quitAfter = false);
+	GLFWwindow* GetGLFWWindow() const { return window; }
+	static GLFWwindow* GetCurrentGLFWWindow();
+	static Window& GetCurrentWindow();
+	Scene& GetScene() const { return GetScene(window); }
+	static Scene& GetScene(GLFWwindow* window);
+	static Scene& GetCurrentScene();
+	static void RequestRedraw(); // post an event to trigger redraw
+
+	// Cursor visibility helpers
+	static void SetCursorVisible(bool visible);
+
+private:
+	// GLFW callbacks
+	static void FramebufferSizeCallback(GLFWwindow* window, int width, int height);
+	static void MouseCallback(GLFWwindow* window, double xpos, double ypos);
+	static void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+	static void ScrollCallback(GLFWwindow* window, double xoffset, double yoffset);
+	static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
+	static void DropCallback(GLFWwindow* window, int count, const char** paths);
+
+	void HandleMouseMove(double xpos, double ypos);
+	void HandleMouseButton(int button, int action, int mods);
+	void HandleScroll(double yoffset);
+	void HandleKeyboard(int key, int action, int mods);
+	void HandleFileDrop(int count, const char** paths);
+	bool CaptureScreenshot(const String& filename);
+
+	double UpdateTiming();
+	void UpdateDevicePixelRatio();
+	Eigen::Vector2d NormalizeMousePos(double x, double y, int side) const; // normalize inside a compare-side viewport (full window unless split)
+	// Keep the compare cameras consistent with the current mode, window size and
+	// active layer (viewport sizes, fixed split position, camera hand-over when the
+	// active layer changes sides); called once per frame before rendering
+	void UpdateCompareState();
+	ArcballControls& GetSideArcballControls(int side); // controls driving the given side's camera
 };
 /*----------------------------------------------------------------*/
 
 } // namespace VIEWER
-
-#endif // _VIEWER_WINDOW_H_

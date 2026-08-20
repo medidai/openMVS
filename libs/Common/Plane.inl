@@ -116,7 +116,7 @@ int TPlane<TYPE,DIMS>::Optimize(const POINT* points, size_t size, const RobustNo
 		const Point3d N(m_vN.x(), m_vN.y(), m_vN.z());
 		Normal2Dir(N, reinterpret_cast<Point2d&>(arrParams[1]));
 	}
-	lm_control_struct control = {1.e-6, 1.e-7, 1.e-8, 1.e-7, 100.0, maxIters}; // lm_control_float;
+	lm_control_struct control {1.e-6, 1.e-7, 1.e-8, 1.e-7, 100.0, maxIters}; // lm_control_float;
 	lm_status_struct status;
 	lmmin(numParams, arrParams, (int)size, &functor, OptimizationFunctor::Residuals, &control, &status);
 	switch (status.info) {

@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>OpenMVS - @VIEWER_NAME@</string>
+
+  <!-- Human-facing display name shown by Finder / Launchpad -->
+  <key>CFBundleDisplayName</key>
+  <string>OpenMVS - @VIEWER_NAME@</string>
+
+  <key>CFBundleExecutable</key>
+  <string>@VIEWER_NAME@</string>
+
+  <key>CFBundleIdentifier</key>
+  <string>org.openMVS.@VIEWER_NAME@</string>
+
+  <key>CFBundleVersion</key>
+  <string>@OpenMVS_VERSION@</string>
+
+  <key>CFBundleShortVersionString</key>
+  <string>@OpenMVS_VERSION@</string>
+
+  <key>CFBundleIconFile</key>
+  <string>@ICON_NAME@</string>
+
+  <!-- Additional metadata -->
+  <key>CFBundleGetInfoString</key>
+  <string>OpenMVS Viewer @OpenMVS_VERSION@</string>
+
+  <!-- Project homepage for reference (custom key) -->
+  <key>OpenMVSHomepage</key>
+  <string>https://cdcseacave.github.io</string>
+
+  <!-- Copyright shown in About panels / Finder -->
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright (c) 2025 SEACAVE - https://github.com/cdcseacave/openMVS</string>
+
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.graphics-design</string>
+
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+
+  <!-- Declare document types so .mvs files are associated with this app -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>OpenMVS Scene</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>mvs</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.openmvs.mvs</string>
+      </array>
+      <key>CFBundleTypeIconFile</key>
+      <string>@ICON_NAME@</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>OpenMVS Depth Map</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>dmap</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.openmvs.dmap</string>
+      </array>
+      <key>CFBundleTypeIconFile</key>
+      <string>@ICON_NAME@</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Polygon File Format</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>ply</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.polygon-file-format</string>
+      </array>
+      <key>CFBundleTypeIconFile</key>
+      <string>@ICON_NAME@</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Wavefront OBJ File</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>obj</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.geometry-definition-format</string>
+      </array>
+      <key>CFBundleTypeIconFile</key>
+      <string>@ICON_NAME@</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>GL Transmission Format</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>gltf</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.khronos.gltf</string>
+      </array>
+      <key>CFBundleTypeIconFile</key>
+      <string>@ICON_NAME@</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>GL Transmission Format Binary</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>glb</string>
+      </array>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.khronos.glb</string>
+      </array>
+      <key>CFBundleTypeIconFile</key>
+      <string>@ICON_NAME@</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+    </dict>
+  </array>
+
+  <!-- Export UTIs for our document types so Launch Services recognizes them -->
+  <key>LSExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>org.openmvs.mvs</string>
+      <key>UTTypeDescription</key>
+      <string>OpenMVS Scene</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.data</string>
+      </array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>mvs</string>
+        </array>
+        <key>public.mime-type</key>
+        <string>application/x-openmvs-mvs</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>org.openmvs.dmap</string>
+      <key>UTTypeDescription</key>
+      <string>OpenMVS Depth Map</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.data</string>
+      </array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>dmap</string>
+        </array>
+        <key>public.mime-type</key>
+        <string>application/x-openmvs-dmap</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>public.polygon-file-format</string>
+      <key>UTTypeDescription</key>
+      <string>Polygon File Format</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.data</string>
+      </array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>ply</string>
+        </array>
+      </dict>
+    </dict>
+  </array>
+
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>

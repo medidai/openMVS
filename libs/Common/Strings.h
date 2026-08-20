@@ -16,13 +16,23 @@
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+#ifndef va_copy
+#define va_copy(dst, src) ((dst) = (src))
+#endif
+
 
 namespace SEACAVE {
 
 // S T R U C T S ///////////////////////////////////////////////////
 
-/// String class: enhanced std::string
-class GENERAL_API String : public std::string
+/// String class: enhanced std::string.
+/// NOTE: deliberately NOT tagged with `GENERAL_API` at class level — MSVC would
+/// otherwise re-export every inherited std::string member from Common.dll,
+/// colliding (LNK2005) with the same template instantiations baked into static
+/// archives like PoseLib. The String-specific methods are inline templates that
+/// instantiate per-TU; nothing here needs to cross the DLL boundary as a real
+/// out-of-line export.
+class String : public std::string
 {
 public:
 	typedef std::string Base;
@@ -60,47 +70,54 @@ public:
 		va_list args;
 		va_start(args, szFormat);
 		TCHAR szBuffer[2048];
-		const size_t len((size_t)_vsntprintf(szBuffer, 2048, szFormat, args));
-		if (len > 2048) {
+		va_list argsCopy;
+		va_copy(argsCopy, args);
+		const size_t written((size_t)_vsntprintf(szBuffer, 2048, szFormat, argsCopy));
+		va_end(argsCopy);
+		if (written >= 2048)
 			*this = FormatStringSafe(szFormat, args);
-			va_end(args);
-		} else {
-			va_end(args);
-			this->assign(szBuffer, len);
-		}
+		else
+			this->assign(szBuffer, written);
+		va_end(args);
 		return *this;
 	}
 	String& FormatSafe(LPCTSTR szFormat, ...) {
 		va_list args;
 		va_start(args, szFormat);
-		const size_t len((size_t)_vsctprintf(szFormat, args));
-		ASSERT(len != (size_t)-1);
-		TCHAR* szBuffer(new TCHAR[len]);
-		_vsntprintf(szBuffer, len, szFormat, args);
+		*this = FormatStringSafe(szFormat, args);
 		va_end(args);
-		this->assign(szBuffer, len);
-		delete[] szBuffer;
 		return *this;
 	}
 	static String FormatString(LPCTSTR szFormat, ...) {
 		va_list args;
 		va_start(args, szFormat);
 		TCHAR szBuffer[2048];
-		const size_t len((size_t)_vsntprintf(szBuffer, 2048, szFormat, args));
-		if (len > 2048) {
+		va_list argsCopy;
+		va_copy(argsCopy, args);
+		const size_t written((size_t)_vsntprintf(szBuffer, 2048, szFormat, argsCopy));
+		va_end(argsCopy);
+		if (written >= 2048) {
 			const String str(FormatStringSafe(szFormat, args));
 			va_end(args);
 			return str;
 		}
 		va_end(args);
-		return String(szBuffer, len);
+		return String(szBuffer, written);
 	}
 	static inline String FormatStringSafe(LPCTSTR szFormat, va_list args) {
-		const size_t len((size_t)_vsctprintf(szFormat, args));
-		ASSERT(len != (size_t)-1);
-		TCHAR* szBuffer(new TCHAR[len]);
-		_vsntprintf(szBuffer, len, szFormat, args);
-		String str(szBuffer, len);
+		va_list argsCopy;
+		va_copy(argsCopy, args);
+		const int len(_vsctprintf(szFormat, argsCopy));
+		va_end(argsCopy);
+		ASSERT(len != -1);
+		if (len < 0)
+			return String();
+		TCHAR* szBuffer(new TCHAR[(size_t)len + 1]);
+		va_copy(argsCopy, args);
+		_vsntprintf(szBuffer, (size_t)len + 1, szFormat, argsCopy);
+		va_end(argsCopy);
+		szBuffer[len] = _T('\0');
+		String str(szBuffer, (size_t)len);
 		delete[] szBuffer;
 		return str;
 	}

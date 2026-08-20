@@ -32,14 +32,31 @@
 #include "Common.h"
 #include "PointCloud.h"
 #include "DepthMap.h"
+// GLTF: mesh import/export
+#define JSON_NOEXCEPTION
+#define TINYGLTF_NOEXCEPTION
+#define TINYGLTF_NO_STB_IMAGE
+#define TINYGLTF_NO_STB_IMAGE_WRITE
+#define TINYGLTF_NO_INCLUDE_JSON
+#define TINYGLTF_NO_INCLUDE_STB_IMAGE
+#define TINYGLTF_NO_INCLUDE_STB_IMAGE_WRITE
+// #define TINYGLTF_IMPLEMENTATION
+#include "../IO/json.hpp"
+#include "../IO/tiny_gltf.h"
 
 using namespace MVS;
 
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("PointCld"));
 
 PointCloud& MVS::PointCloud::Swap(PointCloud& rhs)
 {
@@ -84,7 +101,19 @@ void PointCloud::RemovePoint(IDX idx)
 		labels.RemoveAt(idx);
 	points.RemoveAt(idx);
 }
-void PointCloud::RemovePointsOutside(const OBB3f& obb) {
+
+// remove multiple points based on the indices provided;
+// the indices must be sorted in ascending order
+void PointCloud::RemovePoints(IndexArr& indices)
+{
+	ASSERT(!indices.empty());
+	indices.Sort();
+	RFOREACH(idx, indices)
+		RemovePoint(indices[idx]);
+}
+
+void PointCloud::RemovePointsOutside(const OBB3f &obb)
+{
 	ASSERT(obb.IsValid());
 	RFOREACH(i, points)
 		if (!obb.Intersects(points[i]))
@@ -108,12 +137,23 @@ PointCloud::Box PointCloud::GetAABB() const
 	return box;
 }
 // same, but only for points inside the given AABB
-PointCloud::Box PointCloud::GetAABB(const Box& bound) const
+// optionally consider only points with more than the given number of views
+PointCloud::Box PointCloud::GetAABB(const Box& bound, unsigned minViews) const
 {
 	Box box(true);
-	for (const Point& X: points)
-		if (bound.Intersects(X))
-			box.InsertFull(X);
+	if (!pointViews.empty() && minViews > 0) {
+		FOREACH(idx, points) {
+			if (pointViews[idx].size() < minViews)
+				continue;
+			const Point& X = points[idx];
+			if (bound.Intersects(X))
+				box.InsertFull(X);
+		}
+	} else {
+		for (const Point& X: points)
+			if (bound.Intersects(X))
+				box.InsertFull(X);
+	}
 	return box;
 }
 // compute the axis-aligned bounding-box of the point-cloud
@@ -127,6 +167,59 @@ PointCloud::Box PointCloud::GetAABB(unsigned minViews) const
 		if (pointViews[idx].size() >= minViews)
 			box.InsertFull(points[idx]);
 	return box;
+}
+// compute the axis-aligned bounding-box of the point-cloud
+// considering only points within the given percentile range per axis
+// optionally with more than the given number of views
+PointCloud::Box PointCloud::GetAABB(float minPercentile, float maxPercentile, unsigned minViews) const
+{
+	// get percentile bounds for each axis
+	const Box percentileBounds(GetPercentileAABB(minPercentile, maxPercentile, minViews));
+	// compute AABB from points within percentile bounds
+	return GetAABB(percentileBounds, minViews);
+}
+// compute the percentile axis-aligned bounding-box of the point-cloud
+// optionally with more than the given number of views
+PointCloud::Box PointCloud::GetPercentileAABB(float minPercentile, float maxPercentile, unsigned minViews) const
+{
+	ASSERT(minPercentile >= 0.f && minPercentile <= 1.f);
+	ASSERT(maxPercentile >= 0.f && maxPercentile <= 1.f);
+	ASSERT(minPercentile < maxPercentile);
+	// collect points that meet the minViews requirement
+	typedef CLISTDEF0IDX(Point::Type,Index) Scalars;
+	Scalars x, y, z;
+	x.reserve(points.size());
+	y.reserve(points.size());
+	z.reserve(points.size());
+	if (!pointViews.empty() && minViews > 0) {
+		FOREACH(idx, points) {
+			if (pointViews[idx].size() >= minViews) {
+				const Point& X = points[idx];
+				x.push_back(X.x);
+				y.push_back(X.y);
+				z.push_back(X.z);
+			}
+		}
+	} else {
+		for (const Point& X: points) {
+			x.push_back(X.x);
+			y.push_back(X.y);
+			z.push_back(X.z);
+		}
+	}
+	if (x.empty())
+		return Box(true);
+	// compute percentile indices
+	x.Sort();
+	y.Sort();
+	z.Sort();
+	const float numPoints(x.size() - 1);
+	const Index idxMin(MAXF(Index(0), ROUND2INT<Index>(minPercentile * numPoints)));
+	const Index idxMax(MINF(static_cast<Index>(numPoints), ROUND2INT<Index>(maxPercentile * numPoints)));
+	// return percentile bounds for each axis
+	return Box(
+		Box::POINT(x[idxMin], y[idxMin], z[idxMin]),
+		Box::POINT(x[idxMax], y[idxMax], z[idxMax]));
 }
 
 // compute the center of the point-cloud as the median
@@ -319,7 +412,21 @@ namespace BasicPLY {
 bool PointCloud::Load(const String& fileName)
 {
 	TD_TIMER_STARTD();
+	const String ext(Util::getFileExt(fileName).ToLower());
+	bool ret;
+	if (ext == _T(".gltf") || ext == _T(".glb"))
+		ret = LoadGLTF(fileName, ext == _T(".glb"));
+	else
+		ret = LoadPLY(fileName);
+	if (!ret)
+		return false;
+	DEBUG_EXTRA("Point-cloud '%s' loaded: %u points (%s)", Util::getFileNameExt(fileName).c_str(), points.size(), TD_TIMER_GET_FMT().c_str());
+	return true;
+} // Load
 
+// import the point-cloud as a PLY file
+bool PointCloud::LoadPLY(const String& fileName)
+{
 	ASSERT(!fileName.empty());
 	Release();
 
@@ -364,17 +471,169 @@ bool PointCloud::Load(const String& fileName)
 		DEBUG_EXTRA("error: invalid point-cloud");
 		return false;
 	}
-
-	DEBUG_EXTRA("Point-cloud '%s' loaded: %u points (%s)", Util::getFileNameExt(fileName).c_str(), points.size(), TD_TIMER_GET_FMT().c_str());
 	return true;
-} // Load
+}
 
-// save the dense point-cloud as PLY file
+// import the point-cloud as a GLTF file
+bool PointCloud::LoadGLTF(const String& fileName, bool bBinary)
+{
+	ASSERT(!fileName.empty());
+	Release();
+
+	// load model
+	tinygltf::Model gltfModel; {
+		tinygltf::TinyGLTF loader;
+		std::string err, warn;
+		if (bBinary ?
+			!loader.LoadBinaryFromFile(&gltfModel, &err, &warn, fileName) :
+			!loader.LoadASCIIFromFile(&gltfModel, &err, &warn, fileName))
+			return false;
+		if (!err.empty()) {
+			VERBOSE("error: %s", err.c_str());
+			return false;
+		}
+		if (!warn.empty())
+			DEBUG("warning: %s", warn.c_str());
+	}
+
+	// parse model
+	for (const tinygltf::Mesh& gltfMesh : gltfModel.meshes) {
+		for (const tinygltf::Primitive& gltfPrimitive : gltfMesh.primitives) {
+			if (gltfPrimitive.mode != TINYGLTF_MODE_POINTS)
+				continue;
+			// read vertices
+			{
+				const tinygltf::Accessor& gltfAccessor = gltfModel.accessors[gltfPrimitive.attributes.at("POSITION")];
+				if (gltfAccessor.type != TINYGLTF_TYPE_VEC3)
+					continue;
+				const tinygltf::BufferView& gltfBufferView = gltfModel.bufferViews[gltfAccessor.bufferView];
+				const tinygltf::Buffer& buffer = gltfModel.buffers[gltfBufferView.buffer];
+				const uint8_t* pData = buffer.data.data() + gltfBufferView.byteOffset + gltfAccessor.byteOffset;
+				const size_t oldSize = points.size();
+				points.resize(oldSize + (Index)gltfAccessor.count);
+				if (gltfAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT) {
+					const int stride = gltfAccessor.ByteStride(gltfBufferView);
+					if (stride == sizeof(Point)) {
+						memcpy(points.data() + oldSize, pData, sizeof(Point) * gltfAccessor.count);
+					} else {
+						for (size_t i = 0; i < gltfAccessor.count; ++i)
+							points[oldSize+i] = *(const Point*)(pData + i * stride);
+					}
+				}
+				else if (gltfAccessor.componentType == TINYGLTF_COMPONENT_TYPE_DOUBLE) {
+					const int stride = gltfAccessor.ByteStride(gltfBufferView);
+					for (Index i = 0; i < gltfAccessor.count; ++i) {
+						const double* pVal = (const double*)(pData + i * stride);
+						points[oldSize+i] = Point(pVal[0], pVal[1], pVal[2]);
+					}
+				}
+				else {
+					VERBOSE("error: unsupported vertices (component type)");
+					continue;
+				}
+			}
+			// read colors (COLOR_0)
+			if (gltfPrimitive.attributes.find("COLOR_0") != gltfPrimitive.attributes.end()) {
+				const tinygltf::Accessor& gltfAccessor = gltfModel.accessors[gltfPrimitive.attributes.at("COLOR_0")];
+				const tinygltf::BufferView& gltfBufferView = gltfModel.bufferViews[gltfAccessor.bufferView];
+				const tinygltf::Buffer& buffer = gltfModel.buffers[gltfBufferView.buffer];
+				const uint8_t* pData = buffer.data.data() + gltfBufferView.byteOffset + gltfAccessor.byteOffset;
+				const size_t oldSize = colors.size();
+				colors.resize(points.size());
+
+				const int stride = gltfAccessor.ByteStride(gltfBufferView);
+				if (gltfAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
+					if (gltfAccessor.type == TINYGLTF_TYPE_VEC3) {
+						for (size_t i = 0; i < gltfAccessor.count; ++i) {
+							const uint8_t* pVal = (const uint8_t*)(pData + i * stride);
+							colors[oldSize+i] = Color(pVal[0], pVal[1], pVal[2]);
+						}
+					} else if (gltfAccessor.type == TINYGLTF_TYPE_VEC4) {
+						for (size_t i = 0; i < gltfAccessor.count; ++i) {
+							const uint8_t* pVal = (const uint8_t*)(pData + i * stride);
+							colors[oldSize+i] = Color(pVal[0], pVal[1], pVal[2]);
+						}
+					}
+				} else if (gltfAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+					if (gltfAccessor.type == TINYGLTF_TYPE_VEC3) {
+						for (size_t i = 0; i < gltfAccessor.count; ++i) {
+							const uint16_t* pVal = (const uint16_t*)(pData + i * stride);
+							colors[oldSize+i] = Color(pVal[0]>>8, pVal[1]>>8, pVal[2]>>8);
+						}
+					} else if (gltfAccessor.type == TINYGLTF_TYPE_VEC4) {
+						for (size_t i = 0; i < gltfAccessor.count; ++i) {
+							const uint16_t* pVal = (const uint16_t*)(pData + i * stride);
+							colors[oldSize+i] = Color(pVal[0]>>8, pVal[1]>>8, pVal[2]>>8);
+						}
+					}
+				} else if (gltfAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT) {
+					if (gltfAccessor.type == TINYGLTF_TYPE_VEC3) {
+						for (size_t i = 0; i < gltfAccessor.count; ++i) {
+							const float* pVal = (const float*)(pData + i * stride);
+							colors[oldSize+i] = Color((uint8_t)(pVal[0]*255), (uint8_t)(pVal[1]*255), (uint8_t)(pVal[2]*255));
+						}
+					} else if (gltfAccessor.type == TINYGLTF_TYPE_VEC4) {
+						for (size_t i = 0; i < gltfAccessor.count; ++i) {
+							const float* pVal = (const float*)(pData + i * stride);
+							colors[oldSize+i] = Color((uint8_t)(pVal[0]*255), (uint8_t)(pVal[1]*255), (uint8_t)(pVal[2]*255));
+						}
+					}
+				}
+			}
+			// read normals (NORMAL)
+			if (gltfPrimitive.attributes.find("NORMAL") != gltfPrimitive.attributes.end()) {
+				const tinygltf::Accessor& gltfAccessor = gltfModel.accessors[gltfPrimitive.attributes.at("NORMAL")];
+				const tinygltf::BufferView& gltfBufferView = gltfModel.bufferViews[gltfAccessor.bufferView];
+				const tinygltf::Buffer& buffer = gltfModel.buffers[gltfBufferView.buffer];
+				const uint8_t* pData = buffer.data.data() + gltfBufferView.byteOffset + gltfAccessor.byteOffset;
+				const size_t oldSize = normals.size();
+				normals.resize(points.size());
+
+				const int stride = gltfAccessor.ByteStride(gltfBufferView);
+				if (gltfAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT) {
+					if (stride == sizeof(Normal)) {
+						memcpy(normals.data() + oldSize, pData, sizeof(Normal) * gltfAccessor.count);
+					} else {
+						for (size_t i = 0; i < gltfAccessor.count; ++i)
+							normals[oldSize+i] = *(const Normal*)(pData + i * stride);
+					}
+				}
+			}
+		}
+	}
+	if (points.empty()) {
+		DEBUG_EXTRA("error: invalid point-cloud");
+		return false;
+	}
+	return true;
+} // LoadGLTF
+
 bool PointCloud::Save(const String& fileName, bool bViews, bool bLegacyTypes, bool bBinary) const
 {
 	if (IsEmpty())
 		return false;
 	TD_TIMER_STARTD();
+
+	const String ext(Util::getFileExt(fileName).ToLower());
+	bool ret;
+	if (ext == _T(".potree") || ext.empty())
+		ret = SavePotree(fileName);
+	else if (ext == _T(".gltf") || ext == _T(".glb"))
+		ret = SaveGLTF(fileName, ext == _T(".glb"));
+	else
+		ret = SavePLY(fileName, bViews, bLegacyTypes, bBinary);
+	if (!ret)
+		return false;
+
+	DEBUG_EXTRA("Point-cloud '%s' saved: %u points (%s)", Util::getFileNameExt(fileName).c_str(), points.size(), TD_TIMER_GET_FMT().c_str());
+	return true;
+} // Save
+
+// save the dense point-cloud as PLY file
+bool PointCloud::SavePLY(const String& fileName, bool bViews, bool bLegacyTypes, bool bBinary) const
+{
+	if (IsEmpty())
+		return false;
 
 	// create PLY object
 	ASSERT(!fileName.empty());
@@ -414,10 +673,333 @@ bool PointCloud::Save(const String& fileName, bool bViews, bool bLegacyTypes, bo
 		ply.put_element(&vertex);
 	}
 	ASSERT(ply.get_current_element_count() == (int)points.size());
-
-	DEBUG_EXTRA("Point-cloud '%s' saved: %u points (%s)", Util::getFileNameExt(fileName).c_str(), points.GetSize(), TD_TIMER_GET_FMT().c_str());
 	return true;
-} // Save
+}
+
+// save the dense point-cloud as PLY file
+template <typename T>
+void ExtendBufferGLTF(const T* src, size_t size, tinygltf::Buffer& dst, size_t& byte_offset, size_t& byte_length) {
+	byte_offset = dst.data.size();
+	byte_length = sizeof(T) * size;
+	byte_length = ((byte_length + 3) / 4) * 4;
+	dst.data.resize(byte_offset + byte_length);
+	memcpy(&dst.data[byte_offset], &src[0], byte_length);
+}
+
+// export the point-cloud to the given file
+bool PointCloud::SaveGLTF(const String& fileName, bool bBinary) const
+{
+	ASSERT(!fileName.empty());
+	Util::ensureFolder(fileName);
+
+	// create GLTF model
+	tinygltf::Model gltfModel;
+	tinygltf::Scene gltfScene;
+	tinygltf::Mesh gltfMesh;
+	tinygltf::Buffer gltfBuffer;
+	gltfScene.name = "scene";
+	gltfMesh.name = "pointcloud";
+
+	tinygltf::Primitive gltfPrimitive;
+	gltfPrimitive.mode = TINYGLTF_MODE_POINTS;
+
+	// setup vertices
+	{
+		STATIC_ASSERT(3 * sizeof(Point::Type) == sizeof(Point)); // PointArr should be continuous
+		const Box box(GetAABB());
+		gltfPrimitive.attributes["POSITION"] = (int)gltfModel.accessors.size();
+		tinygltf::Accessor vertexPositionAccessor;
+		vertexPositionAccessor.name = "vertexPositionAccessor";
+		vertexPositionAccessor.bufferView = (int)gltfModel.bufferViews.size();
+		vertexPositionAccessor.type = TINYGLTF_TYPE_VEC3;
+		vertexPositionAccessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+		vertexPositionAccessor.count = points.size();
+		vertexPositionAccessor.minValues = {box.ptMin.x(), box.ptMin.y(), box.ptMin.z()};
+		vertexPositionAccessor.maxValues = {box.ptMax.x(), box.ptMax.y(), box.ptMax.z()};
+		gltfModel.accessors.emplace_back(std::move(vertexPositionAccessor));
+		// setup vertices buffer
+		tinygltf::BufferView vertexPositionBufferView;
+		vertexPositionBufferView.name = "vertexPositionBufferView";
+		vertexPositionBufferView.buffer = (int)gltfModel.buffers.size();
+		ExtendBufferGLTF(points.data(), points.size(), gltfBuffer,
+			vertexPositionBufferView.byteOffset, vertexPositionBufferView.byteLength);
+		gltfModel.bufferViews.emplace_back(std::move(vertexPositionBufferView));
+	}
+
+	// setup colors
+	if (!colors.empty()) {
+		STATIC_ASSERT(3 * sizeof(Color::Type) == sizeof(Color)); // ColorArr should be continuous
+		gltfPrimitive.attributes["COLOR_0"] = (int)gltfModel.accessors.size();
+		tinygltf::Accessor vertexColorAccessor;
+		vertexColorAccessor.name = "vertexColorAccessor";
+		vertexColorAccessor.bufferView = (int)gltfModel.bufferViews.size();
+		vertexColorAccessor.type = TINYGLTF_TYPE_VEC3;
+		vertexColorAccessor.componentType = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+		vertexColorAccessor.normalized = true;
+		vertexColorAccessor.count = colors.size();
+		gltfModel.accessors.emplace_back(std::move(vertexColorAccessor));
+		// setup colors buffer
+		tinygltf::BufferView vertexColorBufferView;
+		vertexColorBufferView.name = "vertexColorBufferView";
+		vertexColorBufferView.buffer = (int)gltfModel.buffers.size();
+		ExtendBufferGLTF(colors.data(), colors.size(), gltfBuffer,
+			vertexColorBufferView.byteOffset, vertexColorBufferView.byteLength);
+		// our colors are in BGR order, need to swizzle to RGB
+		uint8_t* const pColorData = &gltfBuffer.data[vertexColorBufferView.byteOffset];
+		FOREACH(i, colors)
+			std::swap(pColorData[i * 3 + 0], pColorData[i * 3 + 2]);
+		gltfModel.bufferViews.emplace_back(std::move(vertexColorBufferView));
+	}
+
+	// setup normals
+	if (!normals.empty()) {
+		STATIC_ASSERT(3 * sizeof(Normal::Type) == sizeof(Normal)); // NormalArr should be continuous
+		gltfPrimitive.attributes["NORMAL"] = (int)gltfModel.accessors.size();
+		tinygltf::Accessor vertexNormalAccessor;
+		vertexNormalAccessor.name = "vertexNormalAccessor";
+		vertexNormalAccessor.bufferView = (int)gltfModel.bufferViews.size();
+		vertexNormalAccessor.type = TINYGLTF_TYPE_VEC3;
+		vertexNormalAccessor.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
+		vertexNormalAccessor.count = normals.size();
+		gltfModel.accessors.emplace_back(std::move(vertexNormalAccessor));
+		// setup normals buffer
+		tinygltf::BufferView vertexNormalBufferView;
+		vertexNormalBufferView.name = "vertexNormalBufferView";
+		vertexNormalBufferView.buffer = (int)gltfModel.buffers.size();
+		ExtendBufferGLTF(normals.data(), normals.size(), gltfBuffer,
+			vertexNormalBufferView.byteOffset, vertexNormalBufferView.byteLength);
+		gltfModel.bufferViews.emplace_back(std::move(vertexNormalBufferView));
+	}
+
+	gltfMesh.primitives.emplace_back(std::move(gltfPrimitive));
+	gltfModel.meshes.emplace_back(std::move(gltfMesh));
+	gltfModel.buffers.emplace_back(std::move(gltfBuffer));
+
+	// setup scene
+	tinygltf::Node gltfNode;
+	gltfNode.name = "node";
+	gltfNode.mesh = 0;
+	gltfModel.nodes.emplace_back(std::move(gltfNode));
+	gltfScene.nodes.push_back(0);
+	gltfModel.scenes.emplace_back(std::move(gltfScene));
+	gltfModel.defaultScene = 0;
+
+	// save model
+	tinygltf::TinyGLTF gltf;
+	return gltf.WriteGltfSceneToFile(&gltfModel, fileName, false, false, !bBinary, bBinary);
+}
+
+// save the dense point-cloud as Potree 2.0 format
+// outputs 3 files in the given directory: metadata.json, hierarchy.bin, octree.bin
+bool PointCloud::SavePotree(const String& dirName) const
+{
+	if (IsEmpty())
+		return false;
+	TD_TIMER_STARTD();
+
+	// ensure output directory exists (append separator if needed)
+	String outputDir(dirName);
+	if (!outputDir.empty() && outputDir.back() != PATH_SEPARATOR)
+		outputDir += PATH_SEPARATOR;
+	Util::ensureFolder(outputDir);
+
+	// compute bounding box and make it cubic (Potree requirement)
+	const Box aabb(GetAABB());
+	const Eigen::Vector3d center(aabb.GetCenter().cast<double>());
+	const Eigen::Vector3d aabbSize(aabb.GetSize().cast<double>());
+	const double halfSize = aabbSize.maxCoeff() / 2.0;
+	const Eigen::Vector3f cubeMin((float)(center.x() - halfSize), (float)(center.y() - halfSize), (float)(center.z() - halfSize));
+	const Eigen::Vector3f cubeMax((float)(center.x() + halfSize), (float)(center.y() + halfSize), (float)(center.z() + halfSize));
+	const AABB3f cubeAABB(cubeMin, cubeMax);
+	const double cubeSize = halfSize * 2.0;
+
+	// build LOD octree using grid-based subsampling
+	typedef TOctreeLOD<PointArr, Point::Type, 3> OctreeLOD;
+	OctreeLOD lodOctree;
+	lodOctree.Insert(points, cubeAABB, GridSubsample<PointArr, Point::Type, 3>(128));
+	DEBUG_EXTRA("Point-cloud Potree: LOD octree built with %zu nodes, depth %u",
+		lodOctree.GetTotalNodes(), lodOctree.GetMaxDepth());
+
+	// compute encoding parameters
+	const double offsetX = cubeAABB.ptMin.x(), offsetY = cubeAABB.ptMin.y(), offsetZ = cubeAABB.ptMin.z();
+	const double scale = cubeSize > 0 ? cubeSize / double(INT32_MAX) : 1.0;
+	const double invScale = 1.0 / scale;
+	const bool hasColors = !colors.empty();
+	const bool hasNormals = !normals.empty();
+
+	// compute per-point byte size
+	const size_t bytesPerPointPosition = 3 * sizeof(int32_t); // 12 bytes
+	const size_t bytesPerPointColor = hasColors ? 4 * sizeof(uint8_t) : 0; // 4 bytes (RGBA)
+	const size_t bytesPerPointNormal = hasNormals ? 3 * sizeof(float) : 0; // 12 bytes
+	const size_t bytesPerPoint = bytesPerPointPosition + bytesPerPointColor + bytesPerPointNormal;
+
+	// write octree.bin and collect hierarchy records via BFS traversal
+	struct NodeRecord {
+		uint8_t type;
+		uint8_t childMask;
+		uint32_t numPoints;
+		uint64_t byteOffset;
+		uint64_t byteSize;
+	};
+	std::vector<NodeRecord> records;
+	records.reserve(lodOctree.GetTotalNodes());
+
+	const String octreeFile(outputDir + _T("octree.bin"));
+	{
+		File file(octreeFile, File::WRITE, File::CREATE | File::TRUNCATE);
+		if (!file.isOpen()) {
+			DEBUG("error: cannot create Potree octree file '%s'", octreeFile.c_str());
+			return false;
+		}
+
+		// BFS traversal — write point data per node and record offsets
+		const auto& lodIndices = lodOctree.GetIndexArr();
+		uint64_t currentOffset = 0;
+		lodOctree.TraverseBFS([&](const OctreeLOD::Node& node, const auto& /*center*/, auto /*radius*/) {
+			NodeRecord rec;
+			rec.type = node.IsLeaf() ? uint8_t(1) : uint8_t(0);
+			rec.childMask = node.childMask;
+			rec.numPoints = node.GetNumItems();
+			rec.byteOffset = currentOffset;
+			rec.byteSize = (uint64_t)node.GetNumItems() * bytesPerPoint;
+
+			if (node.GetNumItems() > 0) {
+				// write positions as int32
+				for (IDX i = node.GetFirstItemIdx(); i < node.GetLastItemIdx(); ++i) {
+					const Point& pt = points[lodIndices[i]];
+					const int32_t encoded[3] = {
+						(int32_t)ROUND2INT(((double)pt.x - offsetX) * invScale),
+						(int32_t)ROUND2INT(((double)pt.y - offsetY) * invScale),
+						(int32_t)ROUND2INT(((double)pt.z - offsetZ) * invScale)
+					};
+					file.write(encoded, sizeof(encoded));
+				}
+				// write colors as RGBA (BGR→RGB swizzle)
+				if (hasColors) {
+					for (IDX i = node.GetFirstItemIdx(); i < node.GetLastItemIdx(); ++i) {
+						const Color& c = colors[lodIndices[i]];
+						const uint8_t rgba[4] = {c[2], c[1], c[0], 255};
+						file.write(rgba, sizeof(rgba));
+					}
+				}
+				// write normals as float32
+				if (hasNormals) {
+					for (IDX i = node.GetFirstItemIdx(); i < node.GetLastItemIdx(); ++i) {
+						const Normal& n = normals[lodIndices[i]];
+						const float nf[3] = {n.x, n.y, n.z};
+						file.write(nf, sizeof(nf));
+					}
+				}
+			}
+
+			currentOffset += rec.byteSize;
+			records.push_back(rec);
+		});
+	}
+
+	// write hierarchy.bin — 22 bytes per node, BFS order (same order as records)
+	const String hierarchyFile(outputDir + _T("hierarchy.bin"));
+	{
+		File file(hierarchyFile, File::WRITE, File::CREATE | File::TRUNCATE);
+		if (!file.isOpen()) {
+			DEBUG("error: cannot create Potree hierarchy file '%s'", hierarchyFile.c_str());
+			return false;
+		}
+		for (const NodeRecord& rec : records) {
+			file.write(&rec.type, 1);
+			file.write(&rec.childMask, 1);
+			file.write(&rec.numPoints, 4);
+			file.write(&rec.byteOffset, 8);
+			file.write(&rec.byteSize, 8);
+		}
+	}
+
+	// write metadata.json
+	const String metadataFile(outputDir + _T("metadata.json"));
+	{
+		using json = nlohmann::json;
+		json metadata;
+		metadata["version"] = "2.0";
+		metadata["name"] = "pointcloud";
+		metadata["description"] = "";
+		metadata["points"] = points.size();
+		metadata["projection"] = "";
+
+		// bounding box
+		metadata["boundingBox"]["min"] = {(double)cubeAABB.ptMin.x(), (double)cubeAABB.ptMin.y(), (double)cubeAABB.ptMin.z()};
+		metadata["boundingBox"]["max"] = {(double)cubeAABB.ptMax.x(), (double)cubeAABB.ptMax.y(), (double)cubeAABB.ptMax.z()};
+
+		// encoding
+		metadata["offset"] = {offsetX, offsetY, offsetZ};
+		metadata["scale"] = {scale, scale, scale};
+		metadata["spacing"] = (double)lodOctree.GetSpacing();
+
+		// hierarchy
+		metadata["hierarchy"]["firstChunkSize"] = records.size();
+		metadata["hierarchy"]["stepSize"] = 4;
+		metadata["hierarchy"]["depth"] = lodOctree.GetMaxDepth();
+
+		// encoding: position range for int32
+		const double maxEncoded = cubeSize * invScale;
+		const json posMin = {0, 0, 0};
+		const json posMax = {maxEncoded, maxEncoded, maxEncoded};
+
+		// attributes
+		json attributes = json::array();
+		{
+			// position (int32 x 3)
+			json attr;
+			attr["name"] = "position";
+			attr["description"] = "";
+			attr["size"] = 12;
+			attr["numElements"] = 3;
+			attr["elementSize"] = 4;
+			attr["type"] = "int32";
+			attr["min"] = posMin;
+			attr["max"] = posMax;
+			attributes.push_back(std::move(attr));
+		}
+		if (hasColors) {
+			// rgba (uint8 x 4)
+			json attr;
+			attr["name"] = "rgba";
+			attr["description"] = "";
+			attr["size"] = 4;
+			attr["numElements"] = 4;
+			attr["elementSize"] = 1;
+			attr["type"] = "uint8";
+			attr["min"] = {0, 0, 0, 0};
+			attr["max"] = {255, 255, 255, 255};
+			attributes.push_back(std::move(attr));
+		}
+		if (hasNormals) {
+			// normal (float32 x 3)
+			json attr;
+			attr["name"] = "NORMAL";
+			attr["description"] = "";
+			attr["size"] = 12;
+			attr["numElements"] = 3;
+			attr["elementSize"] = 4;
+			attr["type"] = "float";
+			attr["min"] = {-1.0, -1.0, -1.0};
+			attr["max"] = {1.0, 1.0, 1.0};
+			attributes.push_back(std::move(attr));
+		}
+		metadata["attributes"] = std::move(attributes);
+
+		// write JSON file
+		std::ofstream ofs(metadataFile);
+		if (!ofs.is_open()) {
+			DEBUG("error: cannot create Potree metadata file '%s'", metadataFile.c_str());
+			return false;
+		}
+		ofs << metadata.dump(2);
+	}
+
+	DEBUG_EXTRA("Point-cloud Potree '%s' saved: %u points, %zu nodes, depth %u (%s)",
+		dirName.c_str(), points.size(), records.size(), lodOctree.GetMaxDepth(), TD_TIMER_GET_FMT().c_str());
+	return true;
+} // SavePotree
 
 // save the dense point-cloud having >=N views as PLY file
 bool PointCloud::SaveNViews(const String& fileName, uint32_t minViews, bool bLegacyTypes, bool bBinary) const
@@ -587,6 +1169,8 @@ void PointCloud::PrintStatistics(const Image* pImages, const OBB3f* pObb) const
 			);
 		}
 	}
+	if (pointViews.empty() && normals.empty() && pointWeights.empty() && colors.empty())
+		return;
 	String strViews;
 	if (!pointViews.empty()) {
 		// print views distribution
@@ -632,12 +1216,12 @@ void PointCloud::PrintStatistics(const Image* pImages, const OBB3f* pObb) const
 			// print normal/views angle distribution
 			size_t nViews(0);
 			size_t nPointsm(0), nPoints3(0), nPoints10(0), nPoints25(0), nPoints40(0), nPoints60(0), nPoints90p(0);
-			const REAL thCosAngle3(COS(D2R(3.f)));
-			const REAL thCosAngle10(COS(D2R(10.f)));
-			const REAL thCosAngle25(COS(D2R(25.f)));
-			const REAL thCosAngle40(COS(D2R(40.f)));
-			const REAL thCosAngle60(COS(D2R(60.f)));
-			const REAL thCosAngle90(COS(D2R(90.f)));
+			const REAL thCosAngle3(COS(D2R(3.0)));
+			const REAL thCosAngle10(COS(D2R(10.0)));
+			const REAL thCosAngle25(COS(D2R(25.0)));
+			const REAL thCosAngle40(COS(D2R(40.0)));
+			const REAL thCosAngle60(COS(D2R(60.0)));
+			const REAL thCosAngle90(COS(D2R(90.0)));
 			FOREACH(idx, points) {
 				const PointCloud::Point& X = points[idx];
 				const PointCloud::Normal& N = normals[idx];
@@ -708,3 +1292,5 @@ void PointCloud::PrintStatistics(const Image* pImages, const OBB3f* pObb) const
 	);
 } // PrintStatistics
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")
