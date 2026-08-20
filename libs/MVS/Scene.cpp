@@ -33,6 +33,7 @@
 #include "Scene.h"
 #include "../Math/SimilarityTransform.h"
 
+
 using namespace MVS;
 
 
@@ -46,8 +47,14 @@ using namespace MVS;
 #define SCENE_USE_OPENMP
 #endif
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("Scene   "));
 
 void Scene::Release()
 {
@@ -55,6 +62,8 @@ void Scene::Release()
 	images.Release();
 	pointcloud.Release();
 	mesh.Release();
+	obb.Reset();
+	transform = Matrix4x4f::IDENTITY;
 }
 
 bool Scene::IsValid() const
@@ -76,7 +85,7 @@ bool Scene::ImagesHaveNeighbors() const
 }
 
 
-bool Scene::LoadInterface(const String & fileName)
+bool Scene::LoadInterface(const String& fileName)
 {
 	TD_TIMER_STARTD();
 	Interface obj;
@@ -219,7 +228,7 @@ bool Scene::LoadInterface(const String & fileName)
 	return true;
 } // LoadInterface
 
-bool Scene::SaveInterface(const String & fileName, int version) const
+bool Scene::SaveInterface(const String& fileName, int version) const
 {
 	TD_TIMER_STARTD();
 	Interface obj;
@@ -259,7 +268,7 @@ bool Scene::SaveInterface(const String & fileName, int version) const
 		image.cameraID = imageData.cameraID;
 		image.ID = imageData.ID;
 		if (imageData.IsValid() && imageData.HasResolution()) {
-			Interface::Platform& platform = obj.platforms[image.platformID];;
+			Interface::Platform& platform = obj.platforms[image.platformID];
 			if (!platform.cameras[image.cameraID].HasResolution())
 				platform.SetFullK(image.cameraID, imageData.camera.K, imageData.width, imageData.height);
 		}
@@ -389,7 +398,7 @@ bool Scene::LoadDMAP(const String& fileName)
 	// load image pixels
 	const Image8U3 imageDepth(DepthMap2Image(depthMap));
 	Image8U3 imageColor;
-	if (image.ReloadImage(MAXF(image.width,image.height)))
+	if (image.ReloadImageAtPreparedResolution())
 		cv::resize(image.image, imageColor, depthMap.size());
 	else
 		imageColor = imageDepth;
@@ -434,7 +443,7 @@ bool Scene::LoadDMAP(const String& fileName)
 	}
 	#endif
 
-	DEBUG_EXTRA("Scene loaded from depth-map format - %dx%d size, %.2f%%%% coverage (%s):\n"
+	DEBUG_EXTRA("Scene loaded from depth-map format - %dx%d size, %.2f%% coverage (%s):\n"
 		"\t1 images (%u neighbors, %.2f FOV) with a total of %.2f MPixels (%.2f MPixels/image)\n"
 		"\t%u points, 0 lines",
 		depthMap.width(), depthMap.height(), 100.0*pointcloud.GetSize()/depthMap.area(), TD_TIMER_GET_FMT().c_str(),
@@ -448,7 +457,7 @@ bool Scene::LoadDMAP(const String& fileName)
 // each line store the view ID followed by the 3+ closest view IDs, ordered in decreasing overlap:
 //
 // <cam-id> <neighbor-cam-id-0> <neighbor-cam-id-1> <neighbor-cam-id-2> <...>
-// 
+//
 // for example:
 // 0 1 2 3 4
 // 1 0 2 3 4
@@ -482,7 +491,7 @@ bool Scene::LoadViewNeighbors(const String& fileName)
 		FOREACH(i, imageData.neighbors) {
 			const IIndex nID(String::FromString<IIndex>(argv[i+1], NO_ID));
 			ASSERT(nID != NO_ID);
-			imageData.neighbors[i] = ViewScore{nID, 0, 1.f, FD2R(15.f), 0.5f, 2.f+(argc-i)*0.5f};
+			imageData.neighbors[i] = ViewScore{nID, 0, 1.f, D2R(15.f), 0.5f, 2.f+(argc-i)*0.5f};
 		}
 	}
 
@@ -522,36 +531,15 @@ bool Scene::Import(const String& fileName)
 		Release();
 		return LoadDMAP(fileName);
 	}
-	if (ext == _T(".obj") || ext == _T(".gltf") || ext == _T(".glb")) {
-		// import mesh from obj/gltf file
-		Release();
+	if (ext == _T(".obj")) {
+		// import mesh from obj file
 		return mesh.Load(fileName);
 	}
-	if (ext == _T(".ply")) {
-		// import point-cloud/mesh from ply file
-		Release();
-		int nVertices(0), nFaces(0);
-		{
-		PLY ply;
-		if (!ply.read(fileName)) {
-			DEBUG_EXTRA("error: invalid PLY file");
-			return false;
-		}
-		for (int i = 0; i < ply.get_elements_count(); ++i) {
-			int elem_count;
-			LPCSTR elem_name = ply.setup_element_read(i, &elem_count);
-			if (PLY::equal_strings("vertex", elem_name)) {
-				nVertices = elem_count;
-			} else
-			if (PLY::equal_strings("face", elem_name)) {
-				nFaces = elem_count;
-			}
-		}
-		}
-		if (nVertices && nFaces)
-			return mesh.Load(fileName);
-		if (nVertices)
-			return pointcloud.Load(fileName);
+	if (ext == _T(".ply") || ext == _T(".gltf") || ext == _T(".glb")) {
+		// import point-cloud/mesh from ply/gltf file
+		if (mesh.Load(fileName))
+			return true;
+		return pointcloud.Load(fileName);
 	}
 	return false;
 } // Import
@@ -565,8 +553,10 @@ Scene::SCENE_TYPE Scene::Load(const String& fileName, bool bImport)
 	#ifdef _USE_BOOST
 	// open the input stream
 	std::ifstream fs(fileName, std::ios::in | std::ios::binary);
-	if (!fs.is_open())
+	if (!fs.is_open()) {
+		VERBOSE("error: unable to open file '%s'", fileName.c_str());
 		return SCENE_NA;
+	}
 	// load project header ID
 	char szHeader[4];
 	fs.read(szHeader, 4);
@@ -593,8 +583,10 @@ Scene::SCENE_TYPE Scene::Load(const String& fileName, bool bImport)
 	uint64_t nReserved;
 	fs.read((char*)&nReserved, sizeof(uint64_t));
 	// serialize in the current state
-	if (!SerializeLoad(*this, fs, (ARCHIVE_TYPE)nType))
+	if (!SerializeLoad(*this, fs, (ARCHIVE_TYPE)nType)) {
+		VERBOSE("error: unable to load project data");
 		return SCENE_NA;
+	}
 	// init images
 	nCalibratedImages = 0;
 	size_t nTotalPixels(0);
@@ -665,13 +657,26 @@ bool Scene::Save(const String& fileName, ARCHIVE_TYPE type) const
 
 
 // compute point-cloud with visibility info from the existing mesh
-void Scene::SampleMeshWithVisibility(unsigned maxResolution)
+//  - sampling: sampling density per squared unit area (if >0), or
+//              absolute number of points (if <0), or
+//              use existing vertices as samples (if ==0)
+void Scene::SampleMeshWithVisibility(REAL sampling, unsigned maxResolution)
 {
 	ASSERT(!mesh.IsEmpty());
-	const Depth thFrontDepth(0.985f);
 	pointcloud.Release();
-	pointcloud.points.resize(mesh.vertices.size());
-	pointcloud.pointViews.resize(mesh.vertices.size());
+	if (sampling < 0) {
+		// absolute number of points
+		mesh.SamplePoints(ROUND2INT<unsigned>(-sampling), pointcloud);
+	} else if (sampling > 0) {
+		// sampling density per squared unit area
+		mesh.SamplePoints(sampling, pointcloud);
+	} else {
+		// use existing vertices as samples
+		pointcloud.points.Join(mesh.vertices.data(), mesh.vertices.size());
+	}
+	pointcloud.pointViews.resize(pointcloud.points.size());
+	// compute visibility for each point by projecting the mesh onto each image
+	constexpr Depth thFrontDepth(0.985f);
 	#ifdef SCENE_USE_OPENMP
 	#pragma omp parallel for
 	for (int64_t _ID=0; _ID<images.size(); ++_ID) {
@@ -687,8 +692,8 @@ void Scene::SampleMeshWithVisibility(unsigned maxResolution)
 		const Camera camera(imageData.GetCamera(platforms, scaledSize));
 		DepthMap depthMap(scaledSize);
 		mesh.Project(camera, depthMap);
-		FOREACH(idxVertex, mesh.vertices) {
-			const Point3f xz(camera.TransformPointW2I3(Cast<REAL>(mesh.vertices[idxVertex])));
+		FOREACH(idxPoint, pointcloud.points) {
+			const Point3f xz(camera.TransformPointW2I3(Cast<REAL>(pointcloud.points[idxPoint])));
 			if (xz.z <= 0)
 				continue;
 			const Point2f x(xz.x, xz.y);
@@ -696,18 +701,23 @@ void Scene::SampleMeshWithVisibility(unsigned maxResolution)
 				#ifdef SCENE_USE_OPENMP
 				#pragma omp critical
 				#endif
-				pointcloud.pointViews[idxVertex].emplace_back(ID);
+				pointcloud.pointViews[idxPoint].emplace_back(ID);
 			}
 		}
 	}
+	// remove points with less than 2 views
 	RFOREACH(idx, pointcloud.points) {
-		if (pointcloud.pointViews[idx].size() < 2) {
+		if (pointcloud.pointViews[idx].size() < 2)
 			pointcloud.RemovePoint(idx);
-			continue;
-		}
-		pointcloud.points[idx] = mesh.vertices[(Mesh::VIndex)idx];
-		pointcloud.pointViews[idx].Sort();
+		#ifdef SCENE_USE_OPENMP
+		else
+			pointcloud.pointViews[idx].Sort();
+		#endif
 	}
+	DEBUG_EXTRA("Sampled mesh with visibility info: %u points from %f %s",
+		pointcloud.points.size(),
+		sampling < 0 ? -sampling : sampling > 0 ? sampling : REAL(mesh.vertices.size()),
+		sampling < 0 ? "samples" : sampling > 0 ? "sampling" : "vertices");
 } // SampleMeshWithVisibility
 /*----------------------------------------------------------------*/
 
@@ -769,8 +779,6 @@ bool Scene::ExportMeshToDepthMaps(const String& baseName)
 	return true;
 } // ExportMeshToDepthMaps
 /*----------------------------------------------------------------*/
-
-
 // create a virtual point-cloud to be used to initialize the neighbor view
 // from image pair points at the intersection of the viewing directions
 bool Scene::EstimateNeighborViewsPointCloud(unsigned maxResolution)
@@ -831,8 +839,8 @@ bool Scene::EstimateNeighborViewsPointCloud(unsigned maxResolution)
 // and select the best views for reconstructing the dense point-cloud;
 // extract also all 3D points seen by the reference image;
 // (inspired by: "Multi-View Stereo for Community Photo Collections", Goesele, 2007)
-//  - nInsideROI: 0 - ignore ROI, 1 - weight more ROI points, 2 - consider only ROI points
-bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, unsigned nInsideROI)
+//  - fWeightPointInsideROI: 0 - ignore ROI, between 0 and 1 - weight inside ROI points, 1 - consider only ROI points
+bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI)
 {
 	ASSERT(points.empty());
 
@@ -853,21 +861,17 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 		nMinPointViews = nCalibratedImages;
 	unsigned nPoints = 0;
 	imageData.avgDepth = 0;
+	ASSERT(fWeightPointInsideROI >= 0 && fWeightPointInsideROI <= 1);
+	const bool bCheckInsideROI(fWeightPointInsideROI > 0 && IsBounded());
+	const float fWeightPointOutsideROI(bCheckInsideROI ? 1.f - fWeightPointInsideROI : 1.f);
 	const float sigmaAngleSmall(-1.f/(2.f*SQUARE(fOptimAngle*0.38f)));
 	const float sigmaAngleLarge(-1.f/(2.f*SQUARE(fOptimAngle*0.7f)));
-	const bool bCheckInsideROI(nInsideROI > 0 && IsBounded());
 	FOREACH(idx, pointcloud.points) {
 		const PointCloud::ViewArr& views = pointcloud.pointViews[idx];
 		ASSERT(views.IsSorted());
 		if (views.FindFirst(ID) == PointCloud::ViewArr::NO_INDEX)
 			continue;
 		const PointCloud::Point& point = pointcloud.points[idx];
-		float wROI(1.f);
-		if (bCheckInsideROI && !obb.Intersects(point)) {
-			if (nInsideROI > 1)
-				continue;
-			wROI = 0.7f;
-		}
 		const Depth depth((float)imageData.camera.PointDepth(point));
 		ASSERT(depth > 0);
 		if (depth <= 0)
@@ -875,6 +879,9 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 		// store this point
 		if (views.size() >= nMinPointViews)
 			points.push_back((uint32_t)idx);
+		const float wROI(bCheckInsideROI && obb.Intersects(point) ? fWeightPointInsideROI : fWeightPointOutsideROI);
+		if (wROI <= 0)
+			continue;
 		imageData.avgDepth += depth;
 		++nPoints;
 		// score shared views
@@ -932,9 +939,11 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 				if (views.FindFirst(IDB) == PointCloud::ViewArr::NO_INDEX)
 					continue;
 				const PointCloud::Point& point = pointcloud.points[idx];
-				Point2f& ptA = projs.emplace_back(imageData.camera.ProjectPointP(point));
-				Point2f ptB = imageDataB.camera.ProjectPointP(point);
-				if (!imageData.camera.IsInside(ptA, boundsA) || !imageDataB.camera.IsInside(ptB, boundsB))
+				Point2f ptB = std::get<0>(imageDataB.camera.ProjectPointP(point));
+				if (!imageDataB.camera.IsInside(ptB, boundsB))
+					continue;
+				Point2f& ptA = projs.emplace_back(std::get<0>(imageData.camera.ProjectPointP(point)));
+				if (!imageData.camera.IsInside(ptA, boundsA))
 					projs.RemoveLast();
 			}
 			ASSERT(projs.size() <= score.points);
@@ -971,7 +980,7 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 	return true;
 } // SelectNeighborViews
 
-void Scene::SelectNeighborViews(unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, unsigned nInsideROI)
+void Scene::SelectNeighborViews(unsigned nMinViews, unsigned nMinPointViews, float fOptimAngle, float fWeightPointInsideROI)
 {
 	#ifdef SCENE_USE_OPENMP
 	for (int_t ID=0; ID<(int_t)images.size(); ++ID) {
@@ -981,7 +990,7 @@ void Scene::SelectNeighborViews(unsigned nMinViews, unsigned nMinPointViews, flo
 	#endif
 		// select image neighbors
 		IndexArr points;
-		SelectNeighborViews(idxImage, points, nMinViews, nMinPointViews, fOptimAngle, nInsideROI);
+		SelectNeighborViews(idxImage, points, nMinViews, nMinPointViews, fOptimAngle, fWeightPointInsideROI);
 	}
 } // SelectNeighborViews
 /*----------------------------------------------------------------*/
@@ -1121,7 +1130,7 @@ bool Scene::ExportLinesPLY(const String& fileName, const CLISTDEF0IDX(Line3f,uin
 		v.x = line.pt2.x(); v.y = line.pt2.y(); v.z = line.pt2.z();
 		ply.put_element(&v);
 	}
-	
+
 	// describe what properties go into the edge elements
 	if (colors) {
 		ply.describe_property("edge", 5, edge_props);
@@ -1140,7 +1149,7 @@ bool Scene::ExportLinesPLY(const String& fileName, const CLISTDEF0IDX(Line3f,uin
 			ply.put_element(&edge);
 		}
 	}
-	
+
 	// write to file
 	return ply.header_complete();
 } // ExportLinesPLY
@@ -1178,8 +1187,8 @@ unsigned Scene::Split(ImagesChunkArr& chunks, float maxArea, int depthMapStep) c
 				continue;
 			const IIndex numPointsBegin(visibility.size());
 			const Camera camera(imageData.GetCamera(platforms, depthData.depthMap.size()));
-			for (int r=(depthData.depthMap.rows%depthMapStep)/2; r<depthData.depthMap.rows; r+=depthMapStep) {
-				for (int c=(depthData.depthMap.cols%depthMapStep)/2; c<depthData.depthMap.cols; c+=depthMapStep) {
+			for (int r=(depthData.depthMap.rows%depthMapStep)/2; r<depthData.depthMap.rows; r++) {
+				for (int c=(depthData.depthMap.cols%depthMapStep)/2; c<depthData.depthMap.cols; c++) {
 					const Depth depth = depthData.depthMap(r,c);
 					if (depth <= 0)
 						continue;
@@ -1608,7 +1617,7 @@ bool Scene::AlignTo(const Scene& scene)
 		DEBUG("error: the two scenes differ in number of cameras");
 		return false;
 	}
-	CLISTDEF0(Point3) points, pointsRef;
+	Point3Arr points, pointsRef;
 	FOREACH(idx, images) {
 		const Image& image = images[idx];
 		if (!image.IsValid())
@@ -1619,8 +1628,7 @@ bool Scene::AlignTo(const Scene& scene)
 		points.emplace_back(image.camera.C);
 		pointsRef.emplace_back(imageRef.camera.C);
 	}
-	Matrix4x4 transform;
-	SimilarityTransform(points, pointsRef, transform);
+	Matrix4x4 transform = SimilarityTransform(points, pointsRef);
 	Matrix3x3 rotation; Point3 translation; REAL scale;
 	DecomposeSimilarityTransform(transform, rotation, translation, scale);
 	Transform(rotation, translation, scale);
@@ -1764,141 +1772,659 @@ Scene Scene::SubScene(const IIndexArr& idxImages) const
 	return subScene;
 }
 
-// remove all points outside the given bounding-box and keep only the cameras that see the remaining points
-//  - minNumPoints: minimum number of points to keep the camera
-Scene& Scene::CropToROI(const OBB3f& obb, unsigned minNumPoints)
+// score the plausibility that the given direction points upward, based on near-universal
+// facts of photogrammetric captures; when the mean image-down direction is coherent and
+// informative it decides alone (photos are rarely taken upside-down), otherwise fall back
+// to: cameras sit above the scene, and cameras look (somewhat downward) toward the scene;
+// returns >0 if the direction points up, <0 if it points down, ~0 if undecidable;
+// fixed-stride subsampling step bounding the samples taken from the cloud: robust
+// aggregates are preserved while the cost stops growing with the cloud size
+static size_t ClampedSampleStep(const PointCloud& pointcloud, size_t maxNumSamples)
 {
-	ASSERT(obb.IsValid());
-	// remove geometry outside the ROI
-	if (!pointcloud.IsEmpty())
-		pointcloud.RemovePointsOutside(obb);
-	if (!mesh.IsEmpty())
-		mesh.RemoveFacesOutside(obb);
-	// remove cameras that do not see any points
-	if (minNumPoints == 0 || !pointcloud.IsValid())
-		return *this;
-	UnsignedArr visibility(images.size());
-	visibility.Memset(0);
-	for (const PointCloud::ViewArr& views: pointcloud.pointViews) {
-		for (const PointCloud::View& idxImage: views) {
-			const Image& imageData = images[idxImage];
-			if (!imageData.IsValid())
-				continue;
-			++visibility[idxImage];
-		}
-	}
-	IIndexArr idxImages;
-	FOREACH(idxImage, images) {
-		const Image& imageData = images[idxImage];
-		if (!imageData.IsValid())
-			continue;
-		if (visibility[idxImage] >= minNumPoints)
-			idxImages.emplace_back(idxImage);
-	}
-	return *this = SubScene(idxImages);
+	return MAXF<size_t>(1, pointcloud.points.size()/maxNumSamples);
 }
-/*----------------------------------------------------------------*/
 
-
-// estimate region-of-interest based on camera positions, directions and sparse points
-// scale specifies the ratio of the ROI's diameter
-bool Scene::EstimateROI(int nEstimateROI, float scale)
+// if pSeparation is given, it receives the camera-to-scene centroid separation along the
+// direction relative to the scene spread (near zero when perpendicular to the true vertical)
+static float UpSignScore(const Eigen::Vector3f& g, const ImageArr& images, const PointCloud& pointcloud, float* pSeparation = NULL)
 {
-	ASSERT(nEstimateROI >= 0 && nEstimateROI <= 2 && scale > 0);
-	if (nEstimateROI == 0) {
-		DEBUG_ULTIMATE("The scene will be considered as unbounded (no ROI)");
-		return false;
-	}
-	if (!pointcloud.IsValid()) {
-		VERBOSE("error: no valid point-cloud for the ROI estimation");
-		return false;
-	}
-	CameraArr cameras;
-	FOREACH(i, images) {
-		const Image& imageData = images[i];
-		if (!imageData.IsValid())
+	if (pSeparation)
+		*pSeparation = 0;
+	Eigen::Vector3f meanC(Eigen::Vector3f::Zero()), meanFwd(Eigen::Vector3f::Zero()), meanDown(Eigen::Vector3f::Zero());
+	size_t numCameras(0);
+	for (const Image& image: images) {
+		if (!image.IsValid())
 			continue;
-		cameras.emplace_back(imageData.camera);
+		meanC += Eigen::Vector3f(Cast<float>(image.camera.C));
+		meanFwd += Eigen::Vector3f(Cast<float>(Point3(image.camera.R.row(2))));
+		meanDown += Eigen::Vector3f(Cast<float>(Point3(image.camera.R.row(1))));
+		++numCameras;
 	}
-	const unsigned nCameras = cameras.size();
-	if (nCameras < 3) {
-		VERBOSE("warning: not enough valid views for the ROI estimation");
-		return false;
-	}
-	// compute the camera center and the direction median
-	FloatArr x(nCameras), y(nCameras), z(nCameras), nx(nCameras), ny(nCameras), nz(nCameras);
-	FOREACH(i, cameras) {
-		const Point3f camC(cameras[i].C);
-		x[i] = camC.x;
-		y[i] = camC.y;
-		z[i] = camC.z;
-		const Point3f camDirect(cameras[i].Direction());
-		nx[i] = camDirect.x;
-		ny[i] = camDirect.y;
-		nz[i] = camDirect.z;
-	}
-	const CMatrix camCenter(x.GetMedian(), y.GetMedian(), z.GetMedian());
-	CMatrix camDirectMean(nx.GetMean(), ny.GetMean(), nz.GetMean());
-	const float camDirectMeanLen = (float)norm(camDirectMean);
-	if (!ISZERO(camDirectMeanLen))
-		camDirectMean /= camDirectMeanLen;
-	if (camDirectMeanLen > FSQRT_2 / 2.f && nEstimateROI == 2) {
-		VERBOSE("The camera directions mean is unbalanced; the scene will be considered unbounded (no ROI)");
-		return false;
-	}
-	DEBUG_ULTIMATE("The camera positions median is (%f,%f,%f), directions mean and norm are (%f,%f,%f), %f",
-				   camCenter.x, camCenter.y, camCenter.z, camDirectMean.x, camDirectMean.y, camDirectMean.z, camDirectMeanLen);
-	FloatArr cameraDistances(nCameras);
-	FOREACH(i, cameras)
-		cameraDistances[i] = (float)cameras[i].Distance(camCenter);
-	// estimate scene center and radius
-	const float camDistMed = cameraDistances.GetMedian();
-	const float camShiftCoeff = TAN(ASIN(CLAMP(camDirectMeanLen, 0.f, 0.999f)));
-	const CMatrix sceneCenter = camCenter + camShiftCoeff * camDistMed * camDirectMean;
-	FOREACH(i, cameras) {
-		if (cameras[i].PointDepth(sceneCenter) <= 0 && nEstimateROI == 2) {
-			VERBOSE("Found a camera not pointing towards the scene center; the scene will be considered unbounded (no ROI)");
-			return false;
+	if (numCameras == 0)
+		return 0;
+	meanC /= (float)numCameras;
+	// center of the scene points and their spread along g: median and MAD, as this
+	// runs on the raw sparse cloud, before the outliers ROI estimation removes are
+	// gone, and a mean/variance lets a few gross outliers collapse the separation
+	float sAbove(0);
+	bool hasAbove(false);
+	if (pointcloud.IsValid() && pointcloud.points.size() >= 100) {
+		const size_t sampleStep(ClampedSampleStep(pointcloud, 10000));
+		FloatArr projs(0, (IDX)(pointcloud.points.size()/sampleStep+1));
+		for (size_t i = 0; i < pointcloud.points.size(); i += sampleStep)
+			projs.push_back(g.dot(Eigen::Vector3f(pointcloud.points[(IDX)i])));
+		const float center(projs.GetMedian());
+		for (float& proj: projs)
+			proj = ABS(proj - center);
+		const float spread(projs.GetMedian() * 1.4826f); // MAD scaled to match a sigma
+		if (spread > 0) {
+			sAbove = (meanC.dot(g) - center) / spread;
+			hasAbove = true;
+			if (pSeparation)
+				*pSeparation = ABS(sAbove);
 		}
-		cameraDistances[i] = (float)cameras[i].Distance(sceneCenter);
 	}
-	const float sceneRadius = cameraDistances.GetMax();
-	DEBUG_ULTIMATE("The estimated scene center is (%f,%f,%f), radius is %f",
-				   sceneCenter.x, sceneCenter.y, sceneCenter.z, sceneRadius);
-	Point3fArr ptsInROI;
-	FOREACH(i, pointcloud.points) {
-		const PointCloud::Point& point = pointcloud.points[i];
-		const PointCloud::ViewArr& views = pointcloud.pointViews[i];
-		FOREACH(j, views) {
-			const Image& imageData = images[views[j]];
-			if (!imageData.IsValid())
-				continue;
-			const Camera& camera = imageData.camera;
-			if (camera.PointDepth(point) < sceneRadius * 2.0f) {
-				ptsInROI.emplace_back(point);
-				break;
+	// the mean image-down direction decides alone when coherent and not (near) perpendicular
+	const float downCoherence(meanDown.norm()/(float)numCameras);
+	const float downScore(downCoherence > 0 ? -meanDown.normalized().dot(g) : 0.f);
+	if (downCoherence > 0.7f && ABS(downScore) > 0.25f)
+		return downScore;
+	float score(0);
+	if (hasAbove)
+		score += CLAMP(sAbove, -1.f, 1.f);
+	score += -meanFwd.dot(g)/(float)numCameras * 0.5f;
+	if (ABS(score) < 0.1f)
+		return downScore; // last resort, however weak
+	return score;
+}
+
+// estimate the gravity (up) direction of the scene by combining two independent cues:
+//  - camera roll consensus: photos are typically taken with (near) zero roll, so gravity is
+//    perpendicular to the image x-axis of most cameras (or their y-axis if in portrait
+//    orientation); solved robustly by scoring candidate directions sampled from pairs of
+//    camera x-axes, then refined on the supporting cameras
+//  - ground plane: the dominant RANSAC plane of the sparse point-cloud, considered only if
+//    well supported and with most of the scene on the camera side (a boundary, as a ground is)
+// the two cues are cross-checked: agreement confirms the estimate (the camera gravity is then
+// used, being immune to terrain slope), a near-perpendicular plane is discarded as a facade,
+// and when the cameras are inconclusive (e.g. all sharing one heading) only a dominant
+// ground-like plane is trusted; an ill-conditioned camera consensus (e.g. a single flight
+// heading, where the support test cannot tell true gravity from the shared image-down axis)
+// is accepted only if externally validated by gravity separating the cameras from the scene;
+// returns false (leaving up unchanged) if no confident estimate is found
+bool Scene::EstimateGravityDirection(Point3f& up) const
+{
+	const float maxSinRoll(SIN(D2R(12.f))); // max |sin(roll)| for a camera to support a candidate
+	const float minCosConfirm(COS(D2R(20.f))); // min cos(angle) for the two cues to confirm each other
+	// collect the world-space image axes of the valid cameras
+	std::vector<Eigen::Vector3f> xAxes, yAxes;
+	for (const Image& image: images) {
+		if (!image.IsValid())
+			continue;
+		xAxes.emplace_back(Cast<float>(Point3(image.camera.R.row(0))));
+		yAxes.emplace_back(Cast<float>(Point3(image.camera.R.row(1))));
+	}
+	const size_t numCameras(xAxes.size());
+	if (numCameras < 4)
+		return false;
+	Eigen::Vector3f meanDown(Eigen::Vector3f::Zero());
+	for (const Eigen::Vector3f& y: yAxes)
+		meanDown += y;
+	// a camera supports a gravity candidate if the candidate is (nearly) perpendicular
+	// to the camera horizontal axis: x in landscape, y in portrait orientation
+	const auto SupportsCandidate = [&](const Eigen::Vector3f& g, size_t i) {
+		return MINF(ABS(g.dot(xAxes[i])), ABS(g.dot(yAxes[i]))) <= maxSinRoll;
+	};
+	const auto CountSupport = [&](const Eigen::Vector3f& g) {
+		size_t numSupport(0);
+		for (size_t i = 0; i < numCameras; ++i)
+			if (SupportsCandidate(g, i))
+				++numSupport;
+		return numSupport;
+	};
+	// camera cue: candidates from pairs of camera x-axes (y-axes for portrait orientation)
+	// with different heading (the cross product of two zero-roll horizontal axes is
+	// vertical), plus the mean image-down direction (exact for level photos)
+	std::vector<Eigen::Vector3f> candidates;
+	if (meanDown.norm() > 0.5f*numCameras)
+		candidates.emplace_back(meanDown.normalized());
+	// geo-aligned scenes carry the vertical for free: the stored transform maps the
+	// absolute (ENU, +Z up) frame to the local one, so the local vertical is its third
+	// column; only a candidate though, it still needs camera support to be selected
+	if (HasTransform()) {
+		const Eigen::Vector3f enuUp(
+			(float)transform(0,2), (float)transform(1,2), (float)transform(2,2));
+		const float norm(enuUp.norm());
+		if (norm > FLT_EPSILON)
+			candidates.emplace_back(enuUp/norm);
+	}
+	const size_t stride(MAXF<size_t>(1, numCameras/16));
+	for (const std::vector<Eigen::Vector3f>* axes: {&xAxes, &yAxes}) {
+		for (size_t offset = stride; offset <= numCameras/2; offset += stride) {
+			for (size_t i = 0; i < numCameras; i += stride) {
+				const Eigen::Vector3f cand((*axes)[i].cross((*axes)[(i+offset)%numCameras]));
+				const float norm(cand.norm());
+				if (norm > 0.2f) // skip near-parallel pairs
+					candidates.emplace_back(cand/norm);
 			}
 		}
 	}
-	obb.Set(AABB3f(ptsInROI.begin(), ptsInROI.size()).EnlargePercent(scale));
-	#if TD_VERBOSE != TD_VERBOSE_OFF
-	if (VERBOSITY_LEVEL > 2) {
-		VERBOSE("Set the ROI with the AABB of position (%f,%f,%f) and extent (%f,%f,%f)",
-			    obb.m_pos[0], obb.m_pos[1], obb.m_pos[2], obb.m_ext[0], obb.m_ext[1], obb.m_ext[2]);
-	} else {
-		VERBOSE("Set the ROI by the estimated core points");
+	size_t bestSupport(0);
+	Eigen::Vector3f gCam(Eigen::Vector3f::Zero());
+	for (const Eigen::Vector3f& cand: candidates) {
+		const size_t support(CountSupport(cand));
+		if (bestSupport < support) {
+			bestSupport = support;
+			gCam = cand;
+		}
 	}
-	#endif
+	bool camConditioned(false);
+	if (bestSupport > 0) {
+		// refine: gravity minimizes the sum of squared dot products with the
+		// supporting cameras' horizontal axes (smallest eigenvector); the solution
+		// is well conditioned only if the horizontal axes span multiple headings
+		Eigen::Matrix3f M(Eigen::Matrix3f::Zero());
+		for (size_t i = 0; i < numCameras; ++i) {
+			if (!SupportsCandidate(gCam, i))
+				continue;
+			const Eigen::Vector3f& h(ABS(gCam.dot(xAxes[i])) <= ABS(gCam.dot(yAxes[i])) ? xAxes[i] : yAxes[i]);
+			M += h*h.transpose();
+		}
+		const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(M);
+		if (es.info() == Eigen::Success) {
+			camConditioned = es.eigenvalues()(1) > 0.03f*es.eigenvalues().sum();
+			const Eigen::Vector3f refined(es.eigenvectors().col(0));
+			const size_t refinedSupport(CountSupport(refined));
+			if (refinedSupport > bestSupport || (camConditioned && refinedSupport == bestSupport)) {
+				bestSupport = refinedSupport;
+				gCam = refined;
+			}
+		}
+	}
+	const float camConfidence((float)bestSupport/numCameras);
+	// ground plane cue from the sparse point-cloud
+	Eigen::Vector3f gPlane(Eigen::Vector3f::Zero());
+	float planeSupport(0);
+	if (pointcloud.IsValid() && pointcloud.points.size() >= 100) {
+		Point3fArr samples;
+		const size_t sampleStep(ClampedSampleStep(pointcloud, 20000));
+		for (size_t i = 0; i < pointcloud.points.size(); i += sampleStep)
+			samples.emplace_back(pointcloud.points[(IDX)i]);
+		Planef plane;
+		double maxThreshold(DBL_MAX);
+		const unsigned numInliers(EstimatePlane(samples, plane, maxThreshold, NULL, 256));
+		if (numInliers >= samples.size()/5) {
+			// orient the normal such that the cameras lie on its positive side
+			float camSide(0);
+			for (const Image& image: images)
+				if (image.IsValid())
+					camSide += plane.Distance(Cast<float>(image.camera.C));
+			if (camSide < 0)
+				plane.Negate();
+			// ground-like: the scene lies (almost) entirely on the camera side of the plane
+			const float distTolerance(3*(float)maxThreshold);
+			size_t numAbove(0);
+			for (const Point3f& X: samples)
+				if (plane.Distance(X) >= -distTolerance)
+					++numAbove;
+			if ((float)numAbove/samples.size() >= 0.85f) {
+				gPlane = plane.m_vN;
+				planeSupport = (float)numInliers/samples.size();
+			}
+		}
+	}
+	// arbitrate between the two cues
+	const bool hasCam(camConfidence >= 0.6f);
+	const bool hasPlane(planeSupport > 0);
+	// an ill-conditioned camera solution can still be validated externally: gravity must
+	// separate the cameras from the scene they photograph, while the degenerate solution
+	// (the shared image-down axis of a single-heading capture) is perpendicular to it
+	float camSeparation(0);
+	const float camScore(hasCam ? UpSignScore(gCam, images, pointcloud, &camSeparation) : 0.f);
+	const bool camPlausible(camConditioned || camSeparation > 0.2f);
+	Eigen::Vector3f g;
+	bool bPlaneOriented(false); // set if g comes from the plane cue, whose sign is already fixed
+	if (hasCam && hasPlane) {
+		const float cosAngle(ABS(gCam.dot(gPlane)));
+		if (cosAngle >= minCosConfirm) {
+			// the cues confirm each other: use the camera gravity, immune to terrain slope,
+			// unless it is ill-conditioned (e.g. a single flight heading), in which case the
+			// ground plane normal is the only reliable anchor
+			if (camConditioned) {
+				g = gCam;
+			} else {
+				g = gPlane;
+				bPlaneOriented = true;
+			}
+			DEBUG_ULTIMATE("Gravity direction confirmed by cameras (%.0f%% support) and ground plane (%.0f%% inliers): %.1f deg apart",
+				camConfidence*100, planeSupport*100, R2D(ACOS(MINF(cosAngle, 1.f))));
+		} else if (cosAngle <= SIN(D2R(20.f))) {
+			// near-perpendicular dominant plane: a facade, not the ground; but only a
+			// validated camera estimate may overrule it
+			if (!camPlausible) {
+				DEBUG_ULTIMATE("error: ill-conditioned camera gravity cue and the dominant plane is vertical");
+				return false;
+			}
+			g = gCam;
+			DEBUG_ULTIMATE("Gravity direction set from cameras (%.0f%% support); dominant plane discarded as vertical", camConfidence*100);
+		} else if (camConditioned) {
+			// conflicting plane (e.g. sloped terrain): trust the well-conditioned camera consensus
+			g = gCam;
+			DEBUG_ULTIMATE("Gravity direction set from cameras (%.0f%% support); dominant plane conflicts (%.1f deg apart)",
+				camConfidence*100, R2D(ACOS(MINF(cosAngle, 1.f))));
+		} else {
+			DEBUG_ULTIMATE("error: camera and ground-plane gravity cues conflict (%.1f deg apart)", R2D(ACOS(MINF(cosAngle, 1.f))));
+			return false;
+		}
+	} else if (hasCam) {
+		if (!camPlausible) {
+			DEBUG_ULTIMATE("error: ill-conditioned camera gravity cue (%.0f%% support) and no ground plane to validate it", camConfidence*100);
+			return false;
+		}
+		g = gCam;
+		DEBUG_ULTIMATE("Gravity direction set from cameras (%.0f%% support); no ground plane found", camConfidence*100);
+	} else if (planeSupport >= 0.5f) {
+		// cameras are inconclusive: accept only a dominant ground-like plane
+		g = gPlane;
+		bPlaneOriented = true;
+		DEBUG_ULTIMATE("Gravity direction set from the ground plane (%.0f%% inliers); cameras inconclusive (%.0f%% support)",
+			planeSupport*100, camConfidence*100);
+	} else {
+		DEBUG_ULTIMATE("error: no confident gravity direction estimate (cameras %.0f%%, plane %.0f%%)",
+			camConfidence*100, planeSupport*100);
+		return false;
+	}
+	// orient the direction upward; the plane normal is already oriented toward the cameras,
+	// a camera-sourced direction has an arbitrary sign and is oriented by scene geometry
+	if (!bPlaneOriented && camScore < 0)
+		g = -g;
+	up = Point3f(g.x(), g.y(), g.z());
+	return true;
+} // EstimateGravityDirection
+/*----------------------------------------------------------------*/
+
+// interval covering the given samples with a weight fraction `tail` trimmed at each end;
+// at least one sample (and proportionally more for larger sets) is always trimmed per end,
+// so that a single extreme outlier cannot set the bound when the set is small
+static std::pair<float,float> WeightedQuantiles(std::vector<std::pair<float,float>>& valueWeights, float tail)
+{
+	ASSERT(!valueWeights.empty());
+	std::sort(valueWeights.begin(), valueWeights.end());
+	double totalWeight(0);
+	for (const auto& vw: valueWeights)
+		totalWeight += vw.second;
+	const double tailWeight(totalWeight*tail);
+	const size_t minTrim(MAXF<size_t>(1, (size_t)((float)valueWeights.size()*tail)));
+	std::pair<float,float> interval;
+	double cumWeight(0);
+	for (size_t i = 0; i < valueWeights.size(); ++i) {
+		interval.first = valueWeights[i].first;
+		if ((cumWeight += valueWeights[i].second) >= tailWeight && i >= minTrim)
+			break;
+	}
+	cumWeight = 0;
+	for (size_t i = valueWeights.size(); i-- > 0; ) {
+		interval.second = valueWeights[i].first;
+		if ((cumWeight += valueWeights[i].second) >= tailWeight && valueWeights.size()-1-i >= minTrim)
+			break;
+	}
+	return interval;
+}
+
+// extend the given upper bound over the candidate coordinates beyond it, for as long as
+// the gaps between consecutive points stay small (gap-connectivity); when bDropIsolated,
+// candidates with no other candidate within maxGap cannot extend the bound (a lone
+// floater is noise, real structure has local support)
+static float GrowBound(FloatArr& coords, float bound, float maxGap, bool bDropIsolated = false)
+{
+	coords.Sort();
+	if (bDropIsolated) {
+		FloatArr supported(0, coords.size());
+		for (IDX i = 0; i < coords.size(); ++i) {
+			const bool nearPrev(i > 0 && coords[i]-coords[i-1] <= maxGap);
+			const bool nearNext(i+1 < coords.size() && coords[i+1]-coords[i] <= maxGap);
+			if (nearPrev || nearNext)
+				supported.push_back(coords[i]);
+		}
+		coords.Swap(supported);
+	}
+	for (float c: coords) {
+		if (c - bound > maxGap)
+			break;
+		if (c > bound)
+			bound = c;
+	}
+	return bound;
+}
+
+// estimate the region-of-interest (ROI) based on the known poses and sparse point-cloud
+//  - scaleROI: ROI scale factor, multipled after computation
+//  - upAxis: indicates the gravity direction (0 for x, 1 for y, 2 for z, -1 for auto-detect)
+bool Scene::EstimateROI(float scaleROI, int upAxis)
+{
+	if (!pointcloud.IsValid() || pointcloud.points.size() < 100 || images.size() < 4)
+		return false;
+	// work on a bounded uniform subsample of the cloud: all the statistics below are
+	// robust aggregates that a fixed-stride subset preserves, while the cost of the
+	// weighting (K-NN, reprojections) stops growing with the cloud size
+	UnsignedArr sampleIndices;
+	{
+		const size_t numPoints(pointcloud.points.size());
+		const size_t sampleStep(ClampedSampleStep(pointcloud, 200000));
+		sampleIndices.Reserve(numPoints/sampleStep+1);
+		for (size_t i = 0; i < numPoints; i += sampleStep)
+			sampleIndices.push_back((unsigned)i);
+	}
+	// determine the up direction first, as both the tower detection and the box fit
+	// depend on it: user-provided axis, otherwise estimated from cameras and geometry
+	Eigen::Vector3f up;
+	bool bHasUp(false);
+	if (upAxis >= 0) {
+		ASSERT(upAxis < 3);
+		up = Eigen::Vector3f::Unit(upAxis);
+		// the user picks only the axis; orient its sign from the scene geometry so that
+		// up points skyward regardless of the world coordinate convention (e.g. -Y up)
+		if (UpSignScore(up, images, pointcloud) < 0)
+			up = -up;
+		bHasUp = true;
+	} else {
+		Point3f estimatedUp;
+		if (EstimateGravityDirection(estimatedUp)) {
+			up = Eigen::Vector3f(estimatedUp.x, estimatedUp.y, estimatedUp.z);
+			bHasUp = true;
+		}
+	}
+	float medianNeighborDistance(0);
+	FloatArr pointWeights = ROIPointWeights(sampleIndices, medianNeighborDistance);
+	// compute threshold using robust statistics
+	const auto [median, trustRegionSize] = ComputeX84Threshold(pointWeights.data(), pointWeights.size(), 0.7f);
+	Line3f camCenterLine;
+	const Point3f upPoint(bHasUp ? Point3f(up.x(), up.y(), up.z()) : Point3f());
+	const bool isTower(ComputeCenterLine(camCenterLine, bHasUp ? &upPoint : NULL));
+	float threshold = isTower ? (median + 2*trustRegionSize) : (median - trustRegionSize / 2);
+	// clamp the threshold such that the retained fraction stays inside a sane band,
+	// guarding against weight distributions whose shape defeats the X84 assumptions
+	{
+		const float minFrac(isTower ? 0.08f : 0.25f);
+		const float maxFrac(isTower ? 0.40f : 0.90f);
+		size_t numAbove(0);
+		for (float weight: pointWeights)
+			if (weight > threshold)
+				++numAbove;
+		const float frac((float)numAbove/(float)pointWeights.size());
+		if (frac < minFrac || frac > maxFrac) {
+			const float targetFrac(frac < minFrac ? minFrac : maxFrac);
+			FloatArr sorted(pointWeights);
+			threshold = sorted.GetNth((IDX)((1.f-targetFrac)*(float)(sorted.size()-1)));
+		}
+	}
+	DEBUG_ULTIMATE("ROI threshold median: %f, trust region size: %f, threshold: %f", median, trustRegionSize, threshold);
+	// keep only points above the threshold
+	std::vector<Eigen::Vector3f> points;
+	points.reserve(sampleIndices.size());
+	FloatArr weights(0, sampleIndices.size());
+	FOREACH(i, sampleIndices)
+		if (pointWeights[i] > threshold) {
+			points.emplace_back(Cast<float>(pointcloud.points[sampleIndices[i]]));
+			weights.push_back(pointWeights[i]);
+		}
+	if (points.size() < 30) {
+		VERBOSE("error: ROI estimation failed: too few points above the weight threshold (%u)", (unsigned)points.size());
+		return false;
+	}
+	const float looseThreshold(isTower ? median : median - 2*trustRegionSize);
+	// derive the core bounds for the given orientation, grow them over gap-connected
+	// structure, and apply the margin; upAligned indicates the local z axis is the up
+	// direction (enabling the weight-free vertical growth)
+	const auto FitBounds = [&](const OBB3f::MATRIX& R, bool upAligned) {
+		// support-driven bounds: per-axis core interval from the weighted quantiles of the
+		// high-confidence points (robust to isolated outliers)
+		Eigen::Vector3f lo, hi;
+		{
+			std::vector<std::pair<float,float>> valueWeights(points.size());
+			for (int a = 0; a < 3; ++a) {
+				for (size_t i = 0; i < points.size(); ++i)
+					valueWeights[i] = std::make_pair(R.row(a).dot(points[i]), weights[i]);
+				const std::pair<float,float> interval(WeightedQuantiles(valueWeights, 0.01f));
+				lo[a] = interval.first;
+				hi[a] = interval.second;
+			}
+		}
+		// grow the bounds to include gap-connected structure that scored below the threshold:
+		// vertically inside the core footprint without any weight requirement in either
+		// direction (e.g. a tower top or a pit floor, penalized by all weight cues for being
+		// far from the cameras and sparse), and horizontally inside the core interval of the
+		// other axes for moderate-confidence points (e.g. the scene periphery), stopping where
+		// the point support breaks; each axis uses a gap tolerance derived from its own extent
+		// (floored by the cloud spacing) so thin axes are not inflated by the large ones, and
+		// the pass is iterated once more with the grown gates so corner-adjacent structure can
+		// follow; the weight-free vertical growth considers the full cloud (its candidates
+		// need no weights) but drops isolated candidates, so single floaters cannot extend it
+		const Eigen::Vector3f coreLo(lo), coreHi(hi);
+		// the rotation is fixed for the whole fit, so project the moderate-confidence
+		// candidates once: the two growth iterations differ only in their gates
+		std::vector<Eigen::Vector3f> candidates;
+		candidates.reserve(sampleIndices.size());
+		FOREACH(i, sampleIndices)
+			if (pointWeights[i] > looseThreshold)
+				candidates.emplace_back(R * Eigen::Vector3f(Cast<float>(pointcloud.points[sampleIndices[i]])));
+		for (int iter = 0; iter < 2; ++iter) {
+			Eigen::Vector3f maxGap;
+			for (int a = 0; a < 3; ++a)
+				maxGap[a] = MAXF((hi[a]-lo[a])*0.05f, medianNeighborDistance*2);
+			const Eigen::Vector3f gateLo(lo), gateHi(hi);
+			const auto InsideGate = [&](const Eigen::Vector3f& q, int b, int c) {
+				return q[b] >= gateLo[b] && q[b] <= gateHi[b] && q[c] >= gateLo[c] && q[c] <= gateHi[c];
+			};
+			FloatArr grow[3][2]; // per axis: candidates beyond hi, beyond lo (negated)
+			for (const Eigen::Vector3f& q: candidates) {
+				for (int a = 0; a < 3; ++a) {
+					if (upAligned && a == 2)
+						continue; // covered by the weight-free pass below, which sees the full cloud
+					if (!InsideGate(q, (a+1)%3, (a+2)%3))
+						continue;
+					if (q[a] > gateHi[a])
+						grow[a][0].push_back(q[a]);
+					else if (q[a] < gateLo[a])
+						grow[a][1].push_back(-q[a]);
+				}
+			}
+			if (upAligned) {
+				FOREACH(i, pointcloud.points) {
+					const Eigen::Vector3f q(R * Eigen::Vector3f(Cast<float>(pointcloud.points[i])));
+					if (!InsideGate(q, 0, 1))
+						continue;
+					if (q[2] > gateHi[2])
+						grow[2][0].push_back(q[2]);
+					else if (q[2] < gateLo[2])
+						grow[2][1].push_back(-q[2]);
+				}
+			}
+			for (int a = 0; a < 3; ++a) {
+				const bool bDropIsolated(upAligned && a == 2);
+				hi[a] = GrowBound(grow[a][0], hi[a], maxGap[a], bDropIsolated);
+				lo[a] = -GrowBound(grow[a][1], -lo[a], maxGap[a], bDropIsolated);
+			}
+		}
+		DEBUG_ULTIMATE("ROI bounds grown per axis by (%.2f %.2f %.2f) up / (%.2f %.2f %.2f) down",
+			hi[0]-coreHi[0], hi[1]-coreHi[1], hi[2]-coreHi[2], coreLo[0]-lo[0], coreLo[1]-lo[1], coreLo[2]-lo[2]);
+		OBB3f b;
+		b.m_rot = R;
+		b.m_pos = R.transpose() * ((lo+hi)*0.5f);
+		b.m_ext = (hi-lo)*0.5f;
+		// enlarge the box, multiplicatively with an absolute margin floor so that thin axes
+		// (e.g. the height of a flat aerial scene) also receive a usable margin
+		if (scaleROI >= 1) {
+			const float meanExt(b.m_ext.mean());
+			for (int a = 0; a < 3; ++a)
+				b.m_ext[a] += (scaleROI-1)*MAXF(b.m_ext[a], meanExt);
+		} else
+			b.EnlargePercent(scaleROI);
+		return b;
+	};
+	// weight fraction of the (sampled) cloud contained by the box
+	const auto ComputeCoverage = [&](const OBB3f& b) {
+		double insideWeight(0), totalWeight(0);
+		FOREACH(i, sampleIndices) {
+			const float w(pointWeights[i]);
+			totalWeight += w;
+			if (b.Intersects(Eigen::Vector3f(Cast<float>(pointcloud.points[sampleIndices[i]]))))
+				insideWeight += w;
+		}
+		return totalWeight > 0 ? (float)(insideWeight/totalWeight) : 0.f;
+	};
+	// fit the box orientation and bounds, self-checking that the box contains the bulk of
+	// the total point weight; on failure fall back to progressively simpler orientations
+	// before giving up (a mis-estimated up or an over-tightened fit should degrade to a
+	// usable box, not to a silently unbounded scene)
+	OBB3f box;
+	if (bHasUp) {
+		// up-axis aligned box, in-plane orientation minimizing the footprint area
+		box.Set(points.data(), points.size(), up);
+	} else {
+		// unconstrained covariance-based box
+		box.Set(points.data(), points.size());
+	}
+	const char* fitName(bHasUp ? "up-aligned" : "covariance");
+	OBB3f roi(FitBounds(OBB3f::MATRIX(box.m_rot), bHasUp));
+	float coverage(ComputeCoverage(roi));
+	if (coverage < 0.7f && bHasUp) {
+		OBB3f boxCov;
+		boxCov.Set(points.data(), points.size());
+		const OBB3f cand(FitBounds(OBB3f::MATRIX(boxCov.m_rot), false));
+		const float candCoverage(ComputeCoverage(cand));
+		DEBUG_ULTIMATE("ROI up-aligned fit covers only %.0f%% of the point-cloud weight; covariance fallback covers %.0f%%", coverage*100, candCoverage*100);
+		if (candCoverage > coverage) {
+			roi = cand;
+			coverage = candCoverage;
+			fitName = "covariance";
+		}
+	}
+	if (coverage < 0.7f) {
+		const OBB3f cand(FitBounds(OBB3f::MATRIX(OBB3f::MATRIX::Identity()), false));
+		const float candCoverage(ComputeCoverage(cand));
+		DEBUG_ULTIMATE("ROI %s fit covers only %.0f%% of the point-cloud weight; axis-aligned fallback covers %.0f%%", fitName, coverage*100, candCoverage*100);
+		if (candCoverage > coverage) {
+			roi = cand;
+			coverage = candCoverage;
+			fitName = "axis-aligned";
+		}
+	}
+	if (coverage < 0.7f) {
+		VERBOSE("error: ROI estimation failed: the box covers only %.0f%% of the point-cloud weight", coverage*100);
+		return false;
+	}
+	obb = roi;
+	VERBOSE("ROI estimated with position (%f,%f,%f) and extent (%f,%f,%f): scale %f, up %s, %s fit, weight coverage %.0f%%",
+			obb.m_pos[0], obb.m_pos[1], obb.m_pos[2], obb.m_ext[0], obb.m_ext[1], obb.m_ext[2], scaleROI,
+			bHasUp ? String::FormatString("(%.3f,%.3f,%.3f)", up.x(), up.y(), up.z()).c_str() : "unconstrained",
+			fitName, coverage*100);
 	return true;
 } // EstimateROI
 /*----------------------------------------------------------------*/
 
+// compute the average distance between cameras and scene (or ROI if specified and exists):
+//  - depthPercentile: percentile of closest points to consider for each image (0-1)
+//  - bForceRecompute: force recomputation even if already available for each image
+//  - bUseROI: use the ROI if it exists, otherwise use the entire scene
+// return the average depth over all images
+float Scene::ComputeDistanceCameras2Scene(float depthPercentile, bool bForceRecompute, bool bUseROI)
+{
+	// for each image, compute the average distance between the camera and the scene points it sees;
+	// the average is computed on the Nth percentile of the closest points
+	const OBB3f* pObb = bUseROI && IsBounded() ? &obb : NULL;
+	// fall back to camera-frustum visibility when per-point views are missing
+	const bool bHasViews = !pointcloud.pointViews.empty();
+	REAL sumDepth = 0;
+	unsigned nImages = 0;
+	#ifdef SCENE_USE_OPENMP
+	#pragma omp parallel for reduction(+:sumDepth,nImages) //schedule(dynamic)
+	for (int64_t _idx=0; _idx<(int64_t)images.size(); ++_idx) {
+		const IIndex idx(static_cast<IIndex>(_idx));
+	#else
+	FOREACH(idx, images) {
+	#endif
+		Image& imageData = images[idx];
+		if (!imageData.IsValid())
+			continue;
+		if (bForceRecompute || imageData.avgDepth <= 0) {
+			// recompute average depth
+			FloatArr depths;
+			if (bHasViews) {
+				FOREACH(idxPoint, pointcloud.points) {
+					const PointCloud::ViewArr& views = pointcloud.pointViews[idxPoint];
+					for (PointCloud::View idxView: views) {
+						if (idxView != idx)
+							continue;
+						const Point3f& point = pointcloud.points[idxPoint];
+						if (!pObb || pObb->Intersects(point))
+							depths.emplace_back(imageData.camera.PointDepth(point));
+						break;
+					}
+				}
+			} else {
+				const Point2f imageSize(imageData.GetSize());
+				FOREACH(idxPoint, pointcloud.points) {
+					const Point3f& point = pointcloud.points[idxPoint];
+					if (pObb && !pObb->Intersects(point))
+						continue;
+					const auto [proj, depth] = imageData.camera.ProjectPointP(point);
+					if (depth > 0 && imageData.camera.IsInside(proj, imageSize))
+						depths.emplace_back(depth);
+				}
+			}
+			if (depths.empty()) {
+				imageData.avgDepth = 0;
+				continue;
+			}
+			imageData.avgDepth = depths.GetNth(ROUND2INT<IDX>((depths.size()-1) * depthPercentile));
+		}
+		sumDepth += static_cast<REAL>(imageData.avgDepth);
+		++nImages;
+	}
+	return nImages == 0 ? 0.f : static_cast<float>(sumDepth / nImages);
+}
+/*----------------------------------------------------------------*/
+
+
+// Compute the center line of the tower by fitting a line to the camera positions
+// Returns true if the camera poses describe a cylinder, false otherwise;
+// if the up direction is given, the line must additionally be (near) vertical, so that
+// horizontal linear trajectories (corridors, single flight lines) are not misclassified
+bool Scene::ComputeCenterLine(Line3f &camCenterLine, const Point3f* up) const {
+	if (images.size() < 20) {
+		DEBUG_ULTIMATE("error: too few images to be a tower: '%d'", images.size());
+		return false;
+	}
+	FitLineOnline<float> fitline;
+	FOREACH(imgIdx, images) {
+		const Eigen::Vector3f camPos(Cast<float>(images[imgIdx].camera.C));
+		fitline.Update(camPos);
+	}
+	Point3f quality = fitline.GetLine(camCenterLine);
+	// check if ROI is mostly long and narrow on one direction
+	if (quality.y / quality.z > 0.6f || quality.x / quality.y < 0.8f) {
+		// does not seem to be a line
+		DEBUG_ULTIMATE("scene does not seem to be a tower: X(%.2f), Y(%.2f), Z(%.2f)", quality.x, quality.y, quality.z);
+		return false;
+	}
+	if (up) {
+		const Eigen::Vector3f dir((camCenterLine.pt2 - camCenterLine.pt1).normalized());
+		const float cosVertical(ABS(dir.dot(Eigen::Vector3f(up->x, up->y, up->z))));
+		if (cosVertical < COS(D2R(30.f))) {
+			DEBUG_ULTIMATE("scene does not seem to be a tower: camera line %.1f deg off vertical", R2D(ACOS(MINF(cosVertical, 1.f))));
+			return false;
+		}
+	}
+	return true;
+}
 
 // calculate the center(X,Y) of the cylinder, the radius and min/max Z
 // from camera position and sparse point-cloud, if that exists
 // returns result of checks if the scene camera positions satisfies tower criteria:
 //	- cameras fit a long and slim bounding box
 //  - majority of cameras focus toward a middle line
+// Tower mode is assumed to be nonzero
 bool Scene::ComputeTowerCylinder(Point2f& centerPoint, float& fRadius, float& fROIRadius, float& zMin, float& zMax, float& minCamZ, const int towerMode)
 {
 	// disregard tower mode for scenes with less than 20 cameras
@@ -1907,26 +2433,18 @@ bool Scene::ComputeTowerCylinder(Point2f& centerPoint, float& fRadius, float& fR
 		return false;
 	}
 
+	Line3f camCenterLine;
+	if (!ComputeCenterLine(camCenterLine))
+		return false;
+
 	AABB3f aabbOutsideCameras(true);
 	CLISTDEF0(Point2f) cameras2D(images.size());
 	FloatArr camHeigths;
-	FitLineOnline<float> fitline;
 	FOREACH(imgIdx, images) {
 		const Eigen::Vector3f camPos(Cast<float>(images[imgIdx].camera.C));
-		fitline.Update(camPos);
 		aabbOutsideCameras.InsertFull(camPos);
 		cameras2D[imgIdx] = Point2f(camPos.x(), camPos.y());
 		camHeigths.InsertSortUnique(camPos.z());
-	}
-	Line3f camCenterLine;
-	Point3f quality = fitline.GetLine(camCenterLine);
-	// check if ROI is mostly long and narrow on one direction
-	if (quality.y / quality.z > 0.6f || quality.x / quality.y < 0.8f) {
-		// does not seem to be a line
-		if (towerMode > 0) {
-			DEBUG_ULTIMATE("error: does not seem to be a tower: X(%.2f), Y(%.2f), Z(%.2f)", quality.x, quality.y, quality.z);
-			return false;
-		}
 	}
 
 	// get the height of the lowest camera
@@ -1942,12 +2460,12 @@ bool Scene::ComputeTowerCylinder(Point2f& centerPoint, float& fRadius, float& fR
 			if (pz < fMinPointsZ)
 				fMinPointsZ = pz;
 			if (pz > fMaxPointsZ)
-				fMaxPointsZ = pz;			
+				fMaxPointsZ = pz;
 		}
 	}
 	zMin = MINF(zMin, fMinPointsZ);
 	zMax = MAXF(aabbOutsideCameras.ptMax.z(), fMaxPointsZ);
-	
+
 	// calculate tower radius as median distance from tower center to cameras
 	FloatArr cameraDistancesToMiddle(cameras2D.size());
 	FOREACH (camIdx, cameras2D)
@@ -1977,7 +2495,7 @@ size_t Scene::DrawCircle(PointCloud& pc, PointCloud::PointArr& outCircle, const 
 	for (unsigned pIdx = 0; pIdx < nTargetPoints; ++pIdx) {
 		const float fAngle(fStartAngle + fAngleBetweenPoints * pIdx);
 		ASSERT(fAngle <= FTWO_PI);
-		const Normal n(cos(fAngle), sin(fAngle), 0);
+		const Normal n(COS(fAngle), SIN(fAngle), 0);
 		ASSERT(ISEQUAL(norm(n), 1.f), "Norm = ", norm(n));
 		const Point3f newPoint(circleCenter + circleRadius * n);
 		// select cameras seeing this point
@@ -2013,8 +2531,8 @@ PointCloud Scene::BuildTowerMesh(const PointCloud& origPointCloud, const Point2f
 	PointCloud::PointArr circlePoints;
 	Mesh::VertexVerticesArr meshCircles;
 	if (bFixRadius) {
-		const unsigned nTargetPoints(MAX(10, ROUND2INT(FTWO_PI * fRadius * nTargetDensity))); // how many points on each circle
-		const float fAngleBetweenPoints(FTWO_PI / nTargetPoints); // the angle between neighbor points on the circle	
+		const unsigned nTargetPoints(MAXF(10, ROUND2INT(FTWO_PI * fRadius * nTargetDensity))); // how many points on each circle
+		const float fAngleBetweenPoints(FTWO_PI / nTargetPoints); // the angle between neighbor points on the circle
 		for (unsigned cIdx = 0; cIdx < nTargetCircles; ++cIdx) {
 			const Point3f circleCenter(centerPoint, zMin + fCircleFrequence * cIdx); // center point of the circle
 			const float fStartAngle(fAngleBetweenPoints * SEACAVE::random()); // starting angle for the first point
@@ -2042,7 +2560,7 @@ PointCloud Scene::BuildTowerMesh(const PointCloud& origPointCloud, const Point2f
 					bIdx--;
 				if (tIdx >= (int)nTargetCircles)
 					tIdx = nTargetCircles - 1;
-				if (bIdx < (int)nTargetCircles - 1)
+				if (bIdx < (int)nTargetCircles - 1 && bIdx >= 0)
 					sliceDistances[bIdx].emplace_back(d);
 				if (tIdx > 0)
 					sliceDistances[tIdx].emplace_back(d);
@@ -2059,8 +2577,8 @@ PointCloud Scene::BuildTowerMesh(const PointCloud& origPointCloud, const Point2f
 			} else {
 				if (pDistances.size() > 2) {
 					pDistances.Sort();
-					const size_t topIdx(MIN(pDistances.size() - 1, CEIL2INT<size_t>(pDistances.size() * 0.95f)));
-					const size_t botIdx(MAX(1u, FLOOR2INT<unsigned>(pDistances.size() * 0.5f)));
+					const size_t topIdx(MINF(pDistances.size() - 1, CEIL2INT<size_t>(pDistances.size() * 0.95f)));
+					const size_t botIdx(MAXF(1u, FLOOR2INT<unsigned>(pDistances.size() * 0.5f)));
 					float avgTopDistance(0);
 					for (size_t i = botIdx; i < topIdx; ++i)
 						avgTopDistance += pDistances[i];
@@ -2094,7 +2612,7 @@ PointCloud Scene::BuildTowerMesh(const PointCloud& origPointCloud, const Point2f
 			float circleRadius(circleRadii[rIdx]);
 			const float circleZ(zMax - fCircleFrequence * rIdx);
 			const Point3f circleCenter(centerPoint, circleZ); // center point of the circle
-			const unsigned nTargetPoints(MAX(10, ROUND2INT(FTWO_PI * circleRadius * nTargetDensity))); // how many points on each circle
+			const unsigned nTargetPoints(MAXF(10, ROUND2INT(FTWO_PI * circleRadius * nTargetDensity))); // how many points on each circle
 			const float fAngleBetweenPoints(FTWO_PI / nTargetPoints); // the angle between neighbor points on the circle
 			const float fStartAngle(fAngleBetweenPoints * SEACAVE::random()); // starting angle for the first point
 			DrawCircle(towerPC, circlePoints, circleCenter, circleRadius, nTargetPoints, fStartAngle, fAngleBetweenPoints);
@@ -2112,7 +2630,7 @@ PointCloud Scene::BuildTowerMesh(const PointCloud& origPointCloud, const Point2f
 			}
 		}
 	}
-	
+
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	if (VERBOSITY_LEVEL > 2) {
 		// Build faces from meshCircles
@@ -2182,6 +2700,8 @@ void Scene::InitTowerScene(const int towerMode)
 	float fROIRadius;
 	float zMax, zMin, minCamZ;
 	Point2f centerPoint;
+	if (towerMode == 0)
+		return;
 	if (!ComputeTowerCylinder(centerPoint, fRadius, fROIRadius, zMin, zMax, minCamZ, towerMode))
 		return;
 
@@ -2216,16 +2736,19 @@ void Scene::InitTowerScene(const int towerMode)
 		break;
 	case 3: // select neighbors
 		pointcloud.Swap(towerPC);
-		SelectNeighborViews(OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, FD2R(OPTDENSE::fOptimAngle), OPTDENSE::nPointInsideROI);
+		SelectNeighborViews(OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, D2R(OPTDENSE::fOptimAngle), OPTDENSE::fWeightPointInsideROI);
 		pointcloud.Swap(towerPC);
 		VERBOSE("Scene identified as tower-like; only select view neighbors from detected tower point-cloud");
 		break;
 	case 4: // select neighbors and append tower points
 		pointcloud.Swap(towerPC);
-		SelectNeighborViews(OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, FD2R(OPTDENSE::fOptimAngle), OPTDENSE::nPointInsideROI);
+		SelectNeighborViews(OPTDENSE::nMinViews, OPTDENSE::nMinViewsTrustPoint>1?OPTDENSE::nMinViewsTrustPoint:2, D2R(OPTDENSE::fOptimAngle), OPTDENSE::fWeightPointInsideROI);
 		pointcloud.Swap(towerPC);
 		AppendPointCloud(towerPC);
 		VERBOSE("Scene identified as tower-like; select view neighbors from detected tower point-cloud and next append it to existing point-cloud");
 		break;
 	}
 } // InitTowerScene
+/*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

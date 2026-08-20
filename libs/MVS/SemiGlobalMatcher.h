@@ -50,7 +50,7 @@
 
 namespace MVS {
 
-class Scene;
+class MVS_API Scene;
 
 namespace STEREO {
 

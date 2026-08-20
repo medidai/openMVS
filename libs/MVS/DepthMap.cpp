@@ -30,8 +30,14 @@
 */
 
 #include "Common.h"
+// Tell DEFVAR_OPTION/DEFOPT_SPACE (defined in libs/Common/Common.h) to tag
+// the OPTDENSE namespace's data symbols and helpers with MVS_API so they
+// are exported from MVS.dll instead of the default Common-side tag.
+#undef OPTCONFIG_API
+#define OPTCONFIG_API MVS_API
 #include "DepthMap.h"
 #include "Mesh.h"
+#include "ConfidenceRefine.h"
 #include "../Common/AutoEstimator.h"
 // CGAL: depth-map initialization
 #include <CGAL/Simple_cartesian.h>
@@ -79,14 +85,11 @@ DEFVAR_OPTDENSE_uint32(nMinViews, "Min Views", "minimum number of agreeing views
 MDEFVAR_OPTDENSE_uint32(nMaxViews, "Max Views", "maximum number of neighbor images used to compute the depth-map for the reference image", "12")
 DEFVAR_OPTDENSE_uint32(nMinViewsFuse, "Min Views Fuse", "minimum number of images that agrees with an estimate during fusion in order to consider it inlier", "2")
 MDEFVAR_OPTDENSE_uint32(nMaxViewsFuse, "Max Views Fuse", "maximum number of neighbor depth-maps used during fusion", "32")
-DEFVAR_OPTDENSE_uint32(nMinViewsFilter, "Min Views Filter", "minimum number of images that agrees with an estimate in order to consider it inlier", "1")
-MDEFVAR_OPTDENSE_uint32(nMinViewsFilterAdjust, "Min Views Filter Adjust", "minimum number of images that agrees with an estimate in order to consider it inlier (0 - disabled)", "1")
 MDEFVAR_OPTDENSE_uint32(nMinViewsTrustPoint, "Min Views Trust Point", "min-number of views so that the point is considered for approximating the depth-maps (<2 - random initialization)", "2")
 MDEFVAR_OPTDENSE_uint32(nNumViews, "Num Views", "Number of views used for depth-map estimation (0 - all views available)", "0", "4", "8")
 MDEFVAR_OPTDENSE_uint32(nMinPixelsFuse, "Min Pixels Fuse", "minimum number of depth-estimates that agree during fusion in order to consider it (multiple pixels can be from the same depth-map)", "5")
 MDEFVAR_OPTDENSE_uint32(nMaxPointsFuse, "Max Points Fuse", "maximum number of pixels to fuse into a single point", "1000")
 MDEFVAR_OPTDENSE_uint32(nMaxFuseDepth, "Max Fuse Depth", "maximum depth in fusion graph traversal", "100")
-MDEFVAR_OPTDENSE_uint32(nPointInsideROI, "Point Inside ROI", "consider a point shared only if inside ROI when estimating the neighbor views (0 - ignore ROI, 1 - weight more ROI points, 2 - consider only ROI points)", "1")
 MDEFVAR_OPTDENSE_bool(bAddCorners, "Add Corners", "add support points at image corners with nearest neighbor disparities", "0")
 MDEFVAR_OPTDENSE_bool(bInitSparse, "Init Sparse", "init depth-map only with the sparse points (no interpolation)", "1")
 MDEFVAR_OPTDENSE_bool(bRemoveDmaps, "Remove Dmaps", "remove depth-maps after fusion", "0")
@@ -96,9 +99,10 @@ MDEFVAR_OPTDENSE_float(fMinArea, "Min Area", "Min shared area for accepting the 
 MDEFVAR_OPTDENSE_float(fMinAngle, "Min Angle", "Min angle for accepting the depth triangulation", "3.0")
 MDEFVAR_OPTDENSE_float(fOptimAngle, "Optim Angle", "Optimal angle for computing the depth triangulation", "12.0")
 MDEFVAR_OPTDENSE_float(fMaxAngle, "Max Angle", "Max angle for accepting the depth triangulation", "65.0")
+MDEFVAR_OPTDENSE_float(fWeightPointInsideROI, "Weight Point Inside ROI", "weight a point inside ROI when estimating the neighbor views (0 - ignore ROI, <1 - weight more ROI points, 1 - consider only ROI points)", "0.7")
 MDEFVAR_OPTDENSE_float(fDescriptorMinMagnitudeThreshold, "Descriptor Min Magnitude Threshold", "minimum patch texture variance accepted when matching two patches (0 - disabled)", "0.02") // 0.02: pixels with patch texture variance below 0.0004 (0.02^2) will be removed from depthmap; 0.12: patch texture variance below 0.02 (0.12^2) is considered texture-less
 MDEFVAR_OPTDENSE_float(fDepthReprojectionErrorThreshold, "Depth Reprojection Error Threshold", "maximum relative difference between measured and depth projected pixel", "1.2")
-MDEFVAR_OPTDENSE_float(fDepthDiffThreshold, "Depth Diff Threshold", "maximum variance allowed for the depths during refinement", "0.01")
+MDEFVAR_OPTDENSE_float(fDepthDiffThreshold, "Depth Diff Threshold", "maximum variance allowed for the depths during fusion", "0.01")
 MDEFVAR_OPTDENSE_float(fNormalDiffThreshold, "Normal Diff Threshold", "maximum variance allowed for the normal during fusion (degrees)", "25")
 MDEFVAR_OPTDENSE_float(fPairwiseMul, "Pairwise Mul", "pairwise cost scale to match the unary cost", "0.3")
 MDEFVAR_OPTDENSE_float(fOptimizerEps, "Optimizer Eps", "MRF optimizer stop epsilon", "0.001")
@@ -106,13 +110,17 @@ MDEFVAR_OPTDENSE_int32(nOptimizerMaxIters, "Optimizer Max Iters", "MRF optimizer
 MDEFVAR_OPTDENSE_uint32(nSpeckleSize, "Speckle Size", "maximal size of a speckle (small speckles get removed)", "100")
 MDEFVAR_OPTDENSE_uint32(nIpolGapSize, "Interpolate Gap Size", "interpolate small gaps (left<->right, top<->bottom)", "7")
 MDEFVAR_OPTDENSE_int32(nIgnoreMaskLabel, "Ignore Mask Label", "label id used during ignore mask filter (<0 - disabled)", "-1")
-DEFVAR_OPTDENSE_uint32(nOptimize, "Optimize", "should we filter the extracted depth-maps?", "0") // see DepthFlags
+DEFVAR_OPTDENSE_uint32(nOptimize, "Optimize", "should we filter the extracted depth-maps? (1 - remove-speckles, 2 - fill-gaps, 4 - adjust-confidence only if the depth-maps are estimated on the GPU, where it is nearly free, 8 - adjust-confidence)", "4") // see DepthFlags
 DEFVAR_OPTDENSE_uint32(nFuseFilter, "Fuse Filter", "how to fuse the depth-maps into one dense point-cloud?", "2", "0", "1") // see FuseMode
 MDEFVAR_OPTDENSE_uint32(nEstimateColors, "Estimate Colors", "should we estimate the colors for the dense point-cloud?", "2", "0", "1")
 MDEFVAR_OPTDENSE_uint32(nEstimateNormals, "Estimate Normals", "should we estimate the normals for the dense point-cloud?", "2", "0", "1")
 MDEFVAR_OPTDENSE_float(fNCCThresholdKeep, "NCC Threshold Keep", "Maximum 1-NCC score accepted for a match", "0.9", "0.5")
+MDEFVAR_OPTDENSE_float(fFusePriorWeight, "Fuse Prior Weight", "fusion: weight of the intra-map geometric prior as virtual view/pixel support, to keep inliers on a coherent surface seen by too few views/pixels (0 disables); default 3 favors completeness and suits the usual pipeline where mesh reconstruction follows and cleans the few extra outliers, use 2 when the dense point-cloud is the final output (fewer outliers, slightly lower completeness)", "3.0")
+MDEFVAR_OPTDENSE_int32(nFuseViolationMax, "Fuse Violation Max", "fusion: max free-space-violating neighbor views allowed on a point rescued only by Fuse Prior Weight's virtual support (same free-space-violation test as the confidence recalibration); non-rescued points are never affected (-1 disables the guard, byte-identical to pre-guard fusion; 0 - strict/default, drop rescued points contradicted by any free-space ray)", "0")
+DEFVAR_OPTDENSE_bool(bEstimateConfidenceCUDA, "Estimate Confidence CUDA", "when CUDA is available and used for depth-map estimation, run the ADJUST_CONFIDENCE recalibration on the GPU integrated into the last geometric-consistency iteration (1), or force the CPU version anyway (0); no effect when estimation runs on the CPU", "1")
 DEFVAR_OPTDENSE_uint32(nEstimationIters, "Estimation Iters", "Number of patch-match iterations", "3")
 DEFVAR_OPTDENSE_uint32(nEstimationGeometricIters, "Estimation Geometric Iters", "Number of geometric consistent patch-match iterations (0 - disabled)", "2")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDAInstances, "PatchMatch CUDA Instances", "Number of parallel CUDA PatchMatch worker instances (clamped to nMaxThreads)", "4")
 MDEFVAR_OPTDENSE_float(fEstimationGeometricWeight, "Estimation Geometric Weight", "pairwise geometric consistency cost weight", "0.1")
 MDEFVAR_OPTDENSE_uint32(nRandomIters, "Random Iters", "Number of iterations for random assignment per pixel", "6")
 MDEFVAR_OPTDENSE_uint32(nRandomMaxScale, "Random Max Scale", "Maximum number of iterations to skip during random assignment", "2")
@@ -125,8 +133,14 @@ MDEFVAR_OPTDENSE_float(fRandomSmoothBonus, "Random Smooth Bonus", "Score factor 
 }
 
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("DepthMap"));
 
 //constructor from reference of DepthData
 DepthData::DepthData(const DepthData& srcDepthData) :
@@ -140,6 +154,7 @@ DepthData::DepthData(const DepthData& srcDepthData) :
 	dMin(srcDepthData.dMin),
 	dMax(srcDepthData.dMax),
 	size(srcDepthData.size),
+	bConfAdjusted(srcDepthData.bConfAdjusted),
 	references(srcDepthData.references)
 {}
 
@@ -251,7 +266,7 @@ bool DepthData::Save(const String& fileName) const
 		for (const ViewData& image: images)
 			IDs.push_back(image.GetID());
 		const ViewData& image0 = GetView();
-		if (!ExportDepthDataRaw(fileNameTmp, image0.pImageData->name, IDs, depthMap.size(), image0.camera.K, image0.camera.R, image0.camera.C, dMin, dMax, depthMap, normalMap, confMap, viewsMap))
+		if (!ExportDepthDataRaw(fileNameTmp, image0.pImageData->name, IDs, depthMap.size(), image0.camera.K, image0.camera.R, image0.camera.C, dMin, dMax, depthMap, normalMap, confMap, viewsMap, bConfAdjusted))
 			return false;
 	}
 	if (!File::renameFile(fileNameTmp, fileName)) {
@@ -268,7 +283,7 @@ bool DepthData::Load(const String& fileName, unsigned flags)
 	IIndexArr IDs;
 	cv::Size imageSize;
 	Camera camera;
-	if (!ImportDepthDataRaw(fileName, imageFileName, IDs, imageSize, camera.K, camera.R, camera.C, dMin, dMax, depthMap, normalMap, confMap, viewsMap, flags))
+	if (!ImportDepthDataRaw(fileName, imageFileName, IDs, imageSize, camera.K, camera.R, camera.C, dMin, dMax, depthMap, normalMap, confMap, viewsMap, flags, &bConfAdjusted))
 		return false;
 	ASSERT(!IDs.empty() && (!IsValid() || IDs.front() == GetView().GetID()));
 	ASSERT(depthMap.size() == imageSize);
@@ -312,6 +327,12 @@ size_t MVS::DepthData::GetMemorySize() const
 		nBytes += normalMap.memory_size();
 	if (!confMap.empty())
 		nBytes += confMap.memory_size();
+	// the derived side buffers count too: DMapCache budgets evictions on this total, and
+	// DenseFuseDepthMaps caches a full-resolution priorMap on every fused reference
+	if (!confMapAdjusted.empty())
+		nBytes += confMapAdjusted.memory_size();
+	if (!priorMap.empty())
+		nBytes += priorMap.memory_size();
 	if (!viewsMap.empty())
 		nBytes += viewsMap.memory_size();
 	return nBytes;
@@ -325,7 +346,7 @@ size_t MVS::DepthData::GetMemorySize() const
 // try to load and apply mask to the depth map;
 // the mask for each image is stored in the MVS scene or next to each image with '.mask.png' extension;
 // the mask marks as false (or 0) pixels that should be ignored
-//  - pMask: optional output mask; if defined, the mask is returned in this image instead of the BitMatrix
+// - pMask: optional output mask; if defined, the mask is returned in this image instead of the BitMatrix
 bool DepthEstimator::ImportIgnoreMask(const Image& image0, const cv::Size& size, uint8_t nIgnoreMaskLabel, BitMatrix& bmask, Image8U* pMask)
 {
 	ASSERT(image0.IsValid());
@@ -354,9 +375,9 @@ bool DepthEstimator::ImportIgnoreMask(const Image& image0, const cv::Size& size,
 } // ImportIgnoreMask
 
 // create the map for converting index to matrix position
-//                         1 2 3
-//  1 2 4 7 5 3 6 8 9 -->  4 5 6
-//                         7 8 9
+//                        1 2 3
+// 1 2 4 7 5 3 6 8 9 -->  4 5 6
+//                        7 8 9
 void DepthEstimator::MapMatrix2ZigzagIdx(const cv::Size& size, DepthEstimator::MapRefArr& coords, const BitMatrix& mask, int rawStride)
 {
 	typedef DepthEstimator::MapRef MapRef;
@@ -427,10 +448,10 @@ DepthEstimator::DepthEstimator(
 	#endif
 	smoothBonusDepth(1.f-OPTDENSE::fRandomSmoothBonus), smoothBonusNormal((1.f-OPTDENSE::fRandomSmoothBonus)*0.96f),
 	smoothSigmaDepth(-1.f/(2.f*SQUARE(OPTDENSE::fRandomSmoothDepth))), // used in exp(-x^2 / (2*(0.02^2)))
-	smoothSigmaNormal(-1.f/(2.f*SQUARE(FD2R(OPTDENSE::fRandomSmoothNormal)))), // used in exp(-x^2 / (2*(0.22^2)))
+	smoothSigmaNormal(-1.f/(2.f*SQUARE(D2R(OPTDENSE::fRandomSmoothNormal)))), // used in exp(-x^2 / (2*(0.22^2)))
 	thMagnitudeSq(OPTDENSE::fDescriptorMinMagnitudeThreshold>0?SQUARE(OPTDENSE::fDescriptorMinMagnitudeThreshold):-1.f),
-	angle1Range(FD2R(OPTDENSE::fRandomAngle1Range)), //default 0.279252678=FD2R(20)
-	angle2Range(FD2R(OPTDENSE::fRandomAngle2Range)), //default 0.174532920=FD2R(16)
+	angle1Range(D2R(OPTDENSE::fRandomAngle1Range)), //default 0.279252678=D2R(20.f)
+	angle2Range(D2R(OPTDENSE::fRandomAngle2Range)), //default 0.174532920=D2R(16.f)
 	thConfSmall(OPTDENSE::fNCCThresholdKeep * 0.66f), // default 0.6
 	thConfBig(OPTDENSE::fNCCThresholdKeep * 0.9f), // default 0.8
 	thConfRand(OPTDENSE::fNCCThresholdKeep * 1.1f), // default 0.99
@@ -580,8 +601,10 @@ float DepthEstimator::ScorePixelImage(const DepthData::ViewData& image1, Depth d
 		}
 		score += OPTDENSE::fEstimationGeometricWeight * consistency;
 	}
-	// apply depth prior weight based on patch textureless
-	if (!lowResDepthMap.empty()) {
+	// apply depth prior weight based on patch textureless;
+	// hard-cap the prior on medium to well-textured patches:
+	// 0.0025 is the optimum tested on several GT datasets
+	if (!lowResDepthMap.empty() && normSq0 < 0.0025f) {
 		const Depth d0 = lowResDepthMap(x0);
 		if (d0 > 0) {
 			const float deltaDepth(MINF(DepthSimilarity(d0, depth), 0.5f));
@@ -591,7 +614,7 @@ float DepthEstimator::ScorePixelImage(const DepthData::ViewData& image1, Depth d
 		}
 	}
 	ASSERT(ISFINITE(score));
-	return MIN(2.f, score);
+	return MINF(2.f, score);
 }
 
 // compute pixel's NCC score
@@ -939,17 +962,26 @@ DepthEstimator::PixelEstimate DepthEstimator::PerturbEstimate(const PixelEstimat
 	const float maxDepth = est.depth * (1.f+perturbation);
 	ptbEst.depth = CLAMP(rnd.randomUniform(minDepth, maxDepth), dMin, dMax);
 
-	// perturb normal
+	// perturb normal: Rodrigues rotation around a Marsaglia-unit axis;
+	// using a unit axis + real Rodrigues keeps |perturbed| within float-32 noise
 	const Normal viewDir(Cast<float>(X0));
 	std::uniform_real_distribution<float> urd(-1.f, 1.f);
 	const int numMaxTrials = 3;
 	int numTrials = 0;
 	perturbation *= FHALF_PI;
 	while(true) {
-		// generate random perturbation rotation
-		const RMatrixBaseF R(urd(rnd)*perturbation, urd(rnd)*perturbation, urd(rnd)*perturbation);
-		// perturb normal vector
-		ptbEst.normal = R * est.normal;
+		// random unit-length axis (Marsaglia's method, exact in math)
+		float q1, q2, ss;
+		do {
+			q1 = urd(rnd);
+			q2 = urd(rnd);
+			ss = q1*q1 + q2*q2;
+		} while (ss >= 1.f);
+		const float sq = SQRT(1.f - ss);
+		const Normal axis(2.f*q1*sq, 2.f*q2*sq, 1.f - 2.f*ss);
+		const float theta = urd(rnd) * perturbation;
+		// RMatrixBaseF(axis, theta) builds an orthogonal Rodrigues rotation
+		ptbEst.normal = RMatrixBaseF(axis, theta) * est.normal;
 		// make sure the perturbed normal is still looking towards the camera,
 		// otherwise try again with a smaller perturbation
 		if (ptbEst.normal.dot(viewDir) < 0.f)
@@ -974,9 +1006,11 @@ DepthEstimator::PixelEstimate DepthEstimator::PerturbEstimate(const PixelEstimat
 namespace CGAL {
 }
 
-// triangulate in-view points, generating a 2D mesh
+// triangulate in-view points, generating a 2D mesh;
+// - avgDepth (optional): average depth of the image, used to estimate the depth of the image corners
 // return also the estimated depth boundaries (min and max depth)
-std::pair<float,float> TriangulatePointsDelaunay(const DepthData::ViewData& image, const PointCloud& pointcloud, const IndexArr& points, Mesh& mesh, Point2fArr& projs, bool bAddCorners)
+std::pair<float,float> TriangulatePointsDelaunay(const Camera& camera, const cv::Size& size, const PointCloud& pointcloud, const IndexArr& points,
+	Mesh& mesh, Point2fArr& projs, float avgDepth=0.f)
 {
 	typedef CGAL::Simple_cartesian<double> kernel_t;
 	typedef CGAL::Triangulation_vertex_base_with_info_2<Mesh::VIndex, kernel_t> vertex_base_t;
@@ -994,27 +1028,28 @@ std::pair<float,float> TriangulatePointsDelaunay(const DepthData::ViewData& imag
 	projs.reserve(mesh.vertices.capacity());
 	Delaunay delaunay;
 	for (uint32_t idx: points) {
-		const Point3f pt(image.camera.ProjectPointP3(pointcloud.points[idx]));
-		const Point3f x(pt.x/pt.z, pt.y/pt.z, pt.z);
+		const Point3 Xcam = camera.TransformPointW2C(Cast<REAL>(pointcloud.points[idx]));
+		ASSERT(Xcam.z > 0);
+		const Point2f x = camera.TransformPointC2I(Xcam);
+		projs.emplace_back(x);
 		delaunay.insert(CPoint(x.x, x.y))->info() = mesh.vertices.size();
-		mesh.vertices.emplace_back(image.camera.TransformPointI2C(x));
-		projs.emplace_back(x.x, x.y);
-		if (depthBounds.first > pt.z)
-			depthBounds.first = pt.z;
-		if (depthBounds.second < pt.z)
-			depthBounds.second = pt.z;
+		const float depth = mesh.vertices.emplace_back(Xcam).z;
+		if (depthBounds.first > depth)
+			depthBounds.first = depth;
+		if (depthBounds.second < depth)
+			depthBounds.second = depth;
 	}
 	// if full size depth-map requested
 	const size_t numPoints(3);
-	if (bAddCorners && points.size() >= numPoints) {
+	if (avgDepth > 0 && points.size() >= numPoints) {
 		// add the four image corners at the average depth
-		ASSERT(image.pImageData->IsValid() && ISINSIDE(image.pImageData->avgDepth, depthBounds.first, depthBounds.second));
+		ASSERT(ISINSIDE(avgDepth, depthBounds.first, depthBounds.second));
 		const Mesh::VIndex idxFirstVertex = mesh.vertices.size();
 		VertexHandle vcorners[4];
-		for (const Point2f x: {Point2i(0, 0), Point2i(image.image.width()-1, 0), Point2i(0, image.image.height()-1), Point2i(image.image.width()-1, image.image.height()-1)}) {
+		for (const Point2f x: {Point2i(0, 0), Point2i(size.width-1, 0), Point2i(0, size.height-1), Point2i(size.width-1, size.height-1)}) {
 			const Mesh::VIndex i(mesh.vertices.size() - idxFirstVertex);
 			(vcorners[i] = delaunay.insert(CPoint(x.x, x.y)))->info() = mesh.vertices.size();
-			mesh.vertices.emplace_back(image.camera.TransformPointI2C(Point3f(x, image.pImageData->avgDepth)));
+			mesh.vertices.emplace_back(camera.TransformPointI2C(Point3f(x, avgDepth)));
 			projs.emplace_back(x);
 		}
 		// compute average depth from the closest 3 directly connected faces,
@@ -1059,7 +1094,7 @@ std::pair<float,float> TriangulatePointsDelaunay(const DepthData::ViewData& imag
 			vecDists *= 1.f/vecDists.sum();
 			FloatMap vecDepths(&depths[0].idx, numPoints);
 			const float depth(vecDepths.dot(vecDists));
-			mesh.vertices[idxFirstVertex+i] = image.camera.TransformPointI2C(Point3(posA, depth));
+			mesh.vertices[idxFirstVertex+i] = camera.TransformPointI2C(Point3(posA, depth));
 		}
 	}
 	mesh.faces.reserve(Mesh::FIndex(std::distance(delaunay.finite_faces_begin(),delaunay.finite_faces_end())));
@@ -1073,23 +1108,21 @@ std::pair<float,float> TriangulatePointsDelaunay(const DepthData::ViewData& imag
 // roughly estimate depth and normal maps by triangulating the sparse point-cloud
 // and interpolating normal and depth for all pixels
 bool MVS::TriangulatePoints2DepthMap(
-	const DepthData::ViewData& image, const PointCloud& pointcloud, const IndexArr& points,
-	DepthMap& depthMap, NormalMap& normalMap, Depth& dMin, Depth& dMax, bool bAddCorners, bool bSparseOnly)
+	const Camera& camera, const cv::Size& size, const PointCloud& pointcloud, const IndexArr& points,
+	DepthMap& depthMap, NormalMap& normalMap, Depth& dMin, Depth& dMax, float avgDepth, bool bSparseOnly)
 {
-	ASSERT(image.pImageData != NULL);
-
 	// triangulate in-view points
 	Mesh mesh;
 	Point2fArr projs;
-	const std::pair<float,float> thDepth(TriangulatePointsDelaunay(image, pointcloud, points, mesh, projs, bAddCorners));
+	const std::pair<float,float> thDepth(TriangulatePointsDelaunay(camera, size, pointcloud, points, mesh, projs, avgDepth));
 	dMin = thDepth.first;
 	dMax = thDepth.second;
 
 	// create rough depth-map by interpolating inside triangles
-	const Camera& camera = image.camera;
+	const bool bAddCorners(avgDepth > 0);
 	mesh.ComputeNormalVertices();
-	depthMap.create(image.image.size());
-	normalMap.create(image.image.size());
+	depthMap.create(size);
+	normalMap.create(size);
 	if (!bAddCorners || bSparseOnly) {
 		depthMap.memset(0);
 		normalMap.memset(0);
@@ -1151,21 +1184,19 @@ bool MVS::TriangulatePoints2DepthMap(
 } // TriangulatePoints2DepthMap
 // same as above, but does not estimate the normal-map
 bool MVS::TriangulatePoints2DepthMap(
-	const DepthData::ViewData& image, const PointCloud& pointcloud, const IndexArr& points,
-	DepthMap& depthMap, Depth& dMin, Depth& dMax, bool bAddCorners, bool bSparseOnly)
+	const Camera& camera, const cv::Size& size, const PointCloud& pointcloud, const IndexArr& points,
+	DepthMap& depthMap, Depth& dMin, Depth& dMax, float avgDepth, bool bSparseOnly)
 {
-	ASSERT(image.pImageData != NULL);
-
 	// triangulate in-view points
 	Mesh mesh;
 	Point2fArr projs;
-	const std::pair<float,float> thDepth(TriangulatePointsDelaunay(image, pointcloud, points, mesh, projs, bAddCorners));
+	const std::pair<float,float> thDepth(TriangulatePointsDelaunay(camera, size, pointcloud, points, mesh, projs, avgDepth));
 	dMin = thDepth.first;
 	dMax = thDepth.second;
 
 	// create rough depth-map by interpolating inside triangles
-	const Camera& camera = image.camera;
-	depthMap.create(image.image.size());
+	const bool bAddCorners(avgDepth > 0);
+	depthMap.create(size);
 	if (!bAddCorners || bSparseOnly)
 		depthMap.memset(0);
 	if (bSparseOnly) {
@@ -1286,7 +1317,7 @@ unsigned TEstimatePlane(const CLISTDEF0(TPoint3<TYPE>)& points, TPlane<TYPE,3>& 
 	typedef TPlaneSolverAdaptor<TYPE> PlaneSolverAdaptor;
 
 	plane.Invalidate();
-	
+
 	const unsigned nPoints = (unsigned)points.size();
 	if (nPoints < PlaneSolverAdaptor::MINIMUM_SAMPLES) {
 		ASSERT("too few points" == NULL);
@@ -1387,40 +1418,115 @@ unsigned MVS::EstimatePlaneThLockFirstPoint(const Point3fArr& points, Planef& pl
 
 
 // estimate the colors of the given dense point-cloud
-void MVS::EstimatePointColors(const ImageArr& images, PointCloud& pointcloud)
+//
+// A point takes the color of the image seeing it from the closest, so the choice is
+// made over all the views and only the cameras are needed to make it. The points are
+// therefore assigned to their image first and sampled after, grouped by that image,
+// which decodes each image exactly once and keeps only the ones being sampled
+// resident: a scene of ten thousand views does not fit its pixels in memory all at
+// once, and holding them was the only reason this step needed them all decoded.
+// Points seen by no image, projecting outside it, or whose image cannot be decoded,
+// are left white.
+void MVS::EstimatePointColors(ImageArr& images, PointCloud& pointcloud)
 {
 	TD_TIMER_START();
 
+	ASSERT(pointcloud.pointViews.size() == pointcloud.points.size());
 	pointcloud.colors.resize(pointcloud.points.size());
-	FOREACH(i, pointcloud.colors) {
-		PointCloud::Color& color = pointcloud.colors[i];
+	pointcloud.colors.MemsetValue(Pixel8U::WHITE);
+
+	// select for each point the image seeing it from the closest
+	IIndexArr pointImages(pointcloud.points.size());
+	#ifdef DEPTHMAP_USE_OPENMP
+	#pragma omp parallel for
+	for (int_t _i=0; _i<(int_t)pointcloud.points.size(); ++_i) {
+		const PointCloud::Index i((PointCloud::Index)_i);
+	#else
+	FOREACH(i, pointcloud.points) {
+	#endif
 		const PointCloud::Point& point = pointcloud.points[i];
-		const PointCloud::ViewArr& views= pointcloud.pointViews[i];
-		// compute vertex color
 		REAL bestDistance(FLT_MAX);
-		const Image* pImageData(NULL);
-		FOREACHPTR(pView, views) {
-			const Image& imageData = images[*pView];
+		IIndex idxBestImage(NO_ID);
+		for (PointCloud::View idxImage: pointcloud.pointViews[i]) {
+			const Image& imageData = images[idxImage];
 			ASSERT(imageData.IsValid());
-			if (imageData.image.empty())
-				continue;
 			// compute the distance from the 3D point to the image
 			const REAL distance(imageData.camera.PointDepth(point));
 			ASSERT(distance > 0);
 			if (bestDistance > distance) {
 				bestDistance = distance;
-				pImageData = &imageData;
+				idxBestImage = idxImage;
 			}
 		}
-		if (pImageData == NULL) {
-			// set a dummy color
-			color = Pixel8U::WHITE;
-		} else {
-			// get image color
-			const Point2f proj(pImageData->camera.ProjectPointP(point));
-			color = (pImageData->image.isInsideWithBorder<float,1>(proj) ? pImageData->image.sample(proj) : Pixel8U::WHITE);
+		pointImages[i] = idxBestImage;
+	}
+
+	// group the points by the image they are sampled from
+	IIndexArr imagePointsStart(images.size()+1);
+	imagePointsStart.Memset(0);
+	for (IIndex idxImage: pointImages)
+		if (idxImage != NO_ID)
+			++imagePointsStart[idxImage+1];
+	for (IIndex idxImage=1; idxImage<imagePointsStart.size(); ++idxImage)
+		imagePointsStart[idxImage] += imagePointsStart[idxImage-1];
+	IndexArr imagePoints(imagePointsStart.Last());
+	if (imagePoints.empty()) {
+		DEBUG_ULTIMATE("Estimate dense point-cloud colors: no point is seen by any image (%s)", TD_TIMER_GET_FMT().c_str());
+		return;
+	}
+	{
+		IIndexArr imagePointsFill(imagePointsStart);
+		FOREACH(i, pointImages) {
+			const IIndex idxImage(pointImages[i]);
+			if (idxImage != NO_ID)
+				imagePoints[imagePointsFill[idxImage]++] = i;
 		}
 	}
+	pointImages.Release();
+
+	#ifdef DEPTHMAP_USE_OPENMP
+	// sample as many images at a time as the memory left holds, so even a scene
+	// whose images are large relative to it colors, one image at a time
+	size_t maxImageMemory(0);
+	FOREACH(idxImage, images)
+		if (imagePointsStart[idxImage] < imagePointsStart[idxImage+1])
+			maxImageMemory = MAXF(maxImageMemory, (size_t)images[idxImage].GetSize().area()*sizeof(Pixel8U));
+	ASSERT(maxImageMemory > 0);
+	const Util::MemoryInfo memInfo(Util::GetMemoryInfo());
+	const size_t safetyMemory(ComputeSafetyMemory(memInfo));
+	const size_t freeMemory(memInfo.freePhysical > safetyMemory ? memInfo.freePhysical - safetyMemory : 0);
+	const unsigned numImagesAtOnce(MINF(MAXF((unsigned)(freeMemory / maxImageMemory), 1u), (unsigned)omp_get_max_threads()));
+	#endif
+
+	// sample the points of each image, decoding it only if it is not loaded already
+	unsigned numFailedImages(0);
+	#ifdef DEPTHMAP_USE_OPENMP
+	#pragma omp parallel for schedule(dynamic,1) num_threads(numImagesAtOnce) reduction(+:numFailedImages)
+	for (int_t _idxImage=0; _idxImage<(int_t)images.size(); ++_idxImage) {
+		const IIndex idxImage((IIndex)_idxImage);
+	#else
+	FOREACH(idxImage, images) {
+	#endif
+		const IIndex idxPointsStart(imagePointsStart[idxImage]), idxPointsEnd(imagePointsStart[idxImage+1]);
+		if (idxPointsStart == idxPointsEnd)
+			continue;
+		Image& imageData = images[idxImage];
+		const bool bReleaseImage(imageData.image.empty());
+		if (bReleaseImage && !imageData.ReloadImageAtPreparedResolution()) {
+			++numFailedImages;
+			continue;
+		}
+		for (IIndex i=idxPointsStart; i<idxPointsEnd; ++i) {
+			const PointCloud::Index idxPoint(imagePoints[i]);
+			const auto [proj, depth] = imageData.camera.ProjectPointP(pointcloud.points[idxPoint]);
+			if (depth > 0 && imageData.image.isInsideWithBorder<float,1>(proj))
+				pointcloud.colors[idxPoint] = imageData.image.sample(proj);
+		}
+		if (bReleaseImage)
+			imageData.ReleaseImage();
+	}
+	if (numFailedImages > 0)
+		VERBOSE("warning: %u images could not be decoded; the points they see stay white", numFailedImages);
 
 	DEBUG_ULTIMATE("Estimate dense point-cloud colors: %u colors (%s)", pointcloud.colors.size(), TD_TIMER_GET_FMT().c_str());
 } // EstimatePointColors
@@ -1455,7 +1561,7 @@ void MVS::EstimatePointSegmentation(const ImageArr& images, PointCloud& pointclo
 			if (imageData.mask.empty())
 				continue;
 			// get image mask label
-			const ImageRef proj(ROUND2INT(imageData.camera.ProjectPointP(point)));
+			const ImageRef proj(ROUND2INT(std::get<0>(imageData.camera.ProjectPointP(point))));
 			if (!imageData.mask.isInside(proj))
 				continue;
 			const PointCloud::Label& maskLabel = imageData.mask(proj);
@@ -1567,93 +1673,46 @@ void MVS::EstimatePointNormals(const ImageArr& images, PointCloud& pointcloud, i
 } // EstimatePointNormals
 /*----------------------------------------------------------------*/
 
+bool DepthGradientEstimator::DepthGradient(const ImageRef& ir, Point3f& ws) const
+{
+	// least-squares plane fit shared verbatim with the CUDA confidence prior kernel
+	// (ConfRefine::DepthPlaneFit); a tiny accessor adapts this TImage to the plain (x,y) interface
+	// the shared template expects. Byte-identical to the previous hand-written loop.
+	struct Acc {
+		const DepthMap& dm;
+		inline float operator()(int x, int y) const { return dm(ImageRef(x, y)); }
+		inline bool inside(int x, int y) const { return dm.isInside(ImageRef(x, y)); }
+	} acc{depthMap};
+	float w, wx, wy;
+	if (!ConfRefine::DepthPlaneFit(acc, ir.x, ir.y, w, wx, wy))
+		return false;
+	ws[0] = w; ws[1] = wx; ws[2] = wy;
+	return true;
+}
+
+Normal DepthGradientEstimator::NormalFromGradient(int x, int y, Depth d, Depth dx, Depth dy) const
+{
+	ASSERT(ISZERO(K(0,1)));
+	return normalized(Normal(
+		K(0,0)*dx,
+		K(1,1)*dy,
+		(K(0,2)-float(x))*dx+(K(1,2)-float(y))*dy-d
+	));
+}
+
 bool MVS::EstimateNormalMap(const Matrix3x3f& K, const DepthMap& depthMap, NormalMap& normalMap)
 {
 	normalMap.create(depthMap.size());
-	struct Tool {
-		static bool IsDepthValid(Depth d, Depth nd) {
-			return nd > 0 && IsDepthSimilar(d, nd, Depth(0.03f));
-		}
-		// computes depth gradient (first derivative) at current pixel
-		static bool DepthGradient(const DepthMap& depthMap, const ImageRef& ir, Point3f& ws) {
-			float& w  = ws[0];
-			float& wx = ws[1];
-			float& wy = ws[2];
-			w = depthMap(ir);
-			if (w <= 0)
-				return false;
-			// loop over neighborhood and finding least squares plane,
-			// the coefficients of which give gradient of depth
-			int whxx(0), whxy(0), whyy(0);
-			float wgx(0), wgy(0);
-			const int Radius(1);
-			int n(0);
-			for (int y = -Radius; y <= Radius; ++y) {
-				for (int x = -Radius; x <= Radius; ++x) {
-					if (x == 0 && y == 0)
-						continue;
-					const ImageRef pt(ir.x+x, ir.y+y);
-					if (!depthMap.isInside(pt))
-						continue;
-					const float wi(depthMap(pt));
-					if (!IsDepthValid(w, wi))
-						continue;
-					whxx += x*x; whxy += x*y; whyy += y*y;
-					wgx += (wi - w)*x; wgy += (wi - w)*y;
-					++n;
-				}
-			}
-			if (n < 3)
-				return false;
-			// solve 2x2 system, generated from depth gradient
-			const int det(whxx*whyy - whxy*whxy);
-			if (det == 0)
-				return false;
-			const float invDet(1.f/float(det));
-			wx = (float( whyy)*wgx - float(whxy)*wgy)*invDet;
-			wy = (float(-whxy)*wgx + float(whxx)*wgy)*invDet;
-			return true;
-		}
-		// computes normal to the surface given the depth and its gradient
-		static Normal ComputeNormal(const Matrix3x3f& K, int x, int y, Depth d, Depth dx, Depth dy) {
-			ASSERT(ISZERO(K(0,1)));
-			return normalized(Normal(
-				K(0,0)*dx,
-				K(1,1)*dy,
-				(K(0,2)-float(x))*dx+(K(1,2)-float(y))*dy-d
-			));
-		}
-	};
+	const DepthGradientEstimator est(K, depthMap);
 	for (int r=0; r<normalMap.rows; ++r) {
 		for (int c=0; c<normalMap.cols; ++c) {
-			#if 0
-			const Depth d(depthMap(r,c));
-			if (d <= 0) {
-				normalMap(r,c) = Normal::ZERO;
-				continue;
-			}
-			Depth dl, du;
-			if (depthMap.isInside(ImageRef(c-1,r-1)) && Tool::IsDepthValid(d, dl=depthMap(r,c-1)) &&  Tool::IsDepthValid(d, du=depthMap(r-1,c)))
-				normalMap(r,c) = Tool::ComputeNormal(K, c, r, d, du-d, dl-d);
-			else
-			if (depthMap.isInside(ImageRef(c+1,r-1)) && Tool::IsDepthValid(d, dl=depthMap(r,c+1)) &&  Tool::IsDepthValid(d, du=depthMap(r-1,c)))
-				normalMap(r,c) = Tool::ComputeNormal(K, c, r, d, du-d, d-dl);
-			else
-			if (depthMap.isInside(ImageRef(c+1,r+1)) && Tool::IsDepthValid(d, dl=depthMap(r,c+1)) &&  Tool::IsDepthValid(d, du=depthMap(r+1,c)))
-				normalMap(r,c) = Tool::ComputeNormal(K, c, r, d, d-du, d-dl);
-			else
-			if (depthMap.isInside(ImageRef(c-1,r+1)) && Tool::IsDepthValid(d, dl=depthMap(r,c-1)) &&  Tool::IsDepthValid(d, du=depthMap(r+1,c)))
-				normalMap(r,c) = Tool::ComputeNormal(K, c, r, d, d-du, dl-d);
-			else
-				normalMap(r,c) = Normal(0,0,-1);
-			#else
 			// calculates depth gradient at x
 			Normal& n = normalMap(r,c);
-			if (Tool::DepthGradient(depthMap, ImageRef(c,r), n))
-				n = Tool::ComputeNormal(K, c, r, n.x, n.y, n.z);
+			Point3f ws;
+			if (est.DepthGradient(ImageRef(c,r), ws))
+				n = est.NormalFromGradient(c, r, ws[0], ws[1], ws[2]);
 			else
 				n = Normal::ZERO;
-			#endif
 			ASSERT(normalMap(r,c).dot(K.inv()*Point3f(float(c),float(r),1.f)) <= 0);
 		}
 	}
@@ -1661,8 +1720,10 @@ bool MVS::EstimateNormalMap(const Matrix3x3f& K, const DepthMap& depthMap, Norma
 } // EstimateNormalMap
 /*----------------------------------------------------------------*/
 
-// estimate confidence map from depth-map variation in a window;
-// the estimated confidence is the mean of the depth differences to the 3 closer pixel to the central pixel
+// estimate confidence map from depth-map variation in a window: the n smallest absolute
+// depth differences to the neighbors, spread over the whole neighborhood and mapped
+// through a Gaussian of the depth range, mixed with the fraction of neighbors sitting at
+// a similar depth (see the header for what this is for and what it is not)
 void MVS::EstimateConfidenceFromDepth(const DepthData& depthData, ConfidenceMap& confMap, int winHalfSize, int n) {
 	ASSERT(depthData.dMax > depthData.dMin);
 	const float dDepth = depthData.dMax - depthData.dMin;
@@ -1678,7 +1739,7 @@ void MVS::EstimateConfidenceFromDepth(const DepthData& depthData, ConfidenceMap&
 			if (depth <= 0)
 				continue;
 			float& confidence = confMap(r, c);
-			FloatArr depthDiffValues;
+			FloatArr depthDiffValues(0, (IDX)(SQUARE(2*winHalfSize+1)-1)); // reserve the whole window, one allocation
 			unsigned numDiffDepths(0), numSimilarDepths(0);
 			for (int k = -winHalfSize; k<=winHalfSize; k++)
 				for (int l = -winHalfSize; l<=winHalfSize; l++)
@@ -1691,12 +1752,14 @@ void MVS::EstimateConfidenceFromDepth(const DepthData& depthData, ConfidenceMap&
 						depthDiffValues.push_back(ABS(depth-depthN));
 					}
 			depthDiffValues.Sort();
-			const int s = MIN(n, (int)depthDiffValues.size());
+			const int s = MINF(n, (int)depthDiffValues.size());
 			float confidenceDiff = 0;
 			for (int k = 0; k < s; k++)
 				confidenceDiff += depthDiffValues[k]/depthDiffValues.size();
 			confidenceDiff = EXP(-SQUARE(confidenceDiff/(0.002f*dDepth)));
-			const float confidenceSim =
+			// a pixel no neighbor agrees with gets no similarity credit at all (and the
+			// ratio below is left undefined, hence the guard)
+			const float confidenceSim = numSimilarDepths == 0 ? 0.f :
 				MINF(float(numSimilarDepths)/n, 1.f)*0.7f +
 				MAXF(1.f-float(numDiffDepths)/numSimilarDepths, 0.f)*0.3f;
 			confidence = confidenceDiff*0.9f + confidenceSim*0.1f;
@@ -1732,7 +1795,9 @@ void MVS::EstimateConfidenceFromNormal(const DepthData& depthData, ConfidenceMap
 				for (int l = -winHalfSize; l<=winHalfSize; l++)
 					if (r+k >= 0 && r+k < normalMap.rows && c+l >= 0 && c+l < normalMap.cols && depthData.depthMap(r+k, c+l) > 0)
 						theta += SQUARE(ACOS(mean.dot(normalMap(r+k, c+l))));
-			confMap(r, c) = SQUARE(1 - theta/(count*ACOS(-1)));
+			// the squared angles can sum past the normalizer where the normals disagree
+			// wildly, so floor the score before squaring it and keep the result in [0,1]
+			confMap(r, c) = SQUARE(MAXF(1.f-theta/(count*float(M_PI)), 0.f));
 		}
 	}
 } // EstimateConfidenceFromNormal
@@ -1813,7 +1878,7 @@ Image8U3 MVS::DepthMap2Image(const DepthMap& depthMap, Depth minDepth, Depth max
 	ASSERT(!depthMap.empty() && depthMap.isContinuous());
 	// find min and max values
 	if (minDepth == FLT_MAX && maxDepth == 0) {
-		cList<Depth,Depth,0> depths(0, depthMap.area());
+		CLISTDEF0(Depth) depths(0, depthMap.area());
 		for (int i=depthMap.area(); --i >= 0; ) {
 			const Depth depth = depthMap[i];
 			ASSERT(depth == 0 || depth > 0);
@@ -1821,7 +1886,7 @@ Image8U3 MVS::DepthMap2Image(const DepthMap& depthMap, Depth minDepth, Depth max
 				depths.Insert(depth);
 		}
 		if (!depths.empty()) {
-			const std::pair<Depth,Depth> th(ComputeX84Threshold<Depth,Depth>(depths.data(), depths.size()));
+			const std::pair<Depth,Depth> th(ComputeX84Threshold<Depth,Depth>(depths));
 			const std::pair<Depth,Depth> mm(depths.GetMinMax());
 			maxDepth = MINF(th.first+th.second, mm.second);
 			minDepth = MAXF(th.first-th.second, mm.first);
@@ -1881,7 +1946,7 @@ bool MVS::ExportConfidenceMap(const String& fileName, const ConfidenceMap& confM
 	}
 	if (confs.IsEmpty())
 		return false;
-	const std::pair<float,float> th(ComputeX84Threshold<float,float>(confs.Begin(), confs.GetSize()));
+	const std::pair<float,float> th(ComputeX84Threshold<float,float>(confs));
 	float minConf = th.first-th.second;
 	float maxConf = th.first+th.second;
 	if (minConf < 0.1f)
@@ -2021,172 +2086,79 @@ bool MVS::ExportPointCloud(const String& fileName, const Image& imageData, const
 } // ExportPointCloud
 /*----------------------------------------------------------------*/
 
-//  - IDs are the reference view ID and neighbor view IDs used to estimate the depth-map (global ID)
+// The DMAP file format, and the only implementation of the packing it stores its maps
+// with, live in Interface.h: that header pulls in nothing but the standard library and
+// OpenCV, so every library reading or writing the depth-maps this one produces shares
+// the same codec instead of carrying its own copy of it -- which is how the two of them
+// silently drifted apart before. The functions below only adapt the scene types to it,
+// the maps being passed straight through as the cv::Mat they already are.
+// - IDs are the reference view ID and neighbor view IDs used to estimate the depth-map (global ID)
 bool MVS::ExportDepthDataRaw(const String& fileName, const String& imageFileName,
 	const IIndexArr& IDs, const cv::Size& imageSize,
 	const KMatrix& K, const RMatrix& R, const CMatrix& C,
 	Depth dMin, Depth dMax,
-	const DepthMap& depthMap, const NormalMap& normalMap, const ConfidenceMap& confMap, const ViewsMap& viewsMap)
+	const DepthMap& depthMap, const NormalMap& normalMap, const ConfidenceMap& confMap, const ViewsMap& viewsMap,
+	bool bConfAdjusted)
 {
 	ASSERT(!IDs.empty() && IDs.size() < 256);
 	ASSERT(!depthMap.empty());
 	ASSERT(confMap.empty() || depthMap.size() == confMap.size());
 	ASSERT(viewsMap.empty() || depthMap.size() == viewsMap.size());
 	ASSERT(depthMap.width() <= imageSize.width && depthMap.height() <= imageSize.height);
-
-	std::unique_ptr<FILE, decltype(&fclose)> f(fopen(fileName, "wb"), &fclose);
-	if (!f) {
-		DEBUG("error: opening file '%s' for writing depth-data", fileName.c_str());
-		return false;
-	}
-
-	// write header
-	HeaderDepthDataRaw header;
-	header.name = HeaderDepthDataRaw::HeaderDepthDataRawName();
-	header.type = HeaderDepthDataRaw::HAS_DEPTH;
-	header.imageWidth = (uint32_t)imageSize.width;
-	header.imageHeight = (uint32_t)imageSize.height;
-	header.depthWidth = (uint32_t)depthMap.cols;
-	header.depthHeight = (uint32_t)depthMap.rows;
-	header.dMin = dMin;
-	header.dMax = dMax;
-	if (!normalMap.empty())
-		header.type |= HeaderDepthDataRaw::HAS_NORMAL;
-	if (!confMap.empty())
-		header.type |= HeaderDepthDataRaw::HAS_CONF;
-	if (!viewsMap.empty())
-		header.type |= HeaderDepthDataRaw::HAS_VIEWS;
-	fwrite(&header, sizeof(HeaderDepthDataRaw), 1, f.get());
-
-	// write image file name
-	STATIC_ASSERT(sizeof(String::value_type) == sizeof(char));
-	const String FileName(MAKE_PATH_REL(Util::getFullPath(Util::getFilePath(fileName)), Util::getFullPath(imageFileName)));
-	const uint16_t nFileNameSize((uint16_t)FileName.length());
-	fwrite(&nFileNameSize, sizeof(uint16_t), 1, f.get());
-	fwrite(FileName.c_str(), sizeof(char), nFileNameSize, f.get());
-
-	// write neighbor IDs
-	STATIC_ASSERT(sizeof(uint32_t) == sizeof(IIndex));
-	const uint32_t nIDs(IDs.size());
-	fwrite(&nIDs, sizeof(IIndex), 1, f.get());
-	fwrite(IDs.data(), sizeof(IIndex), nIDs, f.get());
-
-	// write pose
 	STATIC_ASSERT(sizeof(double) == sizeof(REAL));
-	fwrite(K.val, sizeof(REAL), 9, f.get());
-	fwrite(R.val, sizeof(REAL), 9, f.get());
-	fwrite(C.ptr(), sizeof(REAL), 3, f.get());
+	STATIC_ASSERT(sizeof(uint32_t) == sizeof(IIndex));
 
-	// write depth-map
-	if (fwrite(depthMap.getData(), sizeof(float), depthMap.area(), f.get()) != static_cast<size_t>(depthMap.area())) {
+	DepthDataRaw data;
+	data.header.imageWidth = (uint32_t)imageSize.width;
+	data.header.imageHeight = (uint32_t)imageSize.height;
+	data.header.dMin = dMin;
+	data.header.dMax = dMax;
+	if (bConfAdjusted)
+		data.header.type |= HeaderDepthDataRaw::CONF_ADJUSTED; // carried through by the codec (cross-process double-adjust guard)
+	// store the image path relative to the depth-map, so that the two travel together
+	data.imageFileName = MAKE_PATH_REL(Util::getFullPath(Util::getFilePath(fileName)), Util::getFullPath(imageFileName));
+	data.IDs.assign(IDs.begin(), IDs.end());
+	data.K = K;
+	data.R = R;
+	data.C = C;
+	if (!ExportDepthDataRaw(static_cast<const std::string&>(fileName), data,
+		depthMap, normalMap, confMap, viewsMap))
+	{
 		DEBUG("error: writing depth-data to file '%s'", fileName.c_str());
 		return false;
 	}
-
-	// write normal-map
-	if ((header.type & HeaderDepthDataRaw::HAS_NORMAL) != 0)
-		fwrite(normalMap.getData(), sizeof(float)*3, normalMap.area(), f.get());
-
-	// write confidence-map
-	if ((header.type & HeaderDepthDataRaw::HAS_CONF) != 0)
-		fwrite(confMap.getData(), sizeof(float), confMap.area(), f.get());
-
-	// write views-map
-	if ((header.type & HeaderDepthDataRaw::HAS_VIEWS) != 0)
-		fwrite(viewsMap.getData(), sizeof(uint8_t)*4, viewsMap.area(), f.get());
-
-	return ferror(f.get()) == 0;
+	return true;
 } // ExportDepthDataRaw
 
 bool MVS::ImportDepthDataRaw(const String& fileName, String& imageFileName,
 	IIndexArr& IDs, cv::Size& imageSize,
 	KMatrix& K, RMatrix& R, CMatrix& C,
 	Depth& dMin, Depth& dMax,
-	DepthMap& depthMap, NormalMap& normalMap, ConfidenceMap& confMap, ViewsMap& viewsMap, unsigned flags)
+	DepthMap& depthMap, NormalMap& normalMap, ConfidenceMap& confMap, ViewsMap& viewsMap, unsigned flags,
+	bool* pbConfAdjusted)
 {
-	std::unique_ptr<FILE, decltype(&fclose)> f(fopen(fileName, "rb"), &fclose);
-	if (!f) {
-		DEBUG("error: opening file '%s' for reading depth-data", fileName.c_str());
-		return false;
-	}
-
-	// read header
-	HeaderDepthDataRaw header;
-	if (fread(&header, sizeof(HeaderDepthDataRaw), 1, f.get()) != 1 ||
-		header.name != HeaderDepthDataRaw::HeaderDepthDataRawName() ||
-		(header.type & HeaderDepthDataRaw::HAS_DEPTH) == 0 ||
-		header.depthWidth <= 0 || header.depthHeight <= 0 ||
-		header.imageWidth < header.depthWidth || header.imageHeight < header.depthHeight)
-	{
-		DEBUG("error: invalid depth-data file '%s'", fileName.c_str());
-		return false;
-	}
-
-	// read image file name
-	STATIC_ASSERT(sizeof(String::value_type) == sizeof(char));
-	uint16_t nFileNameSize;
-	fread(&nFileNameSize, sizeof(uint16_t), 1, f.get());
-	imageFileName.resize(nFileNameSize);
-	fread(imageFileName.data(), sizeof(char), nFileNameSize, f.get());
-
-	// read neighbor IDs
-	STATIC_ASSERT(sizeof(uint32_t) == sizeof(IIndex));
-	uint32_t nIDs;
-	fread(&nIDs, sizeof(IIndex), 1, f.get());
-	ASSERT(nIDs > 0 && nIDs < 256);
-	IDs.resize(nIDs);
-	fread(IDs.data(), sizeof(IIndex), nIDs, f.get());
-
-	// read pose
 	STATIC_ASSERT(sizeof(double) == sizeof(REAL));
-	fread(K.val, sizeof(REAL), 9, f.get());
-	fread(R.val, sizeof(REAL), 9, f.get());
-	fread(C.ptr(), sizeof(REAL), 3, f.get());
+	STATIC_ASSERT(sizeof(uint32_t) == sizeof(IIndex));
 
-	// read depth-map
-	dMin = header.dMin;
-	dMax = header.dMax;
-	imageSize.width = header.imageWidth;
-	imageSize.height = header.imageHeight;
-	if ((flags & HeaderDepthDataRaw::HAS_DEPTH) != 0) {
-		depthMap.create(header.depthHeight, header.depthWidth);
-		if (fread(depthMap.getData(), sizeof(float), depthMap.area(), f.get()) != static_cast<size_t>(depthMap.area())) {
-			DEBUG("error: reading depth-data from file '%s'", fileName.c_str());
-			return false;
-		}
-	} else {
-		fseek(f.get(), sizeof(float)*header.depthWidth*header.depthHeight, SEEK_CUR);
+	DepthDataRaw data;
+	if (!ImportDepthDataRaw(static_cast<const std::string&>(fileName), data,
+		depthMap, normalMap, confMap, viewsMap, flags))
+	{
+		DEBUG("error: reading depth-data from file '%s'", fileName.c_str());
+		return false;
 	}
-
-	// read normal-map
-	if ((header.type & HeaderDepthDataRaw::HAS_NORMAL) != 0) {
-		if ((flags & HeaderDepthDataRaw::HAS_NORMAL) != 0) {
-			normalMap.create(header.depthHeight, header.depthWidth);
-			fread(normalMap.getData(), sizeof(float)*3, normalMap.area(), f.get());
-		} else {
-			fseek(f.get(), sizeof(float)*3*header.depthWidth*header.depthHeight, SEEK_CUR);
-		}
-	}
-
-	// read confidence-map
-	if ((header.type & HeaderDepthDataRaw::HAS_CONF) != 0) {
-		if ((flags & HeaderDepthDataRaw::HAS_CONF) != 0) {
-			confMap.create(header.depthHeight, header.depthWidth);
-			fread(confMap.getData(), sizeof(float), confMap.area(), f.get());
-		} else {
-			fseek(f.get(), sizeof(float)*header.depthWidth*header.depthHeight, SEEK_CUR);
-		}
-	}
-
-	// read visibility-map
-	if ((header.type & HeaderDepthDataRaw::HAS_VIEWS) != 0) {
-		if ((flags & HeaderDepthDataRaw::HAS_VIEWS) != 0) {
-			viewsMap.create(header.depthHeight, header.depthWidth);
-			fread(viewsMap.getData(), sizeof(uint8_t)*4, viewsMap.area(), f.get());
-		}
-	}
-
-	return ferror(f.get()) == 0;
+	imageFileName = data.imageFileName;
+	IDs.CopyOf(data.IDs.data(), (IIndex)data.IDs.size());
+	K = data.K;
+	R = data.R;
+	C = data.C;
+	dMin = data.header.dMin;
+	dMax = data.header.dMax;
+	imageSize.width = (int)data.header.imageWidth;
+	imageSize.height = (int)data.header.imageHeight;
+	if (pbConfAdjusted)
+		*pbConfAdjusted = (data.header.type & HeaderDepthDataRaw::CONF_ADJUSTED) != 0;
+	return true;
 } // ImportDepthDataRaw
 /*----------------------------------------------------------------*/
 
@@ -2260,7 +2232,7 @@ void MVS::CompareDepthMaps(const DepthMap& depthMap, const DepthMap& depthMapGT,
 	}
 	errorsVisual.Save(ComposeDepthFilePath(idxImage, "errors.png"));
 	#endif
-	VERBOSE("Depth-maps compared for image % 3u: %.4f PSNR; %g median %g mean %g stddev error; %u (%.2f%%%%) error %u (%.2f%%%%) missing %u (%.2f%%%%) extra pixels (%s)",
+	VERBOSE("Depth-maps compared for image % 3u: %.4f PSNR; %g median %g mean %g stddev error; %u (%.2f%%) error %u (%.2f%%) missing %u (%.2f%%) extra pixels (%s)",
 		idxImage,
 		fPSNR,
 		th.first, mean, stddev,
@@ -2294,14 +2266,14 @@ void MVS::CompareNormalMaps(const NormalMap& normalMap, const NormalMap& normalM
 				continue;
 			}
 			ASSERT(ISEQUAL(norm(normal),1.f) && ISEQUAL(norm(normalGT),1.f));
-			const float error(FR2D(ACOS(CLAMP(normal.dot(normalGT), -1.f, 1.f))));
+			const float error(R2D(ACOS(CLAMP(normal.dot(normalGT), -1.f, 1.f))));
 			errors.Insert(error);
 		}
 	}
-	const MeanStd<float,double> ms(errors.Begin(), errors.GetSize());
+	const MeanStd<float,double> ms(errors.data(), errors.size());
 	const float mean((float)ms.GetMean());
 	const float stddev((float)ms.GetStdDev());
-	const std::pair<float,float> th(ComputeX84Threshold<float,float>(errors.Begin(), errors.GetSize()));
+	const std::pair<float,float> th(ComputeX84Threshold<float,float>(errors));
 	VERBOSE("Normal-maps compared for image % 3u: %.2f median %.2f mean %.2f stddev error (%s)",
 		idxImage,
 		th.first, mean, stddev,
@@ -2309,3 +2281,5 @@ void MVS::CompareNormalMaps(const NormalMap& normalMap, const NormalMap& normalM
 	);
 }
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

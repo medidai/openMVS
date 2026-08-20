@@ -225,7 +225,7 @@ typedef uint64_t image_pair_t;
 typedef uint32_t point2D_t;
 typedef uint64_t point3D_t;
 
-const std::vector<String> mapCameraModel = {
+const std::vector<String> mapCameraModel {
 	"SIMPLE_PINHOLE",
 	"PINHOLE",
 	"SIMPLE_RADIAL",
@@ -303,10 +303,14 @@ struct Camera {
 		in >> ID >> model >> width >> height;
 		if (in.fail())
 			return false;
-		if (model != _T("PINHOLE"))
-			return false;
 		params.resize(4);
-		in >> params[0] >> params[1] >> params[2] >> params[3];
+		if (model == _T("PINHOLE")) {
+			in >> params[0] >> params[1] >> params[2] >> params[3];
+		} else if (model == _T("SIMPLE_PINHOLE")) {
+			in >> params[0] >> params[2] >> params[3];
+			params[1] = params[0];
+		} else
+			return false;
 		return !in.fail();
 	}
 
@@ -325,10 +329,18 @@ struct Camera {
 		model = mapCameraModel[ReadBinaryLittleEndian<int>(&stream)];
 		width = (uint32_t)ReadBinaryLittleEndian<uint64_t>(&stream);
 		height = (uint32_t)ReadBinaryLittleEndian<uint64_t>(&stream);
-		if (model != _T("PINHOLE"))
-			return false;
 		params.resize(4);
-		ReadBinaryLittleEndian<double>(&stream, &params);
+		if (model == _T("PINHOLE")) {
+			ReadBinaryLittleEndian<double>(&stream, &params);
+		} else if (model == _T("SIMPLE_PINHOLE")) {
+			std::vector<REAL> tmp_params(3);
+			ReadBinaryLittleEndian<double>(&stream, &tmp_params);
+			params[0] = tmp_params[0];
+			params[1] = tmp_params[0];
+			params[2] = tmp_params[1];
+			params[3] = tmp_params[2];
+		} else
+			return false;
 		return true;
 	}
 
@@ -748,7 +760,7 @@ bool ImportScene(const String& strFolder, const String& strOutFolder, Interface&
 			camera.C = Interface::Pos3d(0,0,0);
 			if (OPT::bNormalizeIntrinsics) {
 				// normalize camera intrinsics
-				camera.K = Camera::ScaleK<double>(camera.K, 1.0/Camera::GetNormalizationScale(colmapCamera.width, colmapCamera.height));
+				camera.K = ScaleK<double>(camera.K, 1.0/Camera::GetNormalizationScale(colmapCamera.width, colmapCamera.height));
 			} else {
 				camera.width = colmapCamera.width;
 				camera.height = colmapCamera.height;
@@ -1419,7 +1431,7 @@ bool ExportImagesCamera(const String& pathName, const Interface& scene)
 int main(int argc, LPCTSTR* argv)
 {
 	#ifdef _DEBUGINFO
-	// set _crtBreakAlloc index to stop in <dbgheap.c> at allocation
+	// set _crtBreakAlloc index or use _CrtSetBreakAlloc() to stop in <dbgheap.c> at allocation
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);// | _CRTDBG_CHECK_ALWAYS_DF);
 	#endif
 

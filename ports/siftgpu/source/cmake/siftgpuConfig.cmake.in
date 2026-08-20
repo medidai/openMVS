@@ -1,0 +1,36 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Required deps for all builds
+find_dependency(OpenGL REQUIRED)  # provides OpenGL::GL
+find_dependency(glad CONFIG REQUIRED)  # provides glad::glad
+if(@CUDA_ENABLED@)
+  find_dependency(CUDAToolkit REQUIRED)
+endif()
+if(@glfw3_FOUND@)
+  find_dependency(glfw3 CONFIG)
+endif()
+if(@EGL_FOUND@)
+  if(@EGL_FOUND_VIA_PKGCONFIG@)
+    # EGL was found via pkg-config at build time, use the same method
+    if(NOT TARGET EGL::EGL)
+      find_package(PkgConfig QUIET)
+      if(PKG_CONFIG_FOUND)
+        pkg_check_modules(EGL QUIET egl)
+        if(EGL_FOUND)
+          add_library(EGL::EGL INTERFACE IMPORTED)
+          target_include_directories(EGL::EGL INTERFACE ${EGL_INCLUDE_DIRS})
+          target_link_directories(EGL::EGL INTERFACE ${EGL_LIBRARY_DIRS})
+          target_link_libraries(EGL::EGL INTERFACE ${EGL_LIBRARIES})
+        endif()
+      endif()
+    endif()
+  else()
+    # EGL was found via CONFIG at build time
+    find_dependency(EGL CONFIG)
+  endif()
+endif()
+
+# Bring in the exported targets from install(EXPORT ...)
+include("${CMAKE_CURRENT_LIST_DIR}/siftgpuTargets.cmake")

@@ -60,7 +60,7 @@ CImageBMP::~CImageBMP()
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageBMP::ReadHeader()
+bool CImageBMP::ReadHeader()
 {
 	// Jump to the beginning of the file
 	((ISTREAM*)m_pStream)->setPos(0);
@@ -73,7 +73,7 @@ HRESULT CImageBMP::ReadHeader()
 		memcmp(&bmp_fileheader.bfType, "BM", 2))
 	{
 		LOG(LT_IMAGE, _T("error: invalid BMP image"));
-		return _INVALIDFILE;
+		return false;
 	}
 
 	// Read the BITMAPINFOHEADER.
@@ -83,7 +83,7 @@ HRESULT CImageBMP::ReadHeader()
 		bmp_infoheader.biSize != sizeof(bmp_infoheader))
 	{
 		LOG(LT_IMAGE, _T("error: invalid BMP image"));
-		return _INVALIDFILE;
+		return false;
 	}
 
 	// Check for unsupported format: biPlanes MUST equal 1
@@ -92,7 +92,7 @@ HRESULT CImageBMP::ReadHeader()
 		(bmp_infoheader.biCompression != BI_RGB && bmp_infoheader.biCompression != BI_BITFIELDS))
 	{
 		LOG(LT_IMAGE, "error: unsupported BMP image");
-		return _INVALIDFILE;
+		return false;
 	}
 
 	// Initililize our width, height and format as the .bmp we are loading
@@ -118,7 +118,7 @@ HRESULT CImageBMP::ReadHeader()
 		break;
 	default:
 		LOG(LT_IMAGE, "error: unsupported BMP image");
-		return _INVALIDFILE;
+		return false;
 	}
 	// Ensure m_lineWidth is DWORD aligned
 	while ((m_lineWidth%4) != 0) ++m_lineWidth;
@@ -126,12 +126,12 @@ HRESULT CImageBMP::ReadHeader()
 	// Jump to the location where the bitmap data is stored
 	((ISTREAM*)m_pStream)->setPos(bmp_fileheader.bfOffBits);
 
-	return _OK;
+	return true;
 } // ReadHeader
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageBMP::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageBMP::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	// read data
 	const size_t nSize = m_width*m_stride;
@@ -143,23 +143,23 @@ HRESULT CImageBMP::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, S
 		for (Size j=0; j<m_height; ++j,(uint8_t*&)pData-=lineWidth)
 			if (nSize != m_pStream->read(pData, nSize) ||
 				(nPad && nPad != m_pStream->read(bufferPad, nPad)))
-				return _INVALIDFILE;
+				return false;
 	} else {
 		// read image to a buffer and convert it
 		CAutoPtrArr<uint8_t> const buffer(new uint8_t[m_lineWidth]);
 		for (Size j=0; j<m_height; ++j) {
 			if (m_lineWidth != m_pStream->read(buffer, m_lineWidth))
-				return _INVALIDFILE;
+				return false;
 			if (!FilterFormat((uint8_t*)pData+(m_height-j-1)*lineWidth, dataFormat, nStride, buffer, m_format, m_stride, m_width))
-				return _FAIL;
+				return false;
 		}
 	}
-	return _OK;
+	return true;
 } // ReadData
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageBMP::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE /*numLevels*/)
+bool CImageBMP::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE /*numLevels*/)
 {
 	// write header
 	m_numLevels = 0;
@@ -194,7 +194,7 @@ HRESULT CImageBMP::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height,
 		break;
 	default:
 		LOG(LT_IMAGE, "error: unsupported BMP image format");
-		return _INVALIDFILE;
+		return false;
 	}
 	m_dataWidth	= m_width = width;
 	m_dataHeight= m_height = height;
@@ -224,14 +224,14 @@ HRESULT CImageBMP::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height,
 		sizeof(BITMAPINFOHEADER) != m_pStream->write(&bmp_infoheader, sizeof(BITMAPINFOHEADER)))
 	{
 		LOG(LT_IMAGE, "error: failed writing the BMP image");
-		return _INVALIDFILE;
+		return false;
 	}
-	return _OK;
+	return true;
 } // WriteHeader
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageBMP::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageBMP::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	// write data
 	const size_t nSize = m_width*m_stride;
@@ -243,18 +243,18 @@ HRESULT CImageBMP::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 		for (Size j=0; j<m_height; ++j)
 			if (nSize != m_pStream->write((uint8_t*)pData+(m_height-j-1)*lineWidth, nSize) ||
 				(nPad && nPad != m_pStream->write(bufferPad, nPad)))
-				return _INVALIDFILE;
+				return false;
 	} else {
 		// convert data to a buffer and write it
 		CAutoPtrArr<uint8_t> const buffer(new uint8_t[m_lineWidth]);
 		for (Size j=0; j<m_height; ++j) {
 			if (!FilterFormat(buffer, m_format, m_stride, (uint8_t*)pData+(m_height-j-1)*lineWidth, dataFormat, nStride, m_width))
-				return _FAIL;
+				return false;
 			if (m_lineWidth != m_pStream->write(buffer, m_lineWidth))
-				return _INVALIDFILE;
+				return false;
 		}
 	}
-	return _OK;
+	return true;
 } // WriteData
 /*----------------------------------------------------------------*/
 

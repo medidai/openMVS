@@ -33,9 +33,13 @@
 CMakeSettings.json
 .vs/
 .idea/
+.venv/
 .vscode/
+.claude/
 out/
 bin*/
 make*/
+build-*/
+bench*/
 tmp/
 build/

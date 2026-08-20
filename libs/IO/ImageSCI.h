@@ -24,8 +24,8 @@ public:
 	CImageSCI();
 	virtual ~CImageSCI();
 
-	HRESULT		ReadHeader();
-	HRESULT		WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
+	bool		ReadHeader();
+	bool		WriteHeader(PIXELFORMAT, Size width, Size height, BYTE numLevels);
 }; // class CImageSCI
 /*----------------------------------------------------------------*/
 

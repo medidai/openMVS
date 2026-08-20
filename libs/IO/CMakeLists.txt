@@ -1,7 +1,7 @@
 # Macro to check pkg-config modules and produce a full-path library list
 macro(pkg_check_modules_fullpath_libs PREFIX MODULE_NAME)
-	# Call pkg_check_modules (optional: caller checks ${PREFIX}_FOUND)
-	pkg_check_modules(${PREFIX} QUIET IMPORTED_TARGET ${MODULE_NAME})
+	# Call pkg_check_modules
+	pkg_check_modules(${PREFIX} IMPORTED_TARGET ${MODULE_NAME})
 	if(${PREFIX}_FOUND)
 		set(${PREFIX}_FULLPATH_LIBRARIES "" PARENT_SCOPE)
 		foreach(lib ${${PREFIX}_LIBRARIES})
@@ -60,8 +60,10 @@ if(JPEG_FOUND)
 else()
 	SET(JPEG_LIBRARIES "")
 endif()
-FIND_PACKAGE(PkgConfig REQUIRED)
-pkg_check_modules_fullpath_libs(JPEGXL libjxl)
+FIND_PACKAGE(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+	pkg_check_modules_fullpath_libs(JPEGXL libjxl)
+endif()
 if(JPEGXL_FOUND)
 	SET(_USE_JXL TRUE CACHE INTERNAL "")
 	set(JPEGXL_LIBRARIES ${JPEGXL_FULLPATH_LIBRARIES})
@@ -91,7 +93,7 @@ IF(CMAKE_VERSION VERSION_GREATER_EQUAL 3.16.0)
 endif()
 
 # Link its dependencies
-TARGET_LINK_LIBRARIES(IO Common ${PNG_LIBRARIES} ${JPEG_LIBRARIES} ${JPEGXL_LIBRARIES} ${TIFF_LIBRARIES} ${EXIV2_LIBS})
+TARGET_LINK_LIBRARIES(IO PUBLIC Common ${PNG_LIBRARIES} ${JPEG_LIBRARIES} ${JPEGXL_LIBRARIES} ${TIFF_LIBRARIES} ${EXIV2_LIBS})
 
 # Install
 SET_TARGET_PROPERTIES(IO PROPERTIES

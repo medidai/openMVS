@@ -529,15 +529,17 @@ inline TRMatrixBase<TYPE>::TRMatrixBase(const Mat& mat)
 }
 
 template <typename TYPE>
-inline TRMatrixBase<TYPE>::TRMatrixBase(const Vec& w, TYPE phi)
-{
-	Set(w, phi);
-}
-
-template <typename TYPE>
 inline TRMatrixBase<TYPE>::TRMatrixBase(const Vec& rot)
 {
 	SetRotationAxisAngle(rot);
+}
+
+template <typename TYPE>
+template <typename TYPEW,
+          std::enable_if_t<std::is_floating_point<TYPEW>::value, int>>
+inline TRMatrixBase<TYPE>::TRMatrixBase(const Vec& w, TYPEW phi)
+{
+	Set(w, phi);
 }
 
 template <typename TYPE>
@@ -698,7 +700,9 @@ void TRMatrixBase<TYPE>::SetZXY(TYPE PhiX, TYPE PhiY, TYPE PhiZ)
 
 
 template <typename TYPE>
-void TRMatrixBase<TYPE>::Set(const Vec& wa, TYPE phi)
+template <typename TYPEW,
+          std::enable_if_t<std::is_floating_point<TYPEW>::value, int>>
+void TRMatrixBase<TYPE>::Set(const Vec& w, TYPEW phi)
 {
   // zero rotation  results in identity matrix
   if (ISZERO(phi)) {
@@ -706,26 +710,31 @@ void TRMatrixBase<TYPE>::Set(const Vec& wa, TYPE phi)
 	return;
   }
 
-  const TYPE wnorm(norm(wa));
-  if (wnorm < std::numeric_limits<TYPE>::epsilon()) {
-	CPC_ERROR("Vector "<<wa<<" is close to zero (norm = "<<wnorm<<"), solution is instable!");
-  }
-  const Vec w(wa*(TYPE(1)/wnorm));
+  // Contract: w must be a unit-length axis. Caller is responsible for
+  // normalisation -- the only non-unit caller in the tree (CorrectNormal,
+  // libs/MVS/DepthMap.h) was updated to pre-normalise its cross-product
+  // axis. Saves 1 sqrt + 1 div per call and makes Rodrigues output as
+  // orthogonal as float-32 arithmetic allows on the supplied inputs.
+  ASSERT(ISEQUAL(norm(w), TYPE(1)), "Set(w,phi) requires |w|=1; got |w| = ", norm(w));
 
-  Mat Omega;
-  Omega(0,0) = TYPE(0);
-  Omega(0,1) = -w[2];
-  Omega(0,2) = w[1];
-  Omega(1,0) = w[2];
-  Omega(1,1) = TYPE(0);
-  Omega(1,2) = -w[0];
-  Omega(2,0) = -w[1] ;
-  Omega(2,1) = w[0];
-  Omega(2,2) = TYPE(0);
+  // Build skew-symmetric Omega and run Rodrigues in working precision TYPEW.
+  // When TYPEW is wider than TYPE (e.g. double vs float) this keeps the
+  // resulting matrix close to orthogonal even when TYPE is float32.
+  typedef TMatrix<TYPEW,3,3> MatW;
+  MatW Omega;
+  Omega(0,0) = TYPEW(0);
+  Omega(0,1) = -TYPEW(w[2]);
+  Omega(0,2) =  TYPEW(w[1]);
+  Omega(1,0) =  TYPEW(w[2]);
+  Omega(1,1) = TYPEW(0);
+  Omega(1,2) = -TYPEW(w[0]);
+  Omega(2,0) = -TYPEW(w[1]);
+  Omega(2,1) =  TYPEW(w[0]);
+  Omega(2,2) = TYPEW(0);
 
-  const Mat Sin_O(Omega *  sin(phi));
-  const Mat Cos_O_O((Omega * Omega) * (TYPE(1)-cos(phi)));
-  *this = Base::IDENTITY + Sin_O + Cos_O_O;
+  const MatW Sin_O(Omega * sin(phi));
+  const MatW Cos_O_O((Omega * Omega) * (TYPEW(1) - cos(phi)));
+  *this = MatW::IDENTITY + Sin_O + Cos_O_O;
 }
 
 
@@ -758,18 +767,6 @@ void TRMatrixBase<TYPE>::SetFromRowVectors(const Vec& v0, const Vec& v1, const V
 	val[7] = v2[1];
 	val[8] = v2[2];
 	ASSERT(Check(R_CONSTRAINT_ACCURACY));
-}
-
-
-template <typename TYPE>
-void TRMatrixBase<TYPE>::SetFromAxisAngle(const Vec& w)
-{
-	#if 0
-	const TYPE dAngle(norm(w));
-	Set(w*INVERT(dAngle), dAngle);
-	#else
-	SetRotationAxisAngle(w);
-	#endif
 }
 
 
@@ -1286,8 +1283,13 @@ inline void TRMatrixBase<TYPE>::SetRotationAxisAngle(const Vec& rot)
 		val[8] = TYPE(1);
 	}
 	#else
-	*this = Eigen::SO3<TYPE>(rot).get_matrix();
+	*this = AxisAngleToRotation(rot);
 	#endif
+}
+template <typename TYPE>
+TRMatrixBase<TYPE> TRMatrixBase<TYPE>::AxisAngleToRotation(const Vec& rot)
+{
+	return Base(Eigen::SO3<TYPE>(rot).get_matrix());
 }
 
 template <typename TYPE>
@@ -1535,6 +1537,17 @@ template<typename TYPE, int O>
 inline bool IsRotationMatrix(const Eigen::Matrix<TYPE,3,3,O>& R) {
 	// the trace should be three and the determinant should be one
 	return (ISEQUAL(R.determinant(), TYPE(1)) && ISEQUAL((R*R.transpose()).trace(), TYPE(3)));
+} // IsRotationMatrix
+// same check with an explicit tolerance: R^T*R must be the identity and the determinant +1
+// (a mirroring matrix is not a rotation); meant for validating externally supplied data,
+// where the strict machine-epsilon overloads above would reject any serialized rotation
+template<typename TYPE>
+inline bool IsRotationMatrix(const TMatrix<TYPE,3,3>& R, TYPE tolerance) {
+	const TMatrix<TYPE,3,3> E(R.t()*R - TMatrix<TYPE,3,3>::eye());
+	for (int i = 0; i < 9; ++i)
+		if (ABS(E.val[i]) > tolerance)
+			return false;
+	return ABS(cv::determinant(R) - TYPE(1)) <= tolerance;
 } // IsRotationMatrix
 /*----------------------------------------------------------------*/
 

@@ -53,6 +53,8 @@ struct DepthData;
 
 namespace CUDA {
 
+struct ConfAdjustRequest; // ConfidenceCUDA.h (fused confidence recalibration)
+
 class PatchMatch {
 public:
 	struct Params {
@@ -67,13 +69,16 @@ public:
 	};
 
 public:
-	PatchMatch(int device=0);
+	PatchMatch();
 	~PatchMatch();
 
 	void Init(bool bGeomConsistency);
 	void Release();
 
-	void EstimateDepthMap(DepthData&);
+	// pConfRequest (optional): on the last geometric-consistency iteration, run the fused GPU
+	// confidence recalibration right after the estimation kernels, reusing the device-resident
+	// reference buffers (see ConfidenceCUDA.h ConfAdjustRequest); its done/computeNS report back
+	void EstimateDepthMap(DepthData&, ConfAdjustRequest* pConfRequest = NULL);
 
 	float4 GetPlaneHypothesis(const int index);
 	float GetCost(const int index);
@@ -83,6 +88,16 @@ private:
 	void AllocatePatchMatchCUDA(const cv::Mat1f& image);
 	void AllocateImageCUDA(size_t i, const cv::Mat1f& image, bool bInitImage, bool bInitDepthMap);
 	void RunCUDA(float* ptrCostMap=NULL, uint32_t* ptrViewsMap=NULL);
+	void UploadCameras(); // upload host cameras into __constant__ g_cameras
+	void UploadParams();  // upload host params into __constant__ g_params
+	// For images large enough that the per-call driver-staging stall dominates
+	// (default threshold ~1.5 MP), copy a pageable cv::Mat1f into a per-instance
+	// pinned slot then enqueue a truly-async H->D DMA on cudaStream. For smaller
+	// mats falls back to a direct pageable DMA (the driver's internal chunked
+	// staging is cheap enough that the explicit memcpy + cudaHostAlloc overhead
+	// would otherwise be a net loss).
+	void StagedUploadCvMat(cudaArray_t dst, const cv::Mat1f& src,
+		std::vector<float*>& slots, std::vector<size_t>& areas, size_t slotIdx);
 
 public:
 	Params params;
@@ -93,7 +108,6 @@ public:
 	std::vector<cudaTextureObject_t> textureDepths;
 	Point4* depthNormalEstimates;
 
-	Camera *cudaCameras;
 	std::vector<cudaArray_t> cudaImageArrays;
 	std::vector<cudaArray_t> cudaDepthArrays;
 	cudaTextureObject_t* cudaTextureImages;
@@ -103,6 +117,16 @@ public:
 	float* cudaDepthNormalCosts;
 	curandState* cudaRandStates;
 	uint32_t* cudaSelectedViews;
+	// per-instance stream: scopes kernel launches and syncs to this PatchMatch
+	// instead of fencing the whole device, and enables async H<->D transfers
+	cudaStream_t cudaStream;
+	// pinned host staging slots, indexed by view (image upload) or by neighbor
+	// (depth-prior upload). Grown on demand by StagedUploadCvMat above the area
+	// threshold; freed in Release(). Empty for workloads with small images.
+	std::vector<float*> hostImageStaging;
+	std::vector<size_t> hostImageStagingArea;
+	std::vector<float*> hostDepthPriorStaging;
+	std::vector<size_t> hostDepthPriorStagingArea;
 };
 /*----------------------------------------------------------------*/
 

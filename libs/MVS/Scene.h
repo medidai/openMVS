@@ -65,13 +65,14 @@ public:
 
 public:
 	inline Scene(unsigned _nMaxThreads=0)
-		: obb(true), nMaxThreads(Thread::getMaxThreads(_nMaxThreads)) {}
+		: obb(true), transform(Matrix4x4::IDENTITY), nMaxThreads(Thread::getMaxThreads(_nMaxThreads)) {}
 
 	void Release();
 	bool IsValid() const;
 	bool IsEmpty() const;
 	bool ImagesHaveNeighbors() const;
 	bool IsBounded() const { return obb.IsValid(); }
+	bool HasTransform() const { return transform != Matrix4x4::IDENTITY; }
 
 	bool LoadInterface(const String& fileName);
 	bool SaveInterface(const String& fileName, int version=-1) const;
@@ -91,13 +92,15 @@ public:
 	SCENE_TYPE Load(const String& fileName, bool bImport=false);
 	bool Save(const String& fileName, ARCHIVE_TYPE type=ARCHIVE_DEFAULT) const;
 
+	bool EstimatePointCloudNormals(bool bRefine=true);
+	bool EstimateSparseSurface(unsigned kNeighbors=16, float sizeScale=0.9f, float normalAngleMax=D2R(0.f));
 	bool EstimateNeighborViewsPointCloud(unsigned maxResolution=16);
-	void SampleMeshWithVisibility(unsigned maxResolution=320);
+	void SampleMeshWithVisibility(REAL sampling=0, unsigned maxResolution=320);
 	bool ExportMeshToDepthMaps(const String& baseName);
 
-	bool SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews = 3, unsigned nMinPointViews = 2, float fOptimAngle = FD2R(12), unsigned nInsideROI = 1);
-	void SelectNeighborViews(unsigned nMinViews = 3, unsigned nMinPointViews = 2, float fOptimAngle = FD2R(12), unsigned nInsideROI = 1);
-	static bool FilterNeighborViews(ViewScoreArr& neighbors, float fMinArea=0.1f, float fMinScale=0.2f, float fMaxScale=2.4f, float fMinAngle=FD2R(3), float fMaxAngle=FD2R(45), unsigned nMaxViews=12);
+	bool SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinViews=3, unsigned nMinPointViews=2, float fOptimAngle=D2R(12.f), float fWeightPointInsideROI=0.7f);
+	void SelectNeighborViews(unsigned nMinViews=3, unsigned nMinPointViews=2, float fOptimAngle=D2R(12.f), float fWeightPointInsideROI=0.7f);
+	static bool FilterNeighborViews(ViewScoreArr& neighbors, float fMinArea=0.1f, float fMinScale=0.2f, float fMaxScale=2.4f, float fMinAngle=D2R(3.f), float fMaxAngle=D2R(45.f), unsigned nMaxViews=12);
 
 	bool ExportCamerasMLP(const String& fileName, const String& fileNameScene) const;
 	static bool ExportLinesPLY(const String& fileName, const CLISTDEF0IDX(Line3f,uint32_t)& lines, const Pixel8U* colors=NULL, bool bBinary=true);
@@ -112,9 +115,9 @@ public:
 	bool ExportChunks(const ImagesChunkArr& chunks, const String& path, ARCHIVE_TYPE type=ARCHIVE_DEFAULT) const;
 
 	// Transform scene
-	bool Center(const Point3* pCenter = NULL);
-	bool Scale(const REAL* pScale = NULL);
-	bool ScaleImages(unsigned nMaxResolution = 0, REAL scale = 0, const String& folderName = String());
+	bool Center(const Point3* pCenter=NULL);
+	bool Scale(const REAL* pScale=NULL);
+	bool ScaleImages(unsigned nMaxResolution=0, REAL scale=0, const String& folderName={});
 	Matrix4x4 ComputeNormalizationTransform(bool bScale = false) const;
 	void Transform(const Matrix3x3& rotation, const Point3& translation, REAL scale);
 	void Transform(const Matrix3x4& transform);
@@ -122,19 +125,21 @@ public:
 	REAL ComputeLeveledVolume(float planeThreshold=0, float sampleMesh=-100000, unsigned upAxis=2, bool verbose=true);
 	void AddNoiseCameraPoses(float epsPosition, float epsRotation);
 	Scene SubScene(const IIndexArr& idxImages) const;
-	Scene& CropToROI(const OBB3f&, unsigned minNumPoints = 3);
+	Scene& CropToROI(const OBB3f&, unsigned minNumPoints=3);
+	bool EstimateROI(float scaleROI=1.1f, int upAxis=-1);
+	bool EstimateGravityDirection(Point3f& up) const;
+	FloatArr ROIPointWeights(const UnsignedArr& indices, float& medianNeighborDistance) const;
+	float ComputeDistanceCameras2Scene(float depthPercentile=0.1f, bool bForceRecompute=false, bool bUseROI=true);
 
-	// Estimate and set region-of-interest
-	bool EstimateROI(int nEstimateROI=0, float scale=1.f);
-	
 	// Tower scene
+	bool ComputeCenterLine(Line3f &camCenterLine, const Point3f* up=NULL) const;
 	bool ComputeTowerCylinder(Point2f& centerPoint, float& fRadius, float& fROIRadius, float& zMin, float& zMax, float& minCamZ, const int towerMode);
 	void InitTowerScene(const int towerMode);
 	size_t DrawCircle(PointCloud& pc,PointCloud::PointArr& outCircle, const Point3f& circleCenter, const float circleRadius, const unsigned nTargetPoints, const float fStartAngle, const float fAngleBetweenPoints);
 	PointCloud BuildTowerMesh(const PointCloud& origPointCloud, const Point2f& centerPoint, const float fRadius, const float fROIRadius, const float zMin, const float zMax, const float minCamZ, bool bFixRadius = false);
-	
+
 	// Dense reconstruction
-	bool DenseReconstruction(int nFusionMode=0, bool bCrop2ROI=true, float fBorderROI=0);
+	bool DenseReconstruction(int nFusionMode=0, bool bCrop2ROI=true, float fBorderROI=0, float fSampleMeshNeighbors=0);
 	bool ComputeDepthMaps(DenseDepthMapData& data);
 	void DenseReconstructionEstimate(void*);
 	void DenseReconstructionFilter(void*);
@@ -157,8 +162,23 @@ public:
 
 	// Mesh texturing
 	bool TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsigned minCommonCameras=0, float fOutlierThreshold=0.f, float fRatioDataSmoothness=0.3f,
-		bool bGlobalSeamLeveling=true, bool bLocalSeamLeveling=true, unsigned nTextureSizeMultiple=0, unsigned nRectPackingHeuristic=3, Pixel8U colEmpty=Pixel8U(255,127,39),
+		bool bGlobalSeamLeveling=true, bool bLocalSeamLeveling=true, unsigned nTextureSizeMultiple=0, Pixel8U colEmpty=Pixel8U(255,127,39),
 		float fSharpnessWeight=0.5f, int ignoreMaskLabel=-1, int maxTextureSize=0, const IIndexArr& views=IIndexArr());
+
+	// Reconstruction quality assessment
+	struct Score {
+		float completeness{0}; // fraction of image covered by mesh [0,1]
+		float ssim{0};         // SSIM in covered region [0,1]
+		float psnr{0};         // PSNR in dB (diagnostic)
+		float score() const { return 100.f * completeness * ssim; }
+	};
+	struct ImageScore : Score {
+		IIndex idxImage;
+	};
+	struct ReconstructionQuality : Score {
+		CLISTDEFIDX(ImageScore, IIndex) imageScores;
+	};
+	ReconstructionQuality ComputeReconstructionQuality(unsigned nMaxResolution = 0) const;
 
 	#ifdef _USE_BOOST
 	// implement BOOST serialization

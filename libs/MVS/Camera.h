@@ -142,32 +142,12 @@ public:
 	}
 
 	// return scaled K (assuming standard K format)
-	template<typename TYPE>
-	static inline TMatrix<TYPE,3,3> ScaleK(const TMatrix<TYPE,3,3>& K, TYPE s) {
-		return TMatrix<TYPE,3,3>(
-			K(0,0)*s, K(0,1)*s, (K(0,2)+TYPE(0.5))*s-TYPE(0.5),
-			TYPE(0),  K(1,1)*s, (K(1,2)+TYPE(0.5))*s-TYPE(0.5),
-			TYPE(0), TYPE(0), TYPE(1)
-		);
-	}
 	inline KMatrix GetScaledK(REAL s) const {
 		return ScaleK(K, s);
 	}
 	// same as above, but for different scale on x and y;
 	// in order to preserve the aspect ratio of the original size, scale both focal lengths by
 	// the smaller of the scale factors, resulting in adding pixels in the dimension that's growing;
-	template<typename TYPE>
-	static inline TMatrix<TYPE,3,3> ScaleK(const TMatrix<TYPE,3,3>& K, const cv::Size& size, const cv::Size& newSize, bool keepAspect=false) {
-		ASSERT(size.area() && newSize.area());
-		cv::Point_<TYPE> s(cv::Point_<TYPE>(newSize) / cv::Point_<TYPE>(size));
-		if (keepAspect)
-			s.x = s.y = MINF(s.x, s.y);
-		return TMatrix<TYPE,3,3>(
-			K(0,0)*s.x, K(0,1)*s.x, (K(0,2)+TYPE(0.5))*s.x-TYPE(0.5),
-			TYPE(0),    K(1,1)*s.y, (K(1,2)+TYPE(0.5))*s.y-TYPE(0.5),
-			TYPE(0),    TYPE(0),    TYPE(1)
-		);
-	}
 	inline KMatrix GetScaledK(const cv::Size& size, const cv::Size& newSize, bool keepAspect=false) const {
 		return ScaleK(K, size, newSize, keepAspect);
 	}
@@ -187,7 +167,8 @@ public:
 		return InvK(K);
 	}
 
-	// returns full K and the inverse of K (assuming standard K format)
+	// return full K and the inverse of K (assuming standard K format);
+	// the given resolution must be of the same aspect ratio as the normalized camera
 	template<typename TYPE>
 	inline TMatrix<TYPE,3,3> GetK(uint32_t width, uint32_t height) const {
 		ASSERT(width>0 && height>0);
@@ -304,10 +285,10 @@ public:
 		return TPoint2<TYPE>(q.x*invZ, q.y*invZ);
 	}
 	template <typename TYPE>
-	inline TPoint2<TYPE> ProjectPoint(const TPoint3<TYPE>& X) const {
+	inline std::tuple<TPoint2<TYPE>,TYPE> ProjectPoint(const TPoint3<TYPE>& X) const {
 		const TPoint3<TYPE> q(K * (R * (X - C)));
 		const TYPE invZ(INVERT(q.z));
-		return TPoint2<TYPE>(q.x*invZ, q.y*invZ);
+		return {TPoint2<TYPE>(q.x*invZ, q.y*invZ), q.z};
 	}
 	template <typename TYPE>
 	inline TPoint3<TYPE> ProjectPointP3(const TPoint3<TYPE>& X) const {
@@ -318,10 +299,10 @@ public:
 			(TYPE)(p[2*4+0]*X.x + p[2*4+1]*X.y + p[2*4+2]*X.z + p[2*4+3]));
 	}
 	template <typename TYPE>
-	inline TPoint2<TYPE> ProjectPointP(const TPoint3<TYPE>& X) const {
+	inline std::tuple<TPoint2<TYPE>,TYPE> ProjectPointP(const TPoint3<TYPE>& X) const {
 		const TPoint3<TYPE> q(ProjectPointP3(X));
 		const TYPE invZ(INVERT(q.z));
-		return TPoint2<TYPE>(q.x*invZ, q.y*invZ);
+		return {TPoint2<TYPE>(q.x*invZ, q.y*invZ), q.z};
 	}
 
 	// transform from image pixel coords to view plane coords
@@ -404,17 +385,23 @@ public:
 	}
 
 	// check if the given point (or its projection) is inside the camera view
-	template <typename TYPE>
-	inline bool IsInside(const TPoint2<TYPE>& pt, const TPoint2<TYPE>& size) const {
+	template <typename TYPE1, typename TYPE2>
+	inline bool IsInside(const TPoint2<TYPE1>& pt, const TPoint2<TYPE2>& size) const {
 		return pt.x>=0 && pt.y>=0 && pt.x<size.x && pt.y<size.y;
 	}
-	template <typename TYPE>
-	inline bool IsInsideProjection(const TPoint3<TYPE>& X, const TPoint2<TYPE>& size) const {
-		return IsInside(ProjectPoint(X), size);
+	template <typename TYPE1, typename TYPE2>
+	inline bool IsInsideProjection(const TPoint3<TYPE1>& X, const TPoint2<TYPE2>& size) const {
+		const auto [x, depth] = ProjectPoint(X);
+		if (depth <= 0)
+			return false;
+		return IsInside(x, size);
 	}
-	template <typename TYPE>
-	inline bool IsInsideProjectionP(const TPoint3<TYPE>& X, const TPoint2<TYPE>& size) const {
-		return IsInside(ProjectPointP(X), size);
+	template <typename TYPE1, typename TYPE2>
+	inline bool IsInsideProjectionP(const TPoint3<TYPE1>& X, const TPoint2<TYPE2>& size) const {
+		const auto [x, depth] = ProjectPointP(X);
+		if (depth <= 0)
+			return false;
+		return IsInside(x, size);
 	}
 
 	// same as above, but for ortho-projection
@@ -458,6 +445,29 @@ public:
 		return GetFootprintWorld(PointDepth(X));
 	}
 
+	// create the 4 image points corresponding to the image corners
+	Point2Arr GetImageCorners(const cv::Size& size) const {
+		const int maxX = size.width - 1;
+		const int maxY = size.height - 1;
+		return Point2Arr{
+			Point2(0, 0),
+			Point2(0, maxY),
+			Point2(maxX, maxY),
+			Point2(maxX, 0)
+		};
+	}
+	// compute the normalized rays in camera space corresponding to the image corners
+	Point3Arr GetCameraCornerRays(const cv::Size& size, bool bNormalize=true) const {
+		const Point2Arr corners(GetImageCorners(size));
+		Point3Arr result(4);
+		for (int i = 0; i < 4; ++i) {
+			result[i] = RayPoint(corners[i]);
+			if (bNormalize)
+				normalize(result[i]);
+		}
+		return result;
+	}
+
 	#ifdef _USE_BOOST
 	// implement BOOST serialization
 	template<class Archive>
@@ -475,10 +485,6 @@ public:
 typedef CLISTDEF0IDX(Camera,uint32_t) CameraArr;
 /*----------------------------------------------------------------*/
 
-MVS_API void DecomposeProjectionMatrix(const PMatrix& P, KMatrix& K, RMatrix& R, CMatrix& C);
-MVS_API void DecomposeProjectionMatrix(const PMatrix& P, RMatrix& R, CMatrix& C);
-MVS_API void AssembleProjectionMatrix(const KMatrix& K, const RMatrix& R, const CMatrix& C, PMatrix& P);
-MVS_API void AssembleProjectionMatrix(const RMatrix& R, const CMatrix& C, PMatrix& P);
 MVS_API Point3 ComputeCamerasFocusPoint(const CameraArr& cameras, const Point3* pInitialFocus=NULL);
 /*----------------------------------------------------------------*/
 

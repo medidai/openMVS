@@ -63,7 +63,7 @@ fill_input_buffer(j_decompress_ptr cinfo)
 	JpegSource* source = (JpegSource*)cinfo->src;
 	const size_t size = source->pStream->read(source->buffer, JPG_BUFFER_SIZE);
 	if (size == STREAM_ERROR || size == 0)
-	return FALSE;
+		return FALSE;
 	source->pub.next_input_byte = source->buffer;
 	source->pub.bytes_in_buffer = size;
 	return TRUE;
@@ -126,7 +126,7 @@ void CImageJPG::Close()
 }
 /*----------------------------------------------------------------*/
 
-HRESULT CImageJPG::ReadHeader()
+bool CImageJPG::ReadHeader()
 {
 	JpegState* state = new JpegState;
 	m_state = state;
@@ -171,22 +171,21 @@ HRESULT CImageJPG::ReadHeader()
 			break;
 		default:
 			LOG(LT_IMAGE, "error: unsupported JPG image");
-			return _INVALIDFILE;
+			return false;
 		}
-		return _OK;
+		return true;
 	}
 
 	Close();
-	return _FAIL;
+	return false;
 } // ReadHeader
 /*----------------------------------------------------------------*/
 
-HRESULT CImageJPG::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageJPG::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
-	JpegState* state = (JpegState*)m_state;
-
-	if (state && m_width && m_height)
+	if (m_state && m_width && m_height)
 	{
+		JpegState* state = (JpegState*)m_state;
 		jpeg_decompress_struct* cinfo = &state->cinfo;
 		JpegErrorMgr* jerr = &state->jerr;
 
@@ -209,28 +208,28 @@ HRESULT CImageJPG::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, S
 				for (Size j=0; j<m_height; ++j, dst+=lineWidth) {
 					jpeg_read_scanlines(cinfo, buffer, 1);
 					if (!FilterFormat(dst, dataFormat, nStride, src, m_format, m_stride, m_width))
-						return _FAIL;
+						return false;
 				}
 			}
 
 			jpeg_finish_decompress(cinfo);
-			return _OK;
+			return true;
 		}
 	}
 
 	Close();
-	return _FAIL;
+	return false;
 } // Read
 /*----------------------------------------------------------------*/
 
-HRESULT CImageJPG::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
+bool CImageJPG::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
 {
 	//TODO: to implement the JPG encoder
-	return _OK;
+	return true;
 } // WriteHeader
 /*----------------------------------------------------------------*/
 
-HRESULT CImageJPG::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageJPG::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	//TODO: to implement the JPG encoder
 	//const int quality = 100;
@@ -274,7 +273,7 @@ HRESULT CImageJPG::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 	//fclose(outfile);
 
 	//jpeg_destroy_compress(&cinfo);
-	return _OK;
+	return true;
 } // WriteData
 /*----------------------------------------------------------------*/
 

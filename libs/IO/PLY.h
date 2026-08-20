@@ -224,7 +224,7 @@ protected:
 
 	// read a line from a file and break it up into separate words 
 	typedef SEACAVE::TokenInputStream<false> STRISTREAM;
-	char** get_words(STRISTREAM&, int*, char**);
+	char** get_words(STRISTREAM&, int*, std::string*);
 
 	// write an item to a file 
 	void write_binary_item(const ValueType&, int, int);

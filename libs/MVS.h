@@ -35,10 +35,6 @@
 
 // D E F I N E S ///////////////////////////////////////////////////
 
-#define OpenMVS_VERSION_AT_LEAST(x,y,z) \
-	(OpenMVS_MAJOR_VERSION>x || (OpenMVS_MAJOR_VERSION==x && \
-	(OpenMVS_MINOR_VERSION>y || (OpenMVS_MINOR_VERSION==y && OpenMVS_PATCH_VERSION>=z))))
-
 
 // I N C L U D E S /////////////////////////////////////////////////
 

@@ -21,7 +21,7 @@ DEFINE_LOG(CImage, _T("IO      "));
 // Set the image details;
 // if image's data is not NULL, but its size is too small,
 // data's buffer is not allocated and _BUFFERSIZE is returned.
-HRESULT CImage::Reset(Size width, Size height, PIXELFORMAT pixFormat, Size levels, bool bAllocate)
+bool CImage::Reset(Size width, Size height, PIXELFORMAT pixFormat, Size levels, bool bAllocate)
 {
 	// reinitialize image with given params
 	const size_t oldDataSize = GetDataSize();
@@ -35,16 +35,16 @@ HRESULT CImage::Reset(Size width, Size height, PIXELFORMAT pixFormat, Size level
 	if (bAllocate) {
 		if (m_data != NULL) {
 			if (oldDataSize < GetDataSize())
-				return _BUFFERSIZE;
+				return false;
 		} else {
 			m_data	= new uint8_t[GetDataSize()];
 		}
 	}
-	return _OK;
+	return true;
 } // Reset
 /*----------------------------------------------------------------*/
 
-HRESULT CImage::Reset(LPCTSTR szFileName, IMCREATE mode)
+bool CImage::Reset(LPCTSTR szFileName, IMCREATE mode)
 {
 	// open the new image stream
 	m_fileName = szFileName;
@@ -58,22 +58,22 @@ HRESULT CImage::Reset(LPCTSTR szFileName, IMCREATE mode)
 	}
 	if (!f->isOpen()) {
 		delete f;
-		return _INVALIDFILE;
+		return false;
 	}
 	if ((m_pStream = f) == NULL) {
 		LOG(LT_IMAGE, _T("error: failed opening image '%s'"), szFileName);
-		return _INVALIDFILE;
+		return false;
 	}
-	return _OK;
+	return true;
 } // Reset
 /*----------------------------------------------------------------*/
 
-HRESULT CImage::Reset(IOSTREAMPTR& pStream)
+bool CImage::Reset(IOSTREAMPTR& pStream)
 {
 	// use the already opened image stream
 	m_fileName.clear();
 	m_pStream = pStream;
-	return _OK;
+	return true;
 } // Reset
 /*----------------------------------------------------------------*/
 
@@ -86,13 +86,13 @@ void CImage::Close()
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImage::ReadHeader()
+bool CImage::ReadHeader()
 {
-	return _OK;
+	return true;
 } // ReadHeader
 /*----------------------------------------------------------------*/
 
-HRESULT CImage::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImage::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	// read data
 	if (dataFormat == m_format && nStride == m_stride) {
@@ -100,31 +100,31 @@ HRESULT CImage::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size
 		if (lineWidth == m_lineWidth) {
 			const size_t nSize = m_dataHeight*m_lineWidth;
 			if (nSize != m_pStream->read(pData, nSize))
-				return _INVALIDFILE;
+				return false;
 		} else {
 			for (Size j=0; j<m_dataHeight; ++j, (uint8_t*&)pData+=lineWidth)
 				if (m_lineWidth != m_pStream->read(pData, m_lineWidth))
-					return _INVALIDFILE;
+					return false;
 		}
 	} else {
 		// read image to a buffer and convert it
 		CAutoPtrArr<uint8_t> const buffer(new uint8_t[m_lineWidth]);
 		for (Size j=0; j<m_dataHeight; ++j, (uint8_t*&)pData+=lineWidth) {
 			if (m_lineWidth != m_pStream->read(buffer, m_lineWidth))
-				return _INVALIDFILE;
+				return false;
 			if (!FilterFormat(pData, dataFormat, nStride, buffer, m_format, m_stride, m_dataWidth))
-				return _FAIL;
+				return false;
 		}
 	}
 	// prepare next level
 	if (m_level+1 < m_numLevels)
 		m_lineWidth = GetDataSizes(++m_level, m_dataWidth, m_dataHeight);
-	return _OK;
+	return true;
 } // ReadData
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImage::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
+bool CImage::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
 {
 	// write header
 	m_numLevels = numLevels;
@@ -134,11 +134,11 @@ HRESULT CImage::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BY
 	m_width = width;
 	m_height = height;
 	m_lineWidth = GetDataSizes(0, m_dataWidth, m_dataHeight);
-	return _OK;
+	return true;
 } // WriteHeader
 /*----------------------------------------------------------------*/
 
-HRESULT CImage::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImage::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	// write data
 	if (dataFormat == m_format && nStride == m_stride) {
@@ -146,26 +146,26 @@ HRESULT CImage::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Siz
 		if (lineWidth == m_lineWidth) {
 			const size_t nSize = m_dataHeight*m_lineWidth;
 			if (nSize != m_pStream->write(pData, nSize))
-				return _INVALIDFILE;
+				return false;
 		} else {
 			for (Size j=0; j<m_dataHeight; ++j, (uint8_t*&)pData+=lineWidth)
 				if (m_lineWidth != m_pStream->write(pData, m_lineWidth))
-					return _INVALIDFILE;
+					return false;
 		}
 	} else {
 		// convert data to a buffer and write it
 		CAutoPtrArr<uint8_t> const buffer(new uint8_t[m_lineWidth]);
 		for (Size j=0; j<m_dataHeight; ++j, (uint8_t*&)pData+=lineWidth) {
 			if (!FilterFormat(buffer, m_format, m_stride, pData, dataFormat, nStride, m_dataWidth))
-				return _FAIL;
+				return false;
 			if (m_lineWidth != m_pStream->write(buffer, m_lineWidth))
-				return _INVALIDFILE;
+				return false;
 		}
 	}
 	// prepare next level
 	if (m_level+1 < m_numLevels)
 		m_lineWidth = GetDataSizes(++m_level, m_dataWidth, m_dataHeight);
-	return _OK;
+	return true;
 } // WriteData
 /*----------------------------------------------------------------*/
 
@@ -908,11 +908,10 @@ CImage* CImage::Create(LPCTSTR szName, IMCREATE mode)
 		goto UNKNOWN_FORMAT;
 
 	// open the image stream
-	if (FAILED(pImage->Reset(szName, mode))) {
+	if (!pImage->Reset(szName, mode)) {
 		delete pImage;
 		return NULL;
 	}
-
 	return pImage;
 
 UNKNOWN_FORMAT:

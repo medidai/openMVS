@@ -31,6 +31,7 @@
 
 #include "Common.h"
 #include "Image.h"
+#include "Window.h"
 
 using namespace VIEWER;
 
@@ -42,8 +43,7 @@ using namespace VIEWER;
 
 Image::Image(MVS::IIndex _idx)
 	:
-	idx(_idx),
-	texture(0)
+	idx(_idx)
 {
 }
 Image::~Image()
@@ -51,12 +51,29 @@ Image::~Image()
 	Release();
 }
 
+Image::Image(Image &&other) noexcept
+	:
+	Texture(std::move(other)),
+	idx(other.idx),
+	opacity(other.opacity),
+	pImage(other.pImage)
+{
+}
+
+Image &Image::operator=(Image &&other) noexcept
+{
+	if (this != &other) {
+		Texture::operator=(std::move(other));
+		idx = other.idx;
+		opacity = other.opacity;
+		pImage = other.pImage;
+	}
+	return *this;
+}
+
 void Image::Release()
 {
-	if (IsValid()) {
-		glDeleteTextures(1, &texture);
-		texture = 0;
-	}
+	Texture::Release();
 	ReleaseImage();
 }
 void Image::ReleaseImage()
@@ -66,6 +83,11 @@ void Image::ReleaseImage()
 		Thread::safeExchange(pImage.ptr, (int_t)IMG_NULL);
 		delete p;
 	}
+}
+void Image::CancelImageLoading()
+{
+	if (IsImageLoading())
+		Thread::safeExchange(pImage.ptr, (int_t)IMG_NULL);
 }
 
 void Image::SetImageLoading()
@@ -77,48 +99,15 @@ void Image::AssignImage(cv::InputArray img)
 {
 	ASSERT(IsImageLoading());
 	ImagePtrInt pImg(new cv::Mat(img.getMat()));
-	if (pImg.pImage->cols%4 != 0) {
-		// make sure the width is multiple of 4 (seems to be an OpenGL limitation)
-		cv::resize(*pImg.pImage, *pImg.pImage, cv::Size((pImg.pImage->cols/4)*4, pImg.pImage->rows), 0, 0, cv::INTER_AREA);
-	}
 	Thread::safeExchange(pImage.ptr, pImg.ptr);
 }
 bool Image::TransferImage()
 {
 	if (!IsImageValid())
 		return false;
-	SetImage(*pImage);
-	glfwPostEmptyEvent();
+	Create(*pImage, true);
 	ReleaseImage();
+	Window::RequestRedraw();
 	return true;
-}
-
-void Image::SetImage(cv::InputArray img)
-{
-	cv::Mat image(img.getMat());
-	glEnable(GL_TEXTURE_2D);
-	// create texture
-	glGenTextures(1, &texture);
-	// select our current texture
-	glBindTexture(GL_TEXTURE_2D, texture);
-	// load texture
-	width = image.cols;
-	height = image.rows;
-	ASSERT(image.channels() == 1 || image.channels() == 3);
-	ASSERT(image.isContinuous());
-	glTexImage2D(GL_TEXTURE_2D,
-				 0, image.channels(),
-				 width, height,
-				 0, (image.channels() == 1) ? GL_LUMINANCE : GL_BGR,
-				 GL_UNSIGNED_BYTE, image.ptr<uint8_t>());
-	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-}
-void Image::GenerateMipmap() const {
-	glBindTexture(GL_TEXTURE_2D, texture);
-	glGenerateMipmap(GL_TEXTURE_2D);
-}
-void Image::Bind() const {
-	glBindTexture(GL_TEXTURE_2D, texture);
 }
 /*----------------------------------------------------------------*/

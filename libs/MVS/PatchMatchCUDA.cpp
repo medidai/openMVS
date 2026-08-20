@@ -32,30 +32,58 @@
 #include "Common.h"
 #include "PatchMatchCUDA.h"
 #include "DepthMap.h"
+#include "ConfidenceCUDA.h"
 
 #ifdef _USE_CUDA
 
 
-
 // D E F I N E S ///////////////////////////////////////////////////
+
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
 
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("PtchMtch"));
 
 namespace MVS {
 
 namespace CUDA {
 
-PatchMatch::PatchMatch(int device)
+// Kernel-launch serializer for the CUDA backend. The kernels read cameras/params
+// from module-global __constant__ memory (g_cameras / g_params, see
+// PatchMatchCUDA.cu), which is shared by every PatchMatch instance on the
+// device. Concurrent overlap would race the __constant__ writes against an
+// in-flight kernel's reads.
+//
+// Strategy: a global cudaEvent_t chains worker N+1's kernels behind worker N's
+// kernels on the GPU side. A tiny host mutex covers only the queueing sequence
+// {wait-event, upload-cameras, queue-kernels, record-event} so the host releases
+// after queueing (~1ms) rather than after kernel execution (~80-400ms). Each
+// worker then cudaStreamSynchronize's its own stream outside the mutex before
+// reading results into its per-instance pinned buffer.
+namespace {
+std::mutex g_patchMatchCudaMutex;
+cudaEvent_t g_constMemReady = nullptr;
+std::once_flag g_constMemEventInit;
+} // anonymous namespace
+
+PatchMatch::PatchMatch()
+	: cudaStream(0)
 {
 	// initialize CUDA device if needed
 	if (SEACAVE::CUDA::devices.IsEmpty())
-		SEACAVE::CUDA::initDevice(device);
+		SEACAVE::CUDA::initDevices(SEACAVE::CUDA::desiredDeviceIDs);
+	CUDA_CHECK(cudaStreamCreate(&cudaStream));
 }
 
 PatchMatch::~PatchMatch()
 {
 	Release();
+	if (cudaStream)
+		cudaStreamDestroy(cudaStream);
 }
 
 void PatchMatch::Release()
@@ -80,21 +108,61 @@ void PatchMatch::Release()
 	images.clear();
 	cameras.clear();
 
+	for (float*& p : hostImageStaging) if (p) cudaFreeHost(p);
+	hostImageStaging.clear();
+	hostImageStagingArea.clear();
+	for (float*& p : hostDepthPriorStaging) if (p) cudaFreeHost(p);
+	hostDepthPriorStaging.clear();
+	hostDepthPriorStagingArea.clear();
+
 	ReleaseCUDA();
+}
+
+// pinned staging wins on large images (driver-internal staging stall scales with
+// area) but loses on small ones (cudaHostAlloc + explicit memcpy overhead is fixed)
+void PatchMatch::StagedUploadCvMat(cudaArray_t dst, const cv::Mat1f& src,
+	std::vector<float*>& slots, std::vector<size_t>& areas, size_t slotIdx)
+{
+	ASSERT(src.type() == CV_32FC1);
+	const size_t area = (size_t)src.rows * (size_t)src.cols;
+	const size_t rowBytes = (size_t)src.cols * sizeof(float);
+	constexpr size_t kPinnedStagingThresholdArea = 1500000;
+	if (area < kPinnedStagingThresholdArea) {
+		CUDA_CHECK(cudaMemcpy2DToArrayAsync(dst, 0, 0, src.ptr<float>(), src.step[0],
+			rowBytes, src.rows, cudaMemcpyHostToDevice, cudaStream));
+		return;
+	}
+	if (slots.size() <= slotIdx) slots.resize(slotIdx + 1, nullptr);
+	if (areas.size() <= slotIdx) areas.resize(slotIdx + 1, 0);
+	if (slots[slotIdx] == nullptr || areas[slotIdx] < area) {
+		if (slots[slotIdx]) CUDA_CHECK(cudaFreeHost(slots[slotIdx]));
+		CUDA_CHECK(cudaHostAlloc((void**)&slots[slotIdx], area * sizeof(float), cudaHostAllocDefault));
+		areas[slotIdx] = area;
+	}
+	float* dstPinned = slots[slotIdx];
+	if (src.isContinuous() && src.step[0] == rowBytes) {
+		memcpy(dstPinned, src.ptr<float>(), area * sizeof(float));
+	} else {
+		for (int r = 0; r < src.rows; ++r)
+			memcpy(dstPinned + (size_t)r * src.cols, src.ptr<float>(r), rowBytes);
+	}
+	CUDA_CHECK(cudaMemcpy2DToArrayAsync(dst, 0, 0, dstPinned, rowBytes,
+		rowBytes, src.rows, cudaMemcpyHostToDevice, cudaStream));
 }
 
 void PatchMatch::ReleaseCUDA()
 {
 	cudaFree(cudaTextureImages);
-	cudaFree(cudaCameras);
 	cudaFree(cudaDepthNormalEstimates);
 	cudaFree(cudaDepthNormalCosts);
 	cudaFree(cudaRandStates);
 	cudaFree(cudaSelectedViews);
 	if (params.bGeomConsistency)
 		cudaFree(cudaTextureDepths);
-
-	delete[] depthNormalEstimates;
+	if (depthNormalEstimates) {
+		cudaFreeHost(depthNormalEstimates);
+		depthNormalEstimates = NULL;
+	}
 }
 
 void PatchMatch::Init(bool bGeomConsistency)
@@ -112,12 +180,12 @@ void PatchMatch::AllocatePatchMatchCUDA(const cv::Mat1f& image)
 {
 	const size_t num_images = images.size();
 	CUDA_CHECK(cudaMalloc((void**)&cudaTextureImages, sizeof(cudaTextureObject_t) * num_images));
-	CUDA_CHECK(cudaMalloc((void**)&cudaCameras, sizeof(Camera) * num_images));
 	if (params.bGeomConsistency)
 		CUDA_CHECK(cudaMalloc((void**)&cudaTextureDepths, sizeof(cudaTextureObject_t) * (num_images-1)));
 
 	const size_t size = image.size().area();
-	depthNormalEstimates = new Point4[size];
+	// pin estimates buffer so the H<->D copies on cudaStream run as true DMA-async without driver staging
+	CUDA_CHECK(cudaHostAlloc((void**)&depthNormalEstimates, sizeof(Point4) * size, cudaHostAllocDefault));
 	CUDA_CHECK(cudaMalloc((void**)&cudaDepthNormalEstimates, sizeof(Point4) * size));
 
 	CUDA_CHECK(cudaMalloc((void**)&cudaDepthNormalCosts, sizeof(float) * size));
@@ -174,7 +242,7 @@ void PatchMatch::AllocateImageCUDA(size_t i, const cv::Mat1f& image, bool bInitI
 	}
 }
 
-void PatchMatch::EstimateDepthMap(DepthData& depthData)
+void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConfRequest)
 {
 	TD_TIMER_STARTD();
 
@@ -189,7 +257,7 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 	IIndex prevNumImages = (IIndex)images.size();
 	const IIndex numImages = depthData.images.size();
 	params.nNumViews = (int)numImages-1;
-	params.nInitTopK = std::min(params.nInitTopK, params.nNumViews);
+	params.nInitTopK = MINF(params.nInitTopK, params.nNumViews);
 	params.fDepthMin = depthData.dMin;
 	params.fDepthMax = depthData.dMax;
 	if (prevNumImages < numImages) {
@@ -213,10 +281,11 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 		if (scaleNumber != totalScaleNumber) {
 			// all resolutions, but the smallest one, if multi-resolution is enabled
 			params.bLowResProcessed = true;
-			cv::resize(lowResDepthMap, depthData.depthMap, size, 0, 0, cv::INTER_LINEAR);
+			// INTER_NEAREST preserves [dMin, dMax] / normalized-normals / correct-view-IDs
+			cv::resize(lowResDepthMap, depthData.depthMap, size, 0, 0, cv::INTER_NEAREST);
 			cv::resize(lowResNormalMap, depthData.normalMap, size, 0, 0, cv::INTER_NEAREST);
 			cv::resize(lowResViewsMap, depthData.viewsMap, size, 0, 0, cv::INTER_NEAREST);
-			CUDA_CHECK(cudaMalloc((void**)&cudaLowDepths, sizeof(float) * size.area()));
+			CUDA_CHECK(cudaMallocAsync((void**)&cudaLowDepths, sizeof(float) * size.area(), cudaStream));
 		} else {
 			if (totalScaleNumber > 0) {
 				// smallest resolution, when multi-resolution is enabled
@@ -291,13 +360,16 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 				}
 				AllocateImageCUDA(i, image, false, !view.depthMap.empty());
 			}
-			CUDA_CHECK(cudaMemcpy2DToArray(cudaImageArrays[i], 0, 0, image.ptr<float>(), image.step[0], image.cols * sizeof(float), image.rows, cudaMemcpyHostToDevice));
+			// large images stage through per-instance pinned slot for a truly-async
+			// H->D DMA on cudaStream; small images fall through to direct pageable
+			// DMA inside StagedUploadCvMat (driver-internal staging is cheaper)
+			StagedUploadCvMat(cudaImageArrays[i], image, hostImageStaging, hostImageStagingArea, (size_t)i);
 			if (params.bGeomConsistency && i > 0 && !view.depthMap.empty()) {
 				// set previously computed depth-map
 				DepthMap depthMap(view.depthMap);
 				if (depthMap.size() != image.size())
 					cv::resize(depthMap, depthMap, image.size(), 0, 0, cv::INTER_LINEAR);
-				CUDA_CHECK(cudaMemcpy2DToArray(cudaDepthArrays[i-1], 0, 0, depthMap.ptr<float>(), depthMap.step[0], sizeof(float) * depthMap.cols, depthMap.rows, cudaMemcpyHostToDevice));
+				StagedUploadCvMat(cudaDepthArrays[i-1], depthMap, hostDepthPriorStaging, hostDepthPriorStagingArea, (size_t)(i-1));
 			}
 			images[i] = std::move(image);
 			cameras[i] = std::move(camera);
@@ -324,13 +396,12 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 		}
 		prevNumImages = numImages;
 
-		// setup CUDA memory
-		CUDA_CHECK(cudaMemcpy(cudaTextureImages, textureImages.data(), sizeof(cudaTextureObject_t) * numImages, cudaMemcpyHostToDevice));
-		CUDA_CHECK(cudaMemcpy(cudaCameras, cameras.data(), sizeof(Camera) * numImages, cudaMemcpyHostToDevice));
+		// setup CUDA memory (queued on cudaStream)
+		CUDA_CHECK(cudaMemcpyAsync(cudaTextureImages, textureImages.data(), sizeof(cudaTextureObject_t) * numImages, cudaMemcpyHostToDevice, cudaStream));
 		if (params.bGeomConsistency) {
 			// set previously computed depth-maps
 			ASSERT(depthData.depthMap.size() == depthData.GetView().image.size());
-			CUDA_CHECK(cudaMemcpy(cudaTextureDepths, textureDepths.data(), sizeof(cudaTextureObject_t) * params.nNumViews, cudaMemcpyHostToDevice));
+			CUDA_CHECK(cudaMemcpyAsync(cudaTextureDepths, textureDepths.data(), sizeof(cudaTextureObject_t) * params.nNumViews, cudaMemcpyHostToDevice, cudaStream));
 		}
 
 		// load depth-map and normal-map into CUDA memory
@@ -344,20 +415,79 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 				depthNormal.w() = depthData.depthMap(r, c);
 			}
 		}
-		CUDA_CHECK(cudaMemcpy(cudaDepthNormalEstimates, depthNormalEstimates, sizeof(Point4) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice));
+		// pinned host buffer => DMA-async on cudaStream
+		CUDA_CHECK(cudaMemcpyAsync(cudaDepthNormalEstimates, depthNormalEstimates, sizeof(Point4) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice, cudaStream));
 
 		// load low resolution depth-map into CUDA memory
 		if (params.bLowResProcessed) {
 			ASSERT(depthData.depthMap.isContinuous());
-			CUDA_CHECK(cudaMemcpy(cudaLowDepths, depthData.depthMap.ptr<float>(), sizeof(float) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice));
+			CUDA_CHECK(cudaMemcpyAsync(cudaLowDepths, depthData.depthMap.ptr<float>(), sizeof(float) * depthData.depthMap.size().area(), cudaMemcpyHostToDevice, cudaStream));
 		}
 
-		// run CUDA patch-match
+		// run CUDA patch-match: GPU-side event chains successive workers'
+		// kernel sequences so the next worker's __constant__ writes wait for
+		// the previous worker's kernels to finish reading them. Host mutex
+		// covers only the queueing window, not kernel execution.
 		ASSERT(!depthData.viewsMap.empty());
-		RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
+		std::call_once(g_constMemEventInit, []() {
+			CUDA_CHECK(cudaEventCreateWithFlags(&g_constMemReady, cudaEventDisableTiming));
+		});
+		{
+			std::lock_guard<std::mutex> queueLock(g_patchMatchCudaMutex);
+			CUDA_CHECK(cudaStreamWaitEvent(cudaStream, g_constMemReady, 0));
+			UploadCameras();
+			RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
+			CUDA_CHECK(cudaEventRecord(g_constMemReady, cudaStream));
+		}
+		// wait for our own kernels + D2H copies to finish before the unpack loop
+		// reads from the pinned host buffer
+		CUDA_CHECK(cudaStreamSynchronize(cudaStream));
 		CUDA_CHECK(cudaGetLastError());
 		if (params.bLowResProcessed)
-			CUDA_CHECK(cudaFree(cudaLowDepths));
+			CUDA_CHECK(cudaFreeAsync(cudaLowDepths, cudaStream));
+
+		// resident-buffer reuse: recalibrate the confidence as a true extension of the last
+		// geometric-consistency iteration, reading the final reference depth+normal
+		// (cudaDepthNormalEstimates) and raw NCC cost (cudaDepthNormalCosts) still resident on the
+		// device from the kernels above; only the neighbors' raw previous-iteration
+		// depth/conf/normal snapshots (host, loaded by InitViews -- the raw-neighbor-conf
+		// invariant) are uploaded. The adjusted confidence is downloaded straight into
+		// depthData.confMap, overwriting the raw cost RunCUDA already downloaded there (that D2H
+		// is kept: it is the conversion input the unpack loop below needs if this launch fails);
+		// only the cost->conf conversion is skipped. The kernels use no __constant__ state, so no
+		// serialization with other workers' PatchMatch kernels is needed beyond this instance's
+		// own stream order.
+		// On any CUDA error done stays false, the conversion below runs as usual and the caller
+		// falls back to the epilogue (re-upload) path.
+		bool bFusedConfDone(false);
+		if (pConfRequest && scaleNumber == 0 && params.bGeomConsistency &&
+			!depthData.confMap.empty() && depthData.confMap.isContinuous() &&
+			depthData.confMap.size() == depthData.depthMap.size()) {
+			// neighbor-depth texture reuse: the geometric-consistency pass already holds every
+			// neighbor's raw previous-iteration depth in cudaDepthArrays/textureDepths, so point
+			// the launcher at the resident texture instead of re-uploading the same map -- but only
+			// when the upload above did NOT resize it (view.depthMap.size() == image.size()),
+			// otherwise the texture holds an INTER_LINEAR-resized copy while the host pointer (and
+			// the CPU path) sample the native map; mismatched neighbors keep the linear upload.
+			for (ConfNeighborHost& n : pConfRequest->neighbors) {
+				n.texDepth = 0;
+				if (n.srcImage >= 1 && (size_t)n.srcImage < depthData.images.size() &&
+					(size_t)(n.srcImage-1) < textureDepths.size() && textureDepths[n.srcImage-1] != 0 &&
+					depthData.images[n.srcImage].depthMap.size() == images[n.srcImage].size() &&
+					n.width == images[n.srcImage].cols && n.height == images[n.srcImage].rows)
+					n.texDepth = (unsigned long long)textureDepths[n.srcImage-1];
+			}
+			const std::chrono::steady_clock::time_point t0(std::chrono::steady_clock::now());
+			bFusedConfDone = RunConfidenceFusedCUDA(size.width, size.height,
+				cudaDepthNormalEstimates, cudaDepthNormalCosts,
+				pConfRequest->k00, pConfRequest->k11, pConfRequest->k02, pConfRequest->k12,
+				pConfRequest->neighbors.data(), (int)pConfRequest->neighbors.size(),
+				pConfRequest->params,
+				(void*)cudaStream, depthData.confMap.ptr<float>());
+			pConfRequest->computeNS += std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - t0).count();
+			pConfRequest->done = bFusedConfDone;
+		}
 
 		// load depth-map, normal-map and confidence-map from CUDA memory
 		for (int r = 0; r < depthData.depthMap.rows; ++r) {
@@ -369,10 +499,14 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 				depthData.depthMap(r, c) = depth;
 				depthData.normalMap(r, c) = depthNormal.topLeftCorner<3, 1>();
 				if (scaleNumber == 0) {
-					// converted ZNCC [0-2] score, where 0 is best, to [0-1] confidence, where 1 is best
-					ASSERT(!depthData.confMap.empty());
-					float& conf = depthData.confMap(r, c);
-					conf = conf >= 1.f ? 0.f : 1.f - conf;
+					if (!bFusedConfDone) {
+						// converted ZNCC [0-2] score, where 0 is best, to [0-1] confidence, where 1 is
+						// best (skipped when the fused recalibration above already replaced confMap
+						// with the adjusted confidence, which is no longer a cost)
+						ASSERT(!depthData.confMap.empty());
+						float& conf = depthData.confMap(r, c);
+						conf = conf >= 1.f ? 0.f : 1.f - conf;
+					}
 					// map pixel views from bit-mask to index
 					ASSERT(!depthData.viewsMap.empty());
 					ViewsID& views = depthData.viewsMap(r, c);
@@ -393,7 +527,7 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 				}
 			}
 		}
-		
+
 		// remember sub-resolution estimates for next iteration
 		if (scaleNumber > 0) {
 			lowResDepthMap = depthData.depthMap;
@@ -421,5 +555,7 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData)
 } // namespace CUDA
 
 } // namespace MVS
+
+#pragma pop_macro("VERBOSE")
 
 #endif // _USE_CUDA
