@@ -57,9 +57,12 @@ is a client over those validated artifacts, not an independent computation.
 
 ## Evidence authority
 
-`Process<false>` is the production CUDA specialization. Endpoint, summary, and
-prefilter evidence may be used for quality ranking only after same-host output
-parity succeeds.
+`Process<false>` is the production CUDA specialization. Endpoint and prefilter
+evidence may be used for quality ranking only after same-host output parity
+succeeds. Ordinary non-APD summary capture also uses `Process<false>` and has
+the same parity requirement. APD exact aggregate summary capture instead uses
+`Process<true>` and is always diagnostic-only; the production endpoint remains
+the quality authority.
 
 The label `Process<false>` does not imply that the observer and production
 binaries are resource-equivalent. The observer translation unit contains
@@ -67,8 +70,8 @@ additional compiled branches and parameters even when the launch passes null
 observer pointers. Register, stack, spill, and occupancy measurements vary by
 compiler, architecture, and source revision, so runtime metadata reports them
 as unavailable unless a build-bound resource receipt exists. Treat the OFF
-binary as the production resource and performance authority. Summary and
-prefilter require output parity and their own timing/resource qualification.
+binary as the production resource and performance authority. Non-APD summary
+and prefilter require output parity and their own timing/resource qualification.
 
 Deep maps and admitted traces use `Process<true>` to expose candidate, cost,
 view, and update mechanics. Compiling that specialization can change register

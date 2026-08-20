@@ -31,6 +31,7 @@
 
 #include "Common.h"
 #include "PatchMatchCUDA.h"
+#include "PatchMatchAPDCUDA.h"
 #include "DepthMap.h"
 #include "ConfidenceCUDA.h"
 #ifdef _USE_DMAP_INSTRUMENTATION
@@ -114,6 +115,15 @@ static_assert(DMAP_EXACT_BASE_STATE_BYTES_PER_PIXEL == 77u,
 	"exact map resource accounting must match the exported per-state payload");
 constexpr uint64_t DMAP_EXACT_BASE_STATE_ARTIFACTS = 20u;
 constexpr uint64_t DMAP_EXACT_VIEW_ARTIFACTS = 5u;
+constexpr uint64_t DMAP_APD_MAP_STORAGE_BYTES_PER_PIXEL =
+	23u * sizeof(float) + 22u * sizeof(uint8_t);
+constexpr uint64_t DMAP_APD_MAP_ARTIFACTS_PER_ITERATION = 45u;
+constexpr uint64_t DMAP_APD_MULTISCALE_MAP_STORAGE_BYTES_PER_PIXEL = 6u * sizeof(uint8_t);
+constexpr uint64_t DMAP_APD_MULTISCALE_MAP_ARTIFACTS = 6u;
+static_assert(DMAP_APD_MAP_STORAGE_BYTES_PER_PIXEL == 114u,
+	"APD map resource accounting must match the exported per-iteration payload");
+static_assert(DMAP_APD_MULTISCALE_MAP_STORAGE_BYTES_PER_PIXEL == 6u,
+	"APD multiscale map accounting must match three transferred and three output byte maps");
 constexpr uint64_t DMAP_INSTRUMENT_FIXED_HOST_BYTES = 256u * 1024u;
 constexpr uint64_t DMAP_SUMMARY_HOST_SCRATCH_BYTES_PER_PIXEL = sizeof(float);
 constexpr uint64_t DMAP_MAP_EXPORT_HOST_SCRATCH_BYTES_PER_PIXEL =
@@ -143,6 +153,10 @@ struct InstrumentExtendedMaps {
 	bool exactAvailable = false;
 	bool prefilterRequested = false;
 	bool prefilterAvailable = false;
+	bool apdRequested = false;
+	bool apdAvailable = false;
+	bool apdMapsAvailable = false;
+	bool apdStageActive = false;
 	String resourceDecision = _T("not_requested");
 	String exactUnavailableReason;
 	String prefilterUnavailableReason;
@@ -167,6 +181,14 @@ struct InstrumentExtendedMaps {
 	uint64_t legacyMapStorageBytes = 0;
 	uint64_t exactStorageBytes = 0;
 	uint64_t prefilterStorageBytes = 0;
+	uint64_t apdSummaryDeviceBytes = 0;
+	uint64_t apdSummaryHostBytes = 0;
+	uint64_t apdTraceDeviceBytes = 0;
+	uint64_t apdTraceHostBytes = 0;
+	uint64_t apdTraceStorageBytes = 0;
+	uint64_t apdMapDeviceBytes = 0;
+	uint64_t apdMapHostBytes = 0;
+	uint64_t apdMapStorageBytes = 0;
 	bool storagePreflightAttempted = false;
 	bool storagePreflightSucceeded = false;
 	uint64_t storageAvailableBytes = 0;
@@ -201,6 +223,17 @@ struct InstrumentExtendedMaps {
 	std::vector<uint8_t> acceptedUpdateCount;
 	std::vector<Point4> planesBeforeFilter;
 	std::vector<float> costsBeforeFilter;
+	std::vector<PatchMatchAPDInstrumentCounters> apdCounters;
+	std::vector<PatchMatchAPDInstrumentState> apdStates;
+	std::vector<PatchMatchAPDInstrumentUpdate> apdUpdates;
+	std::vector<PatchMatchAPDInstrumentTrace> apdTraces;
+	nlohmann::json apdMultiscale = nlohmann::json::object();
+	std::vector<uint8_t> apdTransferredReliability;
+	std::vector<uint8_t> apdTransferredAnchorCounts;
+	std::vector<uint8_t> apdTransferredDeformableEligible;
+	std::vector<uint8_t> apdOutputReliability;
+	std::vector<uint8_t> apdOutputAnchorCounts;
+	std::vector<uint8_t> apdOutputDeformableEligible;
 };
 
 struct InstrumentSidecarWriteError {
@@ -322,6 +355,9 @@ const char* InstrumentSourceName(int source)
 	case PM_SOURCE_REFINE_SURFACE_NORMAL: return "refine_surface_normal";
 	case PM_SOURCE_FILTERED: return "filtered";
 	case PM_SOURCE_CHANGED_UNKNOWN: return "changed_unknown";
+	case PM_SOURCE_APD_ANCHOR_PROPAGATE: return "apd_anchor_propagate";
+	case PM_SOURCE_APD_FITTED_PLANE: return "apd_fitted_plane";
+	case PM_SOURCE_APD_FINAL_REFINEMENT: return "apd_final_refinement";
 	default: return "unknown";
 	}
 }
@@ -346,8 +382,418 @@ const char* InstrumentCandidateTypeName(int type)
 	case PM_CANDIDATE_PROPAGATION: return "propagation";
 	case PM_CANDIDATE_RANDOM_PERTURBATION: return "random_perturbation";
 	case PM_CANDIDATE_REFINEMENT: return "refinement";
+	case PM_CANDIDATE_APD_FITTED_PLANE: return "apd_fitted_plane";
+	case PM_CANDIDATE_APD_FINAL_REFINEMENT: return "apd_final_refinement";
 	default: return "unknown";
 	}
+}
+
+const char* APDProfileReasonName(int reason)
+{
+	switch (static_cast<APDProfileReason>(reason)) {
+	case APDProfileReason::UNKNOWN_INVALID_INPUT: return "unknown_invalid_input";
+	case APDProfileReason::UNKNOWN_NONFINITE_COST: return "unknown_nonfinite_cost";
+	case APDProfileReason::UNRELIABLE_NO_LOCAL_MINIMUM: return "unreliable_no_local_minimum";
+	case APDProfileReason::UNRELIABLE_GLOBAL_MINIMUM_OUTSIDE_ETA: return "unreliable_global_minimum_outside_eta";
+	case APDProfileReason::UNRELIABLE_GLOBAL_MINIMUM_COST_TOO_HIGH: return "unreliable_global_minimum_cost_too_high";
+	case APDProfileReason::UNRELIABLE_SINGLE_MINIMUM_COST_NOT_STRICTLY_BELOW_T2: return "unreliable_single_minimum_cost_not_strictly_below_t2";
+	case APDProfileReason::UNRELIABLE_MULTI_MINIMUM_SEPARATION_NOT_ABOVE_T3: return "unreliable_multi_minimum_separation_not_above_t3";
+	case APDProfileReason::RELIABLE_SINGLE_MINIMUM: return "reliable_single_minimum";
+	case APDProfileReason::RELIABLE_SEPARATED_MINIMA: return "reliable_separated_minima";
+	default: return "unknown";
+	}
+}
+
+const char* APDAnchorReasonName(int reason)
+{
+	switch (reason) {
+	case PM_APD_ANCHOR_UNKNOWN: return "unknown";
+	case PM_APD_ANCHOR_PIXEL_NOT_UNRELIABLE: return "pixel_not_unreliable";
+	case PM_APD_ANCHOR_INVALID_CENTER_DEPTH: return "invalid_center_depth";
+	case PM_APD_ANCHOR_INSUFFICIENT_SECTOR_CANDIDATES: return "insufficient_sector_candidates";
+	case PM_APD_ANCHOR_NO_VALID_RANSAC_MODEL: return "no_valid_ransac_model";
+	case PM_APD_ANCHOR_INSUFFICIENT_MODEL_INLIERS: return "insufficient_model_inliers";
+	case PM_APD_ANCHOR_READY: return "ready";
+	default: return "unknown";
+	}
+}
+
+const char* APDViewSelectionModeName(int mode)
+{
+	switch (static_cast<APDViewSelectionMode>(mode)) {
+	case APDViewSelectionMode::NATIVE: return "native";
+	case APDViewSelectionMode::ANCHOR_EVIDENCE: return "anchor_evidence";
+	case APDViewSelectionMode::PREVIOUS_WEIGHTS_FALLBACK: return "previous_weights_fallback";
+	case APDViewSelectionMode::SELECTED_MASK_FALLBACK: return "selected_mask_fallback";
+	case APDViewSelectionMode::FIRST_VIEW_FALLBACK: return "first_view_fallback";
+	default: return "unknown";
+	}
+}
+
+const char* APDStageClockStatusName(APDStageClockStatus status)
+{
+	switch (status) {
+	case APDStageClockStatus::VALID: return "valid";
+	case APDStageClockStatus::INVALID_LEVEL_COUNT: return "invalid_level_count";
+	case APDStageClockStatus::INVALID_LEVEL_INDEX: return "invalid_level_index";
+	case APDStageClockStatus::INVALID_STAGE_INDEX: return "invalid_stage_index";
+	default: return "unknown";
+	}
+}
+
+const char* APDMultiscaleTransferStatusName(APDMultiscaleTransferStatus status)
+{
+	switch (status) {
+	case APDMultiscaleTransferStatus::VALID: return "valid";
+	case APDMultiscaleTransferStatus::UNAVAILABLE_NO_SOURCE: return "unavailable_no_source";
+	case APDMultiscaleTransferStatus::INVALID_VERSION: return "invalid_version";
+	case APDMultiscaleTransferStatus::INVALID_SOURCE_SIZE: return "invalid_source_size";
+	case APDMultiscaleTransferStatus::INVALID_DESTINATION_SIZE: return "invalid_destination_size";
+	case APDMultiscaleTransferStatus::INVALID_LEVEL: return "invalid_level";
+	case APDMultiscaleTransferStatus::INVALID_STAGE: return "invalid_stage";
+	default: return "unknown";
+	}
+}
+
+nlohmann::json APDMultiscaleStageJson(const PatchMatch::Params& params)
+{
+	APDStageClock clock;
+	clock.levelIndex = params.nAPDLevelIndex;
+	clock.levelCount = params.nAPDLevelCount;
+	clock.stageIndex = params.nAPDStageIndex;
+	clock.hasTransferredState = params.bAPDTransferredState;
+	clock.geometricConsistency = params.bGeomConsistency;
+	const APDStageClockStatus clockStatus(ValidateAPDStageClock(clock));
+	const APDStageSchedule schedule(ResolveAPDStageSchedule(clock));
+	const APDMultiscaleTransferStatus transferStatus(
+		static_cast<APDMultiscaleTransferStatus>(params.nAPDTransferStatus));
+	return {
+		{"schema_name", "openmvs.dmap.apd_multiscale_stage"},
+		{"schema_version", 1},
+		{"state_schema_version", APD_MULTISCALE_STATE_VERSION},
+		{"clock", {
+			{"level_index", clock.levelIndex},
+			{"level_count", clock.levelCount},
+			{"stage_index", clock.stageIndex},
+			{"geometric_consistency", clock.geometricConsistency},
+			{"status", APDStageClockStatusName(clockStatus)}
+		}},
+		{"transfer", {
+			{"status_code", params.nAPDTransferStatus},
+			{"status", APDMultiscaleTransferStatusName(transferStatus)},
+			{"available", clock.hasTransferredState},
+			{"resize", clock.hasTransferredState ? "opencv_inter_nearest" : "not_applied"}
+		}},
+		{"schedule", {
+			{"valid", schedule.valid},
+			{"policy", schedule.conventional ? "conventional_native" : "adaptive_patch_deformation"},
+			{"consumes_transferred_reliability_at_iteration_zero", schedule.consumesTransferredState},
+			{"reliability_eta", schedule.reliabilityEta},
+			{"ransac_normalized_threshold", schedule.ransacNormalizedThreshold},
+			{"checkerboard_exposure", "timings_only"}
+		}}
+	};
+}
+
+nlohmann::json APDReliabilityMapStats(const Image8U& image)
+{
+	uint64_t counts[4] = {};
+	for (int i=0; i<image.area(); ++i) {
+		const unsigned value(image[i]);
+		++counts[value <= static_cast<unsigned>(APDReliabilityClass::RELIABLE) ? value : 3u];
+	}
+	const uint64_t total(static_cast<uint64_t>(image.area()));
+	return {
+		{"available", !image.empty()},
+		{"width", image.cols},
+		{"height", image.rows},
+		{"num_pixels", total},
+		{"unknown", counts[static_cast<unsigned>(APDReliabilityClass::UNKNOWN)]},
+		{"unreliable", counts[static_cast<unsigned>(APDReliabilityClass::UNRELIABLE)]},
+		{"reliable", counts[static_cast<unsigned>(APDReliabilityClass::RELIABLE)]},
+		{"invalid_code", counts[3]},
+		{"reliable_ratio", total ? nlohmann::json((double)counts[2]/(double)total) : nlohmann::json(nullptr)}
+	};
+}
+
+nlohmann::json APDByteMapStats(const Image8U& image, bool booleanMap)
+{
+	uint64_t sum(0u), nonzero(0u);
+	unsigned maximum(0u);
+	for (int i=0; i<image.area(); ++i) {
+		const unsigned value(image[i]);
+		sum += value;
+		nonzero += value != 0u;
+		maximum = MAXF(maximum, value);
+	}
+	const uint64_t total(static_cast<uint64_t>(image.area()));
+	return {
+		{"available", !image.empty()},
+		{"width", image.cols},
+		{"height", image.rows},
+		{"num_pixels", total},
+		{"nonzero", nonzero},
+		{"nonzero_ratio", total ? nlohmann::json((double)nonzero/(double)total) : nlohmann::json(nullptr)},
+		{"mean", total ? nlohmann::json((double)sum/(double)total) : nlohmann::json(nullptr)},
+		{"maximum", maximum},
+		{"expected_domain", booleanMap ? "0_or_1" : "nonnegative_uint8"}
+	};
+}
+
+nlohmann::json APDMultiscaleObservabilityJson(
+	const PatchMatch::Params& params,
+	const APDMultiscaleStateHeader* sourceHeader,
+	const Image8U& transferredReliability,
+	const Image8U& transferredAnchorCounts,
+	const Image8U& transferredDeformableEligible,
+	const Image8U& outputReliability,
+	const Image8U& outputAnchorCounts,
+	const Image8U& outputDeformableEligible)
+{
+	nlohmann::json result(APDMultiscaleStageJson(params));
+	const bool transferred(params.bAPDTransferredState);
+	result["source_state"] = sourceHeader ? nlohmann::json({
+		{"available", true},
+		{"version", sourceHeader->version},
+		{"width", sourceHeader->width},
+		{"height", sourceHeader->height},
+		{"level_index", sourceHeader->sourceLevelIndex},
+		{"stage_index", sourceHeader->sourceStageIndex}
+	}) : nlohmann::json({{"available", false}});
+	result["input_state"] = {
+		{"available", transferred},
+		{"reliability", APDReliabilityMapStats(transferredReliability)},
+		{"anchor_count_provenance", APDByteMapStats(transferredAnchorCounts, false)},
+		{"deformable_eligible_provenance", APDByteMapStats(transferredDeformableEligible, true)},
+		{"iteration_zero_consumes", "reliability"},
+		{"provenance_maps_directly_consumed", false},
+		{"selected_views_source", params.bLowResProcessed ?
+			"native_openmvs_nearest_resized_low_resolution_views_map" : "current_stage_initialization"}
+	};
+	result["output_state"] = {
+		{"available", !outputReliability.empty()},
+		{"reliability", APDReliabilityMapStats(outputReliability)},
+		{"anchor_count_provenance", APDByteMapStats(outputAnchorCounts, false)},
+		{"deformable_eligible_provenance", APDByteMapStats(outputDeformableEligible, true)},
+		{"classifier_view_weight_source", transferred ?
+			"final_apd_iteration_weights" : "uniform_expansion_of_native_selected_view_mask"},
+		{"classifier_view_weight_quality", transferred ? "exact_runtime_state" : "compatibility_derived"}
+	};
+	result["availability"] = {
+		{"historical_coarsest_monte_carlo_view_weights", false},
+		{"historical_coarsest_monte_carlo_view_weights_reason",
+			"native OpenMVS exposes only the final selected-view mask; uniform compatibility weights preserve native coarsest DMAP parity"},
+		{"runtime_reliability_transfer", transferred},
+		{"runtime_output_state", !outputReliability.empty()}
+	};
+	return result;
+}
+
+nlohmann::json APDContractJson(unsigned mode)
+{
+	const bool enabled(mode == static_cast<unsigned>(APDMode::DEFORMABLE_COST));
+	return {
+		{"mode", mode},
+		{"mode_name", enabled ? "deformable_cost" : "disabled"},
+		{"enabled", enabled},
+		{"implementation_label", enabled ? "paper_mechanics_complete_openmvs" : "disabled"},
+		{"target_label", "paper_mechanics_complete_openmvs"},
+		{"implemented_through", enabled ? "APD14-C4" : "none"},
+		{"exact_author_code_equivalence_claimed", false},
+		{"pins", {
+			{"official_repository_commit", "38660f3567b5989f74ee718382b2302c6768398e"},
+			{"colleague_donor_commit", "c6f0f2c0fe2e31ec68c54cac681cc3b1665d2f7b"},
+			{"paper", "CVPR 2023 APD paper and supplementary material"}
+		}},
+		{"profile", {
+			{"radius", APD_PROFILE_RADIUS}, {"samples", APD_PROFILE_SIZE},
+			{"maximum_cost_t1", APD_PROFILE_MAX_COST},
+			{"single_minimum_t2", APD_SINGLE_MINIMUM_MAX_COST},
+			{"minimum_separation_t3", APD_MINIMUM_SEPARATION},
+			{"separation_convention", "sqrt(sum_squared_minimum_cost_differences)/(number_of_minima-1)"},
+			{"eta_schedule", {6, 4, 2}}
+		}},
+		{"anchors", {
+			{"angular_sectors", APD_SECTOR_COUNT}, {"maximum_anchors", APD_MAX_ANCHORS},
+			{"ransac_trials", APD_RANSAC_TRIALS}, {"minimum_inliers", APD_MIN_INLIERS},
+			{"normalized_threshold_max", APD_RANSAC_NORMALIZED_THRESHOLD_MAX},
+			{"normalized_threshold_min", APD_RANSAC_NORMALIZED_THRESHOLD_MIN}
+		}},
+		{"anchor_update", {
+			{"state_semantics", "reliable black/red updates precede one immutable plane and selected-view snapshot shared by both non-reliable checkerboard phases"},
+			{"view_evidence", "accepted reliable-anchor hypotheses and their snapshot selected-view masks"},
+			{"propagation", "interpolated immutable reliable-anchor planes replace native adaptive-neighbor proposals for APD weak pixels"},
+			{"maximum_candidates", APD_MAX_ANCHORS},
+			{"view_minimum_agreement", APD_VIEW_MIN_AGREEMENT},
+			{"view_maximum_bad", APD_VIEW_MAX_BAD},
+			{"fallback_order", {"previous_iteration_weights", "snapshot_selected_mask", "first_source_view"}}
+		}},
+		{"schedule", {
+			{"classification_state", "incoming complete logical-iteration state"},
+			{"ordered_stages", {"reliable_black", "reliable_red", "anchor_and_fitted_plane_generation", "non_reliable_black", "non_reliable_red"}},
+			{"unknown_class_policy", "processed exactly once in the non-reliable stage with native fallback"}
+		}},
+		{"fitted_plane", {
+			{"source", "deterministic RANSAC model selected from reliable anchor candidates after reliable-first updates"},
+			{"candidate_position", "before random depth and normal refinement in each non-reliable pixel update"},
+			{"working_score", "deformable APD cost"},
+			{"persistent_score", "conventional native OpenMVS winner rescore"}
+		}},
+		{"final_refinement", {
+			{"domain", "conventional native OpenMVS cost"},
+			{"disparity_radius", APD_FINAL_REFINEMENT_RADIUS},
+			{"minimum_strict_improvement", APD_FINAL_REFINEMENT_MIN_IMPROVEMENT},
+			{"timing", "after the final complete logical iteration and before production filtering"}
+		}},
+		{"multiscale", {
+			{"state_schema_version", APD_MULTISCALE_STATE_VERSION},
+			{"coarsest_schedule", "conventional_native"},
+			{"active_schedule", "adaptive_patch_deformation_after_valid_state_transfer"},
+			{"transfer_interpolation", "opencv_inter_nearest"},
+			{"iteration_zero_consumes", "transferred_reliability"},
+			{"transferred_provenance_not_directly_consumed", {"anchor_count", "deformable_eligible"}},
+			{"stage_clock", "monotonic across photometric pyramid levels and geometric-consistency iterations"},
+			{"checkerboard_exposure", "timings_only"}
+		}},
+		{"patch", {
+			{"radius", APD_PATCH_RADIUS},
+			{"center_increment", APD_CENTER_PATCH_INCREMENT},
+			{"center_samples", APD_CENTER_PATCH_SAMPLES},
+			{"anchor_increment", APD_ANCHOR_PATCH_INCREMENT},
+			{"anchor_samples", APD_ANCHOR_PATCH_SAMPLES},
+			{"center_weight", APD_CENTER_WEIGHT}, {"anchor_weight", APD_ANCHOR_WEIGHT}
+		}},
+		{"compatibility_behavior", {
+			{"nearest_reliable_window", "symmetric integer [-50,+50] window (101x101) for the paper's stated 100x100 neighborhood"},
+			{"persistent_score", "APD working scores remain local; retained winners are conventionally rescored into the native OpenMVS confidence domain"},
+			{"view_threshold_schedule", "OpenMVS native 0.8*exp(-iteration^2/(2*4^2)) schedule with APD anchor evidence"},
+			{"coarsest_reliability_view_weights", "uniform expansion of the exact native final selected-view mask because historical native Monte Carlo weights are unavailable"}
+		}},
+		{"required_mechanics_not_yet_implemented", nlohmann::json::array()}
+	};
+}
+
+nlohmann::json APDObservabilityJson(
+	unsigned mode,
+	const InstrumentExtendedMaps* maps)
+{
+	nlohmann::json result(APDContractJson(mode));
+	const bool requested(maps && maps->apdRequested);
+	const bool stageActive(maps && maps->apdStageActive);
+	const bool available(maps && maps->apdAvailable && stageActive);
+	result["schema_name"] = "openmvs.dmap.apd_observability";
+	result["schema_version"] = PM_APD_INSTRUMENT_SCHEMA_VERSION;
+	result["requested"] = requested;
+	result["stage_active"] = stageActive;
+	result["summary_available"] = available;
+	result["maps_available"] = maps && maps->apdMapsAvailable && stageActive;
+	result["targeted_trace_available"] = available && maps->traceAvailable && !maps->apdTraces.empty();
+	result["state_record_bytes"] = sizeof(PatchMatchAPDInstrumentState);
+	result["update_record_bytes"] = sizeof(PatchMatchAPDInstrumentUpdate);
+	result["trace_record_bytes"] = sizeof(PatchMatchAPDInstrumentTrace);
+	result["measurement_basis"] = available ?
+		"APD hot-kernel and same-stream mechanics records" :
+		requested && !stageActive ? "unavailable_conventional_native_stage" : "unavailable";
+	result["iterations"] = nlohmann::json::array();
+	if (!available)
+		return result;
+	auto optionalMean = [](float sum, uint32_t count) {
+		return count > 0u ? nlohmann::json(sum/(float)count) : nlohmann::json(nullptr);
+	};
+	auto ratio = [](uint32_t numerator, uint32_t denominator) {
+		return denominator > 0u ? nlohmann::json((double)numerator/(double)denominator) : nlohmann::json(nullptr);
+	};
+	for (size_t iteration=0; iteration<maps->apdCounters.size(); ++iteration) {
+		const PatchMatchAPDInstrumentCounters& counter(maps->apdCounters[iteration]);
+		nlohmann::json profileReasons(nlohmann::json::object());
+		for (int reason=0; reason<PM_APD_INSTRUMENT_PROFILE_REASONS; ++reason)
+			profileReasons[APDProfileReasonName(reason)] = counter.profileReason[reason];
+		nlohmann::json anchorReasons(nlohmann::json::object());
+		for (int reason=0; reason<PM_APD_INSTRUMENT_ANCHOR_REASONS; ++reason)
+			anchorReasons[APDAnchorReasonName(reason)] = counter.anchorReason[reason];
+		nlohmann::json anchorCounts(nlohmann::json::object());
+		for (int count=0; count<=PM_APD_INSTRUMENT_ANCHORS; ++count)
+			anchorCounts[std::to_string(count)] = counter.anchorCountBins[count];
+		nlohmann::json updateSources(nlohmann::json::object());
+		for (int source=0; source<PM_INSTRUMENT_NUM_SOURCES; ++source)
+			updateSources[InstrumentSourceName(source)] = counter.updateSource[source];
+		nlohmann::json viewSelectionModes(nlohmann::json::object());
+		for (int mode=0; mode<PM_APD_INSTRUMENT_VIEW_SELECTION_MODES; ++mode)
+			viewSelectionModes[APDViewSelectionModeName(mode)] = counter.anchorViewSelectionMode[mode];
+		result["iterations"].push_back({
+			{"logical_iteration", iteration}, {"classified_pixels", counter.classified},
+			{"reliability", {
+				{"unknown", counter.reliability[0]}, {"unreliable", counter.reliability[1]},
+				{"reliable", counter.reliability[2]},
+				{"unreliable_ratio", ratio(counter.reliability[1], counter.classified)},
+				{"reliable_ratio", ratio(counter.reliability[2], counter.classified)}
+			}},
+			{"profile_reason_counts", profileReasons},
+			{"global_minimum_cost", {
+				{"samples", counter.globalMinimumCostSamples},
+				{"mean", optionalMean(counter.globalMinimumCostSum, counter.globalMinimumCostSamples)}
+			}},
+			{"profile_separation", {
+				{"samples", counter.separationSamples},
+				{"mean", optionalMean(counter.separationSum, counter.separationSamples)}
+			}},
+			{"anchor_model", {
+				{"ransac_valid_pixels", counter.ransacValid},
+				{"deformable_eligible_pixels", counter.deformableEligible},
+				{"deformable_eligible_ratio", ratio(counter.deformableEligible, counter.classified)},
+				{"anchor_count_mean", optionalMean(counter.anchorCountSum, counter.classified)},
+				{"reason_counts", anchorReasons}, {"anchor_count_histogram", anchorCounts}
+			}},
+			{"updates", {
+				{"deformable_updates", counter.deformableUpdates},
+				{"deformable_update_ratio", ratio(counter.deformableUpdates, counter.classified)},
+				{"source_counts", updateSources},
+				{"working_gap_samples", counter.workingGapSamples},
+				{"working_gap_mean", optionalMean(counter.workingGapSum, counter.workingGapSamples)},
+				{"center_cost_mean", optionalMean(counter.centerCostSum, counter.deformableUpdates)},
+				{"anchor_mean_cost_mean", optionalMean(counter.anchorMeanCostSum, counter.deformableUpdates)},
+				{"working_cost_mean", optionalMean(counter.workingCostSum, counter.deformableUpdates)},
+				{"native_persistent_cost_mean", optionalMean(counter.nativePersistentCostSum, counter.deformableUpdates)},
+				{"immutable_anchor_state_updates", counter.immutableAnchorStateUpdates},
+				{"stage_counts", {
+					{"all_compatibility", counter.stageUpdates[static_cast<unsigned>(APDUpdateStage::ALL)]},
+					{"reliable_first", counter.stageUpdates[static_cast<unsigned>(APDUpdateStage::RELIABLE)]},
+					{"non_reliable_second", counter.stageUpdates[static_cast<unsigned>(APDUpdateStage::NON_RELIABLE)]}
+				}}
+			}},
+			{"anchor_view_selection", {
+				{"attempted_pixels", counter.anchorViewSelectionAttempted},
+				{"anchor_evidence_pixels", counter.anchorViewSelectionUsed},
+				{"anchor_evidence_ratio", ratio(counter.anchorViewSelectionUsed, counter.anchorViewSelectionAttempted)},
+				{"mode_counts", viewSelectionModes}
+			}},
+			{"anchor_propagation", {
+				{"tested_candidates", counter.anchorProposalsTested},
+				{"finite_candidates", counter.anchorProposalsFinite},
+				{"accepted_events", counter.anchorProposalsAccepted},
+				{"final_winner_pixels", counter.anchorPropagationFinalWinners},
+				{"best_working_cost_samples", counter.bestAnchorWorkingCostSamples},
+				{"best_working_cost_mean", optionalMean(counter.bestAnchorWorkingCostSum, counter.bestAnchorWorkingCostSamples)},
+				{"accepted_native_cost_samples", counter.acceptedAnchorNativeCostSamples},
+				{"accepted_native_cost_mean", optionalMean(counter.acceptedAnchorNativeCostSum, counter.acceptedAnchorNativeCostSamples)}
+			}},
+			{"fitted_plane", {
+				{"available_pixels", counter.fittedPlaneAvailable},
+				{"tested_pixels", counter.fittedPlaneTested},
+				{"finite_pixels", counter.fittedPlaneFinite},
+				{"accepted_events", counter.fittedPlaneAccepted},
+				{"final_winner_pixels", counter.fittedPlaneFinalWinners}
+			}},
+			{"final_native_refinement", {
+				{"eligible_pixels", counter.finalRefinementPixels},
+				{"tested_candidates", counter.finalRefinementCandidatesTested},
+				{"finite_candidates", counter.finalRefinementCandidatesFinite},
+				{"accepted_pixels", counter.finalRefinementAccepted},
+				{"accepted_ratio", ratio(counter.finalRefinementAccepted, counter.finalRefinementPixels)}
+			}}
+		});
+	}
+	return result;
 }
 
 const char* ExactCandidateAcceptedSemantics(bool initialization)
@@ -396,6 +842,10 @@ int DMapCandidateSourceFromPatchMatch(uint8_t source)
 	switch (source) {
 	case PM_SOURCE_INIT: return DMAP_SOURCE_INIT_RANDOM;
 	case PM_SOURCE_PROPAGATE: return DMAP_SOURCE_SPATIAL_PROPAGATION;
+	case PM_SOURCE_APD_ANCHOR_PROPAGATE: return DMAP_SOURCE_SPATIAL_PROPAGATION;
+	case PM_SOURCE_APD_FITTED_PLANE:
+	case PM_SOURCE_APD_FINAL_REFINEMENT:
+		return DMAP_SOURCE_REFINEMENT;
 	case PM_SOURCE_REFINE_RANDOM_NORMAL: return DMAP_SOURCE_RANDOM_PERTURBATION;
 	case PM_SOURCE_REFINE_DEPTH:
 	case PM_SOURCE_REFINE_NORMAL:
@@ -598,7 +1048,8 @@ InstrumentExtendedMaps PlanInstrumentResources(
 	bool compatibilityMapsRequested,
 	bool mapsRequested,
 	bool exactRequested,
-	bool prefilterRequested)
+	bool prefilterRequested,
+	bool apdRequested)
 {
 	InstrumentExtendedMaps plan;
 	plan.numLogicalStates = numLogicalStates;
@@ -609,6 +1060,7 @@ InstrumentExtendedMaps PlanInstrumentResources(
 	plan.mapsRequested = mapsRequested;
 	plan.exactRequested = exactRequested;
 	plan.prefilterRequested = prefilterRequested;
+	plan.apdRequested = apdRequested;
 	plan.frameStorageCommittedBeforeBytes = frameStorageCommittedBeforeBytes;
 	plan.frameStoragePriorityReserveBytes = frameStoragePriorityReserveBytes;
 	plan.storagePreflightDecision = _T("pending");
@@ -617,6 +1069,7 @@ InstrumentExtendedMaps PlanInstrumentResources(
 	const uint64_t states((uint64_t)MAXF(numLogicalStates, 0));
 	const uint64_t views((uint64_t)MAXF(numViews, 0));
 	const uint64_t traces((uint64_t)MAXF(numTracePixels, 0));
+	const uint64_t apdStates((uint64_t)MAXF(numLogicalStates-1, 0));
 	const uint64_t traceRecords(SaturatingMul(traces, passes));
 	const uint64_t traceMapBytes(traces > 0 ? SaturatingMul(pixels, sizeof(int32_t)) : 0u);
 	plan.traceDeviceBytes = SaturatingAdd(traceMapBytes,
@@ -632,9 +1085,42 @@ InstrumentExtendedMaps PlanInstrumentResources(
 		SaturatingAdd(
 			SaturatingMul(traceRecords, 16u * 1024u),
 			SaturatingMul(SaturatingMul(traceLabelBytes, passes), 6u))) : 0u;
+	if (apdRequested) {
+		plan.apdSummaryDeviceBytes = SaturatingMul(
+			apdStates, sizeof(PatchMatchAPDInstrumentCounters));
+		plan.apdSummaryHostBytes = plan.apdSummaryDeviceBytes;
+		const uint64_t apdTraceRecords(SaturatingMul(traces, apdStates));
+		plan.apdTraceDeviceBytes = SaturatingMul(
+			apdTraceRecords, sizeof(PatchMatchAPDInstrumentTrace));
+		plan.apdTraceHostBytes = plan.apdTraceDeviceBytes;
+		plan.apdTraceStorageBytes = apdTraceRecords > 0 ? SaturatingAdd(
+			64u * 1024u, SaturatingMul(apdTraceRecords, 64u * 1024u)) : 0u;
+		plan.apdMapDeviceBytes = mapsRequested ? SaturatingMul(
+			SaturatingMul(pixels, apdStates),
+			sizeof(PatchMatchAPDInstrumentState)+sizeof(PatchMatchAPDInstrumentUpdate)) : 0u;
+		plan.apdMapHostBytes = mapsRequested ? SaturatingAdd(
+			plan.apdMapDeviceBytes,
+			SaturatingMul(pixels, DMAP_APD_MULTISCALE_MAP_STORAGE_BYTES_PER_PIXEL)) : 0u;
+		plan.apdMapStorageBytes = mapsRequested ? SaturatingAdd(
+			SaturatingMul(SaturatingMul(pixels, apdStates),
+				DMAP_APD_MAP_STORAGE_BYTES_PER_PIXEL),
+			SaturatingAdd(
+				SaturatingMul(SaturatingMul(apdStates,
+					DMAP_APD_MAP_ARTIFACTS_PER_ITERATION), 4096u),
+				SaturatingAdd(
+					64u * 1024u,
+					SaturatingAdd(
+						SaturatingMul(pixels,
+							DMAP_APD_MULTISCALE_MAP_STORAGE_BYTES_PER_PIXEL),
+						SaturatingMul(DMAP_APD_MULTISCALE_MAP_ARTIFACTS, 4096u))))) : 0u;
+	}
 	plan.summaryStorageBytes = SaturatingAdd(
 		256u * 1024u,
 		SaturatingMul(SaturatingAdd(passes, states), 8u * 1024u));
+	if (apdRequested)
+		plan.summaryStorageBytes = SaturatingAdd(
+			plan.summaryStorageBytes,
+			SaturatingAdd(64u * 1024u, SaturatingMul(apdStates, 8u * 1024u)));
 	if (compatibilityMapsRequested) {
 		plan.summaryStorageBytes = SaturatingAdd(
 			plan.summaryStorageBytes,
@@ -687,6 +1173,22 @@ InstrumentExtendedMaps PlanInstrumentResources(
 	plan.prefilterHostBytes = plan.prefilterDeviceBytes;
 	plan.prefilterStorageBytes = prefilterRequested ?
 		SaturatingAdd(SaturatingMul(pixels, sizeof(float)), 64u * 1024u) : 0u;
+	plan.summaryDeviceBytes = SaturatingAdd(
+		plan.summaryDeviceBytes, plan.apdSummaryDeviceBytes);
+	plan.summaryHostBytes = SaturatingAdd(
+		plan.summaryHostBytes, plan.apdSummaryHostBytes);
+	plan.traceDeviceBytes = SaturatingAdd(
+		plan.traceDeviceBytes, plan.apdTraceDeviceBytes);
+	plan.traceHostBytes = SaturatingAdd(
+		plan.traceHostBytes, plan.apdTraceHostBytes);
+	plan.traceStorageBytes = SaturatingAdd(
+		plan.traceStorageBytes, plan.apdTraceStorageBytes);
+	plan.legacyMapDeviceBytes = SaturatingAdd(
+		plan.legacyMapDeviceBytes, plan.apdMapDeviceBytes);
+	plan.legacyMapHostBytes = SaturatingAdd(
+		plan.legacyMapHostBytes, plan.apdMapHostBytes);
+	plan.legacyMapStorageBytes = SaturatingAdd(
+		plan.legacyMapStorageBytes, plan.apdMapStorageBytes);
 
 	auto total = [](uint64_t first, uint64_t second, uint64_t third = 0, uint64_t fourth = 0) {
 		return SaturatingAdd(SaturatingAdd(first, second), SaturatingAdd(third, fourth));
@@ -706,6 +1208,8 @@ InstrumentExtendedMaps PlanInstrumentResources(
 		plan.exactAvailable = exact;
 		plan.traceAvailable = trace && plan.traceRequested;
 		plan.prefilterAvailable = prefilter && plan.prefilterRequested;
+		plan.apdAvailable = plan.apdRequested;
+		plan.apdMapsAvailable = plan.apdRequested && maps;
 		plan.resourceDecision = decision;
 		plan.estimatedDeviceBytes = device;
 		plan.estimatedHostBytes = host;
@@ -1168,6 +1672,9 @@ bool AppendDMapInstrumentationResourcePlan(
 		{"prefilter_requested", plan.prefilterRequested},
 		{"prefilter_available", plan.prefilterAvailable},
 		{"prefilter_unavailable_reason", plan.prefilterUnavailableReason.c_str()},
+		{"apd_requested", plan.apdRequested},
+		{"apd_summary_available", plan.apdAvailable},
+		{"apd_maps_available", plan.apdMapsAvailable},
 		{"summary_available", plan.summaryAvailable},
 		{"decision", plan.resourceDecision.c_str()},
 		{"exact_unavailable_reason", plan.exactUnavailableReason.c_str()},
@@ -1200,7 +1707,15 @@ bool AppendDMapInstrumentationResourcePlan(
 			{"trace_storage", plan.traceStorageBytes},
 			{"legacy_maps_storage", plan.legacyMapStorageBytes},
 			{"exact_storage", plan.exactStorageBytes},
-			{"prefilter_storage", plan.prefilterStorageBytes}
+			{"prefilter_storage", plan.prefilterStorageBytes},
+			{"apd_summary_device", plan.apdSummaryDeviceBytes},
+			{"apd_summary_host", plan.apdSummaryHostBytes},
+			{"apd_trace_device", plan.apdTraceDeviceBytes},
+			{"apd_trace_host", plan.apdTraceHostBytes},
+			{"apd_trace_storage", plan.apdTraceStorageBytes},
+			{"apd_maps_device", plan.apdMapDeviceBytes},
+			{"apd_maps_host", plan.apdMapHostBytes},
+			{"apd_maps_storage", plan.apdMapStorageBytes}
 		}},
 		{"peak_model", {
 			{"fixed_host_bytes", DMAP_INSTRUMENT_FIXED_HOST_BYTES},
@@ -1218,7 +1733,10 @@ bool AppendDMapInstrumentationResourcePlan(
 		{"exact_record_bytes", {
 			{"pixel", sizeof(PatchMatchInstrumentExactPixel)},
 			{"view", sizeof(PatchMatchInstrumentExactView)},
-			{"trace", sizeof(PatchMatchInstrumentTraceRecord)}
+			{"trace", sizeof(PatchMatchInstrumentTraceRecord)},
+			{"apd_state", sizeof(PatchMatchAPDInstrumentState)},
+			{"apd_update", sizeof(PatchMatchAPDInstrumentUpdate)},
+			{"apd_trace", sizeof(PatchMatchAPDInstrumentTrace)}
 		}},
 		{"storage_preflight", {
 			{"attempted", plan.storagePreflightAttempted},
@@ -1662,6 +2180,267 @@ bool AppendInstrumentTraces(
 	return (bool)fs && writtenRows == expectedRows;
 }
 
+bool AppendAPDMultiscaleStage(
+	const String& dir,
+	int imageID,
+	int scaleNumber,
+	const cv::Size& size,
+	const nlohmann::json& multiscale)
+{
+	if (!multiscale.is_object() || multiscale.empty())
+		return false;
+	nlohmann::json record(multiscale);
+	record["schema_name"] = "openmvs.dmap.apd_multiscale_stage_record";
+	record["schema_version"] = 1;
+	record["image_id"] = imageID;
+	record["pyramid_level"] = scaleNumber;
+	record["width"] = size.width;
+	record["height"] = size.height;
+	std::lock_guard<std::mutex> lock(g_instrumentMutex);
+	std::ofstream stream((dir + _T("apd_multiscale_stages.jsonl")).c_str(), std::ios::app);
+	if (!stream)
+		return false;
+	stream << record.dump() << '\n';
+	return (bool)stream;
+}
+
+bool AppendAPDInstrumentation(
+	const String& dir,
+	int imageID,
+	int scaleNumber,
+	const cv::Size& size,
+	int numViews,
+	const std::vector<InstrumentTracePixel>& tracePixels,
+	const InstrumentExtendedMaps& maps)
+{
+	if (!maps.apdRequested || !maps.apdStageActive)
+		return true;
+	const size_t numIterations(maps.apdCounters.size());
+	if (!maps.apdAvailable || numIterations == 0)
+		return false;
+	std::lock_guard<std::mutex> lock(g_instrumentMutex);
+	const String csvPath(dir + _T("apd_iteration.csv"));
+	const bool writeHeader(!File::access(csvPath));
+	std::ofstream csv(csvPath.c_str(), std::ios::app);
+	if (!csv)
+		return false;
+	if (writeHeader) {
+		csv << "image_id,scale_number,width,height,logical_iteration,classified,reliability_unknown,reliability_unreliable,reliability_reliable,ransac_valid,deformable_eligible,deformable_updates,global_minimum_cost_samples,global_minimum_cost_mean,separation_samples,separation_mean,anchor_count_mean,working_gap_samples,working_gap_mean,center_cost_mean,anchor_mean_cost_mean,working_cost_mean,native_persistent_cost_mean,anchor_view_selection_attempted,anchor_view_selection_used,anchor_proposals_tested,anchor_proposals_finite,anchor_proposals_accepted,anchor_propagation_final_winners,immutable_anchor_state_updates,best_anchor_working_cost_samples,best_anchor_working_cost_mean,accepted_anchor_native_cost_samples,accepted_anchor_native_cost_mean,stage_all_compatibility,stage_reliable_first,stage_non_reliable_second,fitted_plane_available,fitted_plane_tested,fitted_plane_finite,fitted_plane_accepted,fitted_plane_final_winners,final_refinement_pixels,final_refinement_candidates_tested,final_refinement_candidates_finite,final_refinement_accepted";
+		for (int mode=0; mode<PM_APD_INSTRUMENT_VIEW_SELECTION_MODES; ++mode)
+			csv << ",view_selection_mode_" << APDViewSelectionModeName(mode);
+		for (int reason=0; reason<PM_APD_INSTRUMENT_PROFILE_REASONS; ++reason)
+			csv << ",profile_reason_" << APDProfileReasonName(reason);
+		for (int reason=0; reason<PM_APD_INSTRUMENT_ANCHOR_REASONS; ++reason)
+			csv << ",anchor_reason_" << APDAnchorReasonName(reason);
+		for (int count=0; count<=PM_APD_INSTRUMENT_ANCHORS; ++count)
+			csv << ",anchor_count_" << count;
+		for (int source=0; source<PM_INSTRUMENT_NUM_SOURCES; ++source)
+			csv << ",source_" << InstrumentSourceName(source);
+		csv << '\n';
+	}
+	for (size_t iteration=0; iteration<numIterations; ++iteration) {
+		const PatchMatchAPDInstrumentCounters& c(maps.apdCounters[iteration]);
+		auto mean = [](float sum, uint32_t count) { return count > 0u ? sum/(float)count : -1.f; };
+		csv << imageID << ',' << scaleNumber << ',' << size.width << ',' << size.height << ','
+			<< iteration << ',' << c.classified << ',' << c.reliability[0] << ','
+			<< c.reliability[1] << ',' << c.reliability[2] << ',' << c.ransacValid << ','
+			<< c.deformableEligible << ',' << c.deformableUpdates << ','
+			<< c.globalMinimumCostSamples << ',' << mean(c.globalMinimumCostSum, c.globalMinimumCostSamples) << ','
+			<< c.separationSamples << ',' << mean(c.separationSum, c.separationSamples) << ','
+			<< mean(c.anchorCountSum, c.classified) << ','
+			<< c.workingGapSamples << ',' << mean(c.workingGapSum, c.workingGapSamples) << ','
+			<< mean(c.centerCostSum, c.deformableUpdates) << ','
+			<< mean(c.anchorMeanCostSum, c.deformableUpdates) << ','
+			<< mean(c.workingCostSum, c.deformableUpdates) << ','
+			<< mean(c.nativePersistentCostSum, c.deformableUpdates) << ','
+			<< c.anchorViewSelectionAttempted << ',' << c.anchorViewSelectionUsed << ','
+			<< c.anchorProposalsTested << ',' << c.anchorProposalsFinite << ','
+			<< c.anchorProposalsAccepted << ',' << c.anchorPropagationFinalWinners << ','
+			<< c.immutableAnchorStateUpdates << ',' << c.bestAnchorWorkingCostSamples << ','
+			<< mean(c.bestAnchorWorkingCostSum, c.bestAnchorWorkingCostSamples) << ','
+			<< c.acceptedAnchorNativeCostSamples << ','
+			<< mean(c.acceptedAnchorNativeCostSum, c.acceptedAnchorNativeCostSamples) << ','
+			<< c.stageUpdates[0] << ',' << c.stageUpdates[1] << ',' << c.stageUpdates[2] << ','
+			<< c.fittedPlaneAvailable << ',' << c.fittedPlaneTested << ','
+			<< c.fittedPlaneFinite << ',' << c.fittedPlaneAccepted << ','
+			<< c.fittedPlaneFinalWinners << ',' << c.finalRefinementPixels << ','
+			<< c.finalRefinementCandidatesTested << ','
+			<< c.finalRefinementCandidatesFinite << ',' << c.finalRefinementAccepted;
+		for (uint32_t value : c.anchorViewSelectionMode)
+			csv << ',' << value;
+		for (uint32_t value : c.profileReason)
+			csv << ',' << value;
+		for (uint32_t value : c.anchorReason)
+			csv << ',' << value;
+		for (uint32_t value : c.anchorCountBins)
+			csv << ',' << value;
+		for (uint32_t value : c.updateSource)
+			csv << ',' << value;
+		csv << '\n';
+	}
+	csv.flush();
+	if (!csv)
+		return false;
+	if (tracePixels.empty() && maps.apdTraces.empty())
+		return true;
+	if (tracePixels.empty() || maps.apdTraces.size() != tracePixels.size()*numIterations)
+		return false;
+	std::ofstream traces((dir + _T("apd_traces.jsonl")).c_str(), std::ios::app);
+	if (!traces)
+		return false;
+	for (size_t iteration=0; iteration<numIterations; ++iteration) {
+		for (size_t traceIndex=0; traceIndex<tracePixels.size(); ++traceIndex) {
+			const PatchMatchAPDInstrumentTrace& record(
+				maps.apdTraces[iteration*tracePixels.size()+traceIndex]);
+			if (!record.valid)
+				return false;
+			const PatchMatchAPDInstrumentState& state(record.state);
+			const PatchMatchAPDInstrumentUpdate& update(record.update);
+			nlohmann::json line = {
+				{"schema_name", "openmvs.dmap.apd_trace"},
+				{"schema_version", 3},
+				{"measurement_quality", "proxy"},
+				{"measurement_basis", "exact_hot_kernel_state_and_update_with_post_winner_per_view_replay"},
+				{"field_quality", {
+					{"paper_profile", "exact"},
+					{"anchor_model", "exact"},
+					{"update", "exact"},
+					{"anchor_view_selection", "exact_immutable_production_evidence"},
+					{"anchor_candidate_working_costs", "exact_production_values"},
+					{"anchor_candidate_native_costs", "exact_same_kernel_diagnostic_rescore_not_used_for_ranking"},
+					{"views", "diagnostic_replay_proxy"}
+				}},
+				{"image_id", imageID},
+				{"scale_number", scaleNumber},
+				{"logical_iteration", iteration},
+				{"trace_index", traceIndex},
+				{"label", tracePixels[traceIndex].label.c_str()},
+				{"x", record.x},
+				{"y", record.y},
+				{"paper_profile", {
+					{"delta", APD_PROFILE_RADIUS},
+					{"eta", state.eta},
+					{"costs", std::vector<float>(record.profile, record.profile+PM_APD_INSTRUMENT_PROFILE_SAMPLES)},
+					{"reliability", state.reliability},
+					{"reason", APDProfileReasonName(state.profileReason)},
+					{"global_minimum_offset", state.globalMinimumOffset},
+					{"global_minimum_cost", state.globalMinimumCost},
+					{"local_minimum_count", state.localMinimumCount},
+					{"separation", state.separation},
+					{"plateau_start", state.globalMinimumPlateauStart},
+					{"plateau_end", state.globalMinimumPlateauEnd}
+				}},
+				{"anchor_model", {
+					{"nearest_reliable_index", state.nearestReliable < (uint32_t)size.area() ? nlohmann::json(state.nearestReliable) : nlohmann::json(nullptr)},
+					{"nearest_reliable_distance", state.nearestReliableDistance},
+					{"candidate_count", state.candidateCount},
+					{"ransac_valid", state.ransacValid != 0},
+					{"ransac_threshold", state.ransacThreshold},
+					{"inlier_count", state.inlierCount},
+					{"outlier_count", state.outlierCount},
+					{"center_residual", state.ransacCenterResidual},
+					{"mean_inlier_residual", state.ransacMeanInlierResidual},
+					{"anchor_count", state.anchorCount},
+					{"reason", APDAnchorReasonName(state.anchorReason)},
+					{"deformable_eligible", state.deformableEligible != 0},
+					{"fitted_plane_valid", state.fittedPlaneValid != 0},
+					{"fitted_plane_depth", state.fittedPlaneDepth}
+				}},
+				{"update", {
+					{"deformable_active", update.deformableActive != 0},
+					{"source", InstrumentSourceName(update.source)},
+					{"working_winner_cost", update.workingWinnerCost},
+					{"native_persistent_cost", update.nativePersistentCost},
+					{"native_minus_working_cost", update.nativeMinusWorkingCost},
+					{"incumbent_working_cost", update.incumbentWorkingCost},
+					{"runner_up_working_cost", update.runnerUpWorkingCost},
+					{"winner_runner_up_gap", update.winnerRunnerUpGap},
+					{"center_cost", update.centerCost},
+					{"anchor_mean_cost", update.anchorMeanCost},
+					{"deformable_photometric_cost", update.deformablePhotometricCost},
+					{"geometric_cost", update.geometricCost},
+					{"best_anchor_working_cost", update.bestAnchorWorkingCost},
+					{"accepted_anchor_native_cost", update.acceptedAnchorNativeCost},
+					{"accepted_anchor_index", update.acceptedAnchorIndex < (uint32_t)size.area() ? nlohmann::json(update.acceptedAnchorIndex) : nlohmann::json(nullptr)},
+					{"anchor_accepted_slot", update.anchorAcceptedSlot != PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE ? nlohmann::json(update.anchorAcceptedSlot) : nlohmann::json(nullptr)},
+					{"view_selection_mode", APDViewSelectionModeName(update.viewSelectionMode)},
+					{"anchor_evidence_count", update.anchorEvidenceCount},
+					{"anchor_proposal_count", update.anchorProposalCount},
+					{"anchor_finite_count", update.anchorFiniteCount},
+					{"immutable_anchor_state", update.immutableAnchorState != 0},
+					{"update_stage", update.updateStage},
+					{"fitted_plane_available", update.fittedPlaneAvailable != 0},
+					{"fitted_plane_tested", update.fittedPlaneTested != 0},
+					{"fitted_plane_accepted", update.fittedPlaneAccepted != 0},
+					{"fitted_plane_working_cost", update.fittedPlaneWorkingCost},
+					{"fitted_plane_native_cost", update.fittedPlaneNativeCost},
+					{"final_refinement", {
+						{"incumbent_cost", update.finalRefinementIncumbentCost},
+						{"best_cost", update.finalRefinementBestCost},
+						{"improvement", update.finalRefinementImprovement},
+						{"depth", update.finalRefinementDepth},
+						{"offset", update.finalRefinementOffset},
+						{"tested_count", update.finalRefinementTested},
+						{"finite_count", update.finalRefinementFinite},
+						{"accepted", update.finalRefinementAccepted != 0}
+					}},
+					{"candidate_tested_mask", update.candidateTestedMask},
+					{"candidate_finite_mask", update.candidateFiniteMask},
+					{"candidate_accepted_mask", update.candidateAcceptedMask},
+					{"winner_slot", update.winnerSlot},
+					{"runner_up_slot", update.runnerUpSlot},
+					{"tested_count", update.testedCount},
+					{"finite_count", update.finiteCount},
+					{"accepted_count", update.acceptedCount},
+					{"selected_view_count", update.selectedViewCount},
+					{"working_selected_views", update.workingSelectedViews},
+					{"selected_view_weight_sum", update.selectedViewWeightSum}
+				}}
+			};
+			nlohmann::json sectorCandidates(nlohmann::json::array());
+			for (int sector=0; sector<PM_APD_INSTRUMENT_SECTORS; ++sector) {
+				const uint32_t index(record.sectorCandidates[sector]);
+				sectorCandidates.push_back(index < (uint32_t)size.area() ? nlohmann::json({
+					{"sector", sector}, {"index", index}, {"x", index%(uint32_t)size.width},
+					{"y", index/(uint32_t)size.width}}) : nlohmann::json(nullptr));
+			}
+			line["anchor_model"]["sector_candidates"] = std::move(sectorCandidates);
+			nlohmann::json anchors(nlohmann::json::array());
+			for (int slot=0; slot<PM_APD_INSTRUMENT_ANCHORS; ++slot) {
+				const uint32_t index(record.anchors[slot]);
+				anchors.push_back(index < (uint32_t)size.area() ? nlohmann::json({
+					{"slot", slot}, {"index", index}, {"x", index%(uint32_t)size.width},
+					{"y", index/(uint32_t)size.width}, {"normalized_plane_residual", record.anchorResiduals[slot]},
+					{"candidate_valid", record.anchorCandidateValid[slot] != 0},
+					{"snapshot_selected_views", record.anchorSelectedViews[slot]},
+					{"candidate_working_cost", record.anchorCandidateWorkingCosts[slot]},
+					{"candidate_native_rescore", record.anchorCandidateNativeCosts[slot]}}) :
+					nlohmann::json(nullptr));
+			}
+			line["anchor_model"]["anchors"] = std::move(anchors);
+			nlohmann::json views(nlohmann::json::array());
+			for (int view=0; view<numViews && view<PM_INSTRUMENT_MAX_VIEWS; ++view) {
+				views.push_back({
+					{"view_index", view},
+					{"reliability_weight", record.viewWeights[view]},
+					{"selection_prior", record.viewSelectionPriors[view]},
+					{"sampling_score", record.viewSamplingScores[view]},
+					{"sampling_probability", record.viewSamplingProbabilities[view]},
+					{"center_cost", record.viewCenterCosts[view]},
+					{"anchor_mean_cost", record.viewAnchorMeanCosts[view]},
+					{"working_cost", record.viewWorkingCosts[view]}
+				});
+			}
+			line["views"] = std::move(views);
+			traces << line.dump() << '\n';
+			if (!traces)
+				return false;
+		}
+	}
+	traces.flush();
+	return (bool)traces;
+}
+
 bool SaveInstrumentUpdateMap(const String& dir, int imageID, int scaleNumber, const cv::Size& size, const std::vector<uint8_t>& updateSources)
 {
 	if (size.area() <= 0 || updateSources.size() < (size_t)size.area())
@@ -2040,6 +2819,63 @@ void SaveDMapExtendedMaps(
 		else
 			manifest["write_errors"].push_back(signal);
 	};
+	if (maps.apdRequested && maps.apdMultiscale.is_object() && !maps.apdMultiscale.empty()) {
+		manifest["apd_multiscale"] = maps.apdMultiscale;
+		const String relativeMultiscaleDir(_T("maps/apd_multiscale/"));
+		const String multiscaleDir(depthMapDir + relativeMultiscaleDir);
+		Util::ensureFolder(multiscaleDir);
+		const bool transferred(
+			maps.apdMultiscale.value("input_state", nlohmann::json::object()).value("available", false));
+		const bool conventional(
+			maps.apdMultiscale.value("schedule", nlohmann::json::object()).value("policy", "") ==
+			"conventional_native");
+		auto saveByteMap = [&](const char* signal, const char* fileName,
+			const std::vector<uint8_t>& values, bool required, const char* role,
+			const char* semantics, const char* quality, const char* basis) {
+			if (values.size() < area) {
+				if (required)
+					manifest["write_errors"].push_back(signal);
+				return;
+			}
+			Image8U image(size);
+			for (int i=0; i<image.area(); ++i)
+				image[i] = values[(size_t)i];
+			const String relativePath(relativeMultiscaleDir + fileName);
+			if (image.Save(depthMapDir + relativePath))
+				addMap(signal, relativePath, "uint8", role, semantics, quality, basis,
+					{{"lossless", true}, {"state_schema_version", APD_MULTISCALE_STATE_VERSION}});
+			else
+				manifest["write_errors"].push_back(signal);
+		};
+		saveByteMap("apd_transferred_reliability", "transferred_reliability.png",
+			maps.apdTransferredReliability, transferred, "multiscale_input",
+			"nearest-neighbor resized reliability class consumed at logical iteration zero",
+			"exact", "runtime_host_transfer_state");
+		saveByteMap("apd_transferred_anchor_count", "transferred_anchor_count.png",
+			maps.apdTransferredAnchorCounts, transferred, "multiscale_input_provenance",
+			"nearest-neighbor resized prior-stage anchor count retained for provenance; not directly consumed",
+			"exact", "runtime_host_transfer_state");
+		saveByteMap("apd_transferred_deformable_eligible", "transferred_deformable_eligible.png",
+			maps.apdTransferredDeformableEligible, transferred, "multiscale_input_provenance",
+			"nearest-neighbor resized prior-stage deformable eligibility retained for provenance; not directly consumed",
+			"exact", "runtime_host_transfer_state");
+		const char* outputQuality(conventional ? "derived_exact" : "exact");
+		const char* outputBasis(conventional ?
+			"native_selected_view_mask_uniform_compatibility_classifier" :
+			"apd_runtime_profile_and_anchor_state");
+		saveByteMap("apd_output_reliability", "output_reliability.png",
+			maps.apdOutputReliability, true, "multiscale_output",
+			"post-filter reliability class published to the next APD stage",
+			outputQuality, outputBasis);
+		saveByteMap("apd_output_anchor_count", "output_anchor_count.png",
+			maps.apdOutputAnchorCounts, true, "multiscale_output_provenance",
+			"post-filter reliable-anchor count published as next-stage provenance",
+			outputQuality, outputBasis);
+		saveByteMap("apd_output_deformable_eligible", "output_deformable_eligible.png",
+			maps.apdOutputDeformableEligible, true, "multiscale_output_provenance",
+			"post-filter fitted-plane eligibility published as next-stage provenance",
+			outputQuality, outputBasis);
+	}
 
 	if (maps.planesBeforeFilter.size() >= area) {
 		DepthMap depth(size);
@@ -2496,6 +3332,344 @@ void SaveDMapExtendedMaps(
 	if (exactMapsComplete)
 		WriteExactObservabilityTables(depthMapDir, depthData, maps, area, manifest);
 
+	const size_t apdIterationCount(maps.numLogicalStates > 0 ?
+		(size_t)(maps.numLogicalStates-1) : 0u);
+	const bool apdMapsComplete(
+		maps.apdMapsAvailable && apdIterationCount > 0 &&
+		maps.apdStates.size() >= area*apdIterationCount &&
+		maps.apdUpdates.size() >= area*apdIterationCount);
+	if (apdMapsComplete) {
+		const String apdDir(depthMapDir + _T("apd_states/"));
+		Util::ensureFolder(apdDir);
+		for (size_t iteration=0; iteration<apdIterationCount; ++iteration) {
+			const String stateName(String::FormatString(_T("iteration%02u"), (unsigned)(iteration+1)));
+			const String relativeStateDir(String(_T("apd_states/")) + stateName + _T("/"));
+			const String stateDir(depthMapDir + relativeStateDir);
+			Util::ensureFolder(stateDir);
+			const size_t offset(iteration*area);
+			const nlohmann::json metadata = {
+				{"logical_iteration", iteration},
+				{"stage", "iteration"},
+				{"stage_index", iteration+1},
+				{"apd_schema_name", "openmvs.dmap.apd_pixel_mechanics"},
+				{"apd_schema_version", PM_APD_INSTRUMENT_SCHEMA_VERSION},
+				{"uncompressed_float_bytes", (uint64_t)(area*sizeof(float))},
+				{"uncompressed_byte_bytes", (uint64_t)area}
+			};
+			auto saveStateFloat = [&](const char* signal, const char* fileName, auto extractor,
+				const char* semantics, const nlohmann::json& extra = nlohmann::json::object()) {
+				std::vector<float> values(area);
+				for (size_t i=0; i<area; ++i)
+					values[i] = extractor(maps.apdStates[offset+i]);
+				nlohmann::json fieldMetadata(metadata);
+				for (auto it=extra.begin(); it!=extra.end(); ++it)
+					fieldMetadata[it.key()] = it.value();
+				if (SaveInstrumentScalarMap(stateDir + fileName, size, values))
+					addMap(signal, relativeStateDir + fileName, "float32", "apd_logical_iteration_state",
+						semantics, "exact", "apd_same_stream_mechanics_record", fieldMetadata);
+				else
+					manifest["write_errors"].push_back(signal);
+			};
+			auto saveUpdateFloat = [&](const char* signal, const char* fileName, auto extractor,
+				const char* semantics, const nlohmann::json& extra = nlohmann::json::object()) {
+				std::vector<float> values(area);
+				for (size_t i=0; i<area; ++i)
+					values[i] = extractor(maps.apdUpdates[offset+i]);
+				nlohmann::json fieldMetadata(metadata);
+				for (auto it=extra.begin(); it!=extra.end(); ++it)
+					fieldMetadata[it.key()] = it.value();
+				if (SaveInstrumentScalarMap(stateDir + fileName, size, values))
+					addMap(signal, relativeStateDir + fileName, "float32", "apd_logical_iteration_update",
+						semantics, "exact", "apd_process_pixel_candidate_record", fieldMetadata);
+				else
+					manifest["write_errors"].push_back(signal);
+			};
+			auto saveStateByte = [&](const char* signal, const char* fileName, auto extractor,
+				const char* semantics, const nlohmann::json& extra = nlohmann::json::object()) {
+				Image8U image(size);
+				for (int i=0; i<image.area(); ++i)
+					image[i] = extractor(maps.apdStates[offset+(size_t)i]);
+				nlohmann::json fieldMetadata(metadata);
+				for (auto it=extra.begin(); it!=extra.end(); ++it)
+					fieldMetadata[it.key()] = it.value();
+				if (image.Save(stateDir + fileName))
+					addMap(signal, relativeStateDir + fileName, "uint8", "apd_logical_iteration_state",
+						semantics, "exact", "apd_same_stream_mechanics_record", fieldMetadata);
+				else
+					manifest["write_errors"].push_back(signal);
+			};
+			auto saveUpdateByte = [&](const char* signal, const char* fileName, auto extractor,
+				const char* semantics, const nlohmann::json& extra = nlohmann::json::object()) {
+				Image8U image(size);
+				for (int i=0; i<image.area(); ++i)
+					image[i] = extractor(maps.apdUpdates[offset+(size_t)i]);
+				nlohmann::json fieldMetadata(metadata);
+				for (auto it=extra.begin(); it!=extra.end(); ++it)
+					fieldMetadata[it.key()] = it.value();
+				if (image.Save(stateDir + fileName))
+					addMap(signal, relativeStateDir + fileName, "uint8", "apd_logical_iteration_update",
+						semantics, "exact", "apd_process_pixel_candidate_record", fieldMetadata);
+				else
+					manifest["write_errors"].push_back(signal);
+			};
+			auto saveUpdateMaskRGBA = [&](const char* signal, const char* fileName, auto extractor,
+				const char* semantics) {
+				Image8U4 image(size);
+				for (int i=0; i<image.area(); ++i) {
+					const uint32_t mask(extractor(maps.apdUpdates[offset+(size_t)i]));
+					Color8U& pixel(image[i]);
+					pixel.r = (uint8_t)(mask & 0xFFu);
+					pixel.g = (uint8_t)((mask >> 8) & 0xFFu);
+					pixel.b = (uint8_t)((mask >> 16) & 0xFFu);
+					pixel.a = (uint8_t)((mask >> 24) & 0xFFu);
+				}
+				nlohmann::json fieldMetadata(metadata);
+				fieldMetadata["uncompressed_bytes"] = (uint64_t)(area * 4u);
+				fieldMetadata["encoding"] = "uint32 little-endian bytes in RGBA channels";
+				if (image.Save(stateDir + fileName))
+					addMap(signal, relativeStateDir + fileName, "uint8x4", "apd_logical_iteration_update",
+						semantics, "exact", "apd_process_pixel_candidate_record", fieldMetadata);
+				else
+					manifest["write_errors"].push_back(signal);
+			};
+
+			saveStateFloat("apd_average_baseline", "average_baseline.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return value.averageBaseline; },
+				"average source-view baseline used to convert the paper disparity profile to depth");
+			saveStateFloat("apd_current_disparity", "current_disparity.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return value.currentDisparity; },
+				"center disparity at the start of APD reliability classification");
+			saveStateFloat("apd_global_minimum_offset", "global_minimum_offset.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return (float)value.globalMinimumOffset; },
+				"signed integer offset of the global profile minimum in the 61-sample disparity profile",
+				{{"valid_min", -30}, {"valid_max", 30}, {"integer_encoded_exactly", true}});
+			saveStateFloat("apd_global_minimum_cost", "global_minimum_cost.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return value.globalMinimumCost; },
+				"minimum finite photometric cost in the APD disparity profile; lower is better; -1 means unavailable");
+			saveStateFloat("apd_profile_separation", "profile_separation.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return value.separation; },
+				"paper reliability separation sqrt(sum of squared local-minimum cost deviations)/(local minimum count minus one); larger is more discriminative; -1 means unavailable");
+			saveStateFloat("apd_nearest_reliable_distance", "nearest_reliable_distance.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return value.nearestReliableDistance; },
+				"Euclidean reference-pyramid pixel distance to the selected nearest reliable pixel; -1 means unavailable");
+			saveStateFloat("apd_ransac_threshold", "ransac_threshold.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return value.ransacThreshold; },
+				"normalized plane residual threshold selected by APD RANSAC; -1 means no valid model");
+			saveStateFloat("apd_ransac_center_residual", "ransac_center_residual.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return value.ransacCenterResidual; },
+				"normalized fitted-plane residual at the center pixel; lower is better; -1 means unavailable");
+			saveStateFloat("apd_ransac_mean_inlier_residual", "ransac_mean_inlier_residual.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return value.ransacMeanInlierResidual; },
+				"mean normalized fitted-plane residual over RANSAC inliers; lower is better; -1 means unavailable");
+			saveStateFloat("apd_fitted_plane_depth", "fitted_plane_depth.pfm",
+				[](const PatchMatchAPDInstrumentState& value) { return value.fittedPlaneDepth; },
+				"native reference-camera depth of the RANSAC fitted-plane candidate generated after reliable-first updates; -1 means unavailable");
+
+			saveStateByte("apd_reliability_class", "reliability_class.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.reliability; },
+				"current paper-profile reliability classification; exact dispatch basis except at multiscale logical iteration zero, which consumes apd_transferred_reliability",
+				{{"enum", {{"0", "unknown"}, {"1", "unreliable"}, {"2", "reliable"}}}});
+			saveStateByte("apd_profile_reason", "profile_reason.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.profileReason; },
+				"exact terminal reason from APD profile classification");
+			saveStateByte("apd_profile_eta", "profile_eta.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.eta; },
+				"iteration-dependent APD minimum-separation offset eta in profile samples");
+			saveStateByte("apd_profile_finite_count", "profile_finite_count.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.finiteCount; },
+				"number of finite values in the 61-sample APD disparity profile");
+			saveStateByte("apd_profile_local_minimum_count", "profile_local_minimum_count.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.localMinimumCount; },
+				"number of strict local minima detected in the APD disparity profile");
+			saveStateByte("apd_profile_plateau_start", "profile_plateau_start.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.globalMinimumPlateauStart; },
+				"inclusive sample index at the start of the global-minimum plateau");
+			saveStateByte("apd_profile_plateau_end", "profile_plateau_end.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.globalMinimumPlateauEnd; },
+				"inclusive sample index at the end of the global-minimum plateau");
+			saveStateByte("apd_sector_candidate_count", "sector_candidate_count.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.candidateCount; },
+				"number of populated angular-sector candidates supplied to APD RANSAC");
+			saveStateByte("apd_ransac_inlier_count", "ransac_inlier_count.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.inlierCount; },
+				"number of candidates classified as fitted-plane inliers");
+			saveStateByte("apd_ransac_outlier_count", "ransac_outlier_count.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.outlierCount; },
+				"number of candidates classified as fitted-plane outliers");
+			saveStateByte("apd_anchor_count", "anchor_count.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.anchorCount; },
+				"number of APD anchor samples retained after plane fitting", {{"valid_min", 0}, {"valid_max", PM_APD_INSTRUMENT_ANCHORS}});
+			saveStateByte("apd_anchor_reason", "anchor_reason.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.anchorReason; },
+				"exact terminal reason from APD anchor construction");
+			saveStateByte("apd_ransac_valid", "ransac_valid.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.ransacValid; },
+				"one when APD RANSAC produced a valid plane model", {{"binary", true}});
+			saveStateByte("apd_deformable_eligible", "deformable_eligible.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.deformableEligible; },
+				"one when the pixel has a complete anchor model and may use deformable cost", {{"binary", true}});
+			saveStateByte("apd_fitted_plane_valid", "fitted_plane_valid.png",
+				[](const PatchMatchAPDInstrumentState& value) { return value.fittedPlaneValid; },
+				"one when a bounded native fitted-plane candidate was available before the non-reliable update", {{"binary", true}});
+
+			saveUpdateFloat("apd_working_winner_cost", "working_winner_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.workingWinnerCost; },
+				"APD working objective used to rank the winning candidate; lower is better; not persisted as OpenMVS confidence");
+			saveUpdateFloat("apd_native_persistent_cost", "native_persistent_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.nativePersistentCost; },
+				"conventional OpenMVS score recomputed for and persisted with the APD working winner before the separately recorded terminal native refinement; lower is better");
+			saveUpdateFloat("apd_runner_up_working_cost", "runner_up_working_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.runnerUpWorkingCost; },
+				"second-best finite APD working objective among candidates tested in the complete logical iteration; lower is better; -1 means unavailable");
+			saveUpdateFloat("apd_winner_runner_up_gap", "winner_runner_up_gap.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.winnerRunnerUpGap; },
+				"exact runner-up working cost minus winning working cost; larger is a more decisive APD candidate win; -1 means unavailable");
+			saveUpdateFloat("apd_center_cost", "center_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.centerCost; },
+				"APD center-patch photometric component for the winning candidate; lower is better");
+			saveUpdateFloat("apd_anchor_mean_cost", "anchor_mean_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.anchorMeanCost; },
+				"mean photometric component over the active APD anchors for the winning candidate; lower is better");
+			saveUpdateFloat("apd_deformable_photometric_cost", "deformable_photometric_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.deformablePhotometricCost; },
+				"paper-weighted APD photometric objective 0.25*center + 0.75*mean anchors; lower is better");
+			saveUpdateFloat("apd_geometric_cost", "geometric_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.geometricCost; },
+				"geometric-consistency component added to the APD working objective; zero when geometric consistency is disabled");
+			saveUpdateFloat("apd_native_minus_working_cost", "native_minus_working_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.nativeMinusWorkingCost; },
+				"native persistent cost minus APD working cost for the selected winner; this is objective drift, not an accuracy error");
+			saveUpdateFloat("apd_native_stored_cost_before", "native_stored_cost_before.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.nativeStoredCostBefore; },
+				"conventional OpenMVS cost stored before the complete APD logical iteration");
+			saveUpdateFloat("apd_incumbent_working_cost", "incumbent_working_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.incumbentWorkingCost; },
+				"APD working objective of the incoming candidate before propagation and refinement");
+			saveUpdateFloat("apd_best_anchor_working_cost", "best_anchor_working_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.bestAnchorWorkingCost; },
+				"lowest finite working cost among immutable anchor-plane propagation candidates; -1 means unavailable");
+			saveUpdateFloat("apd_accepted_anchor_native_cost", "accepted_anchor_native_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.acceptedAnchorNativeCost; },
+				"conventional same-kernel rescore of the accepted anchor proposal before later refinement; -1 means no anchor was accepted");
+			saveUpdateFloat("apd_fitted_plane_working_cost", "fitted_plane_working_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.fittedPlaneWorkingCost; },
+				"deformable working score of the fitted-plane candidate; -1 means unavailable");
+			saveUpdateFloat("apd_fitted_plane_native_cost", "fitted_plane_native_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.fittedPlaneNativeCost; },
+				"conventional native score of the fitted-plane candidate under the same selected-view weights; -1 means unavailable");
+			saveUpdateFloat("apd_final_refinement_incumbent_cost", "final_refinement_incumbent_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.finalRefinementIncumbentCost; },
+				"conventional native cost before the final bounded disparity refinement; -1 means unavailable");
+			saveUpdateFloat("apd_final_refinement_best_cost", "final_refinement_best_cost.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.finalRefinementBestCost; },
+				"best conventional native cost in the final bounded disparity search; -1 means unavailable");
+			saveUpdateFloat("apd_final_refinement_improvement", "final_refinement_improvement.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.finalRefinementImprovement; },
+				"native incumbent cost minus the best final-refinement cost; acceptance requires a strict improvement above 0.10");
+			saveUpdateFloat("apd_final_refinement_depth", "final_refinement_depth.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.finalRefinementDepth; },
+				"best depth from the final bounded disparity search, whether or not it passed the acceptance threshold; -1 means unavailable");
+			saveUpdateFloat("apd_accepted_anchor_index", "accepted_anchor_index.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) {
+					return value.acceptedAnchorIndex == ~uint32_t(0) ? -1.f : (float)value.acceptedAnchorIndex;
+				},
+				"exact flattened pixel index of the accepted immutable anchor; -1 means no anchor was accepted",
+				{{"encoding", "uint32_pixel_index_stored_exactly_in_float32_for_admitted_frame_size"}});
+			auto saveUpdateMask = [&](const char* signal, const char* fileName, auto extractor,
+				const char* semantics) {
+				saveUpdateFloat(signal, fileName,
+					[&](const PatchMatchAPDInstrumentUpdate& value) { return (float)extractor(value); },
+					semantics, {{"encoding", "uint32_bit_mask_stored_exactly_in_float32"},
+						{"candidate_slots", PM_INSTRUMENT_EXACT_NUM_CANDIDATES}});
+			};
+			saveUpdateMask("apd_candidate_tested_mask", "candidate_tested_mask.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.candidateTestedMask; },
+				"bit mask of APD candidate slots evaluated in this logical iteration");
+			saveUpdateMask("apd_candidate_finite_mask", "candidate_finite_mask.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.candidateFiniteMask; },
+				"bit mask of APD candidate slots that produced finite working scores");
+			saveUpdateMask("apd_candidate_accepted_mask", "candidate_accepted_mask.pfm",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.candidateAcceptedMask; },
+				"bit mask of sequential APD working-objective improvements during this logical iteration");
+			saveUpdateByte("apd_update_source", "update_source.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.source; },
+				"exact candidate family that produced the final APD working winner");
+			saveUpdateByte("apd_winner_slot", "winner_slot.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.winnerSlot; },
+				"exact candidate slot of the APD working winner; 255 means unavailable");
+			saveUpdateByte("apd_runner_up_slot", "runner_up_slot.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.runnerUpSlot; },
+				"exact candidate slot of the APD working runner-up; 255 means unavailable");
+			saveUpdateByte("apd_candidate_tested_count", "candidate_tested_count.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.testedCount; },
+				"number of APD candidates tested in the complete logical iteration");
+			saveUpdateByte("apd_candidate_finite_count", "candidate_finite_count.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.finiteCount; },
+				"number of tested APD candidates with finite working scores");
+			saveUpdateByte("apd_candidate_accepted_count", "candidate_accepted_count.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.acceptedCount; },
+				"number of sequential APD working-score improvements in the complete logical iteration");
+			saveUpdateByte("apd_selected_view_count", "selected_view_count.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.selectedViewCount; },
+				"number of source views with nonzero working weight in this logical iteration");
+			saveUpdateMaskRGBA("apd_working_selected_views_mask", "working_selected_views_mask.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.workingSelectedViews; },
+				"lossless 32-bit mask of source views with nonzero APD working weight in this logical iteration");
+			saveUpdateByte("apd_selected_view_weight_sum", "selected_view_weight_sum.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.selectedViewWeightSum; },
+				"sum of integer Monte Carlo or fallback weights used by the APD working objective");
+			saveUpdateByte("apd_deformable_active", "deformable_active.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.deformableActive; },
+				"one when deformable APD scoring was active for the winning candidate", {{"binary", true}});
+			saveUpdateByte("apd_view_selection_mode", "view_selection_mode.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.viewSelectionMode; },
+				"exact APD view-selection evidence or fallback mode");
+			saveUpdateByte("apd_anchor_evidence_count", "anchor_evidence_count.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.anchorEvidenceCount; },
+				"number of immutable anchors contributing valid candidate/view evidence");
+			saveUpdateByte("apd_anchor_proposal_count", "anchor_proposal_count.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.anchorProposalCount; },
+				"number of immutable anchor-plane candidates tested");
+			saveUpdateByte("apd_anchor_finite_count", "anchor_finite_count.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.anchorFiniteCount; },
+				"number of immutable anchor-plane candidates with finite usable working costs");
+			saveUpdateByte("apd_anchor_accepted_slot", "anchor_accepted_slot.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.anchorAcceptedSlot; },
+				"zero-based immutable anchor slot accepted before later refinements; 255 means unavailable");
+			saveUpdateByte("apd_immutable_anchor_state", "immutable_anchor_state.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.immutableAnchorState; },
+				"one when both non-reliable checkerboard phases consumed the logical iteration's immutable anchor plane/view snapshot",
+				{{"binary", true}});
+			saveUpdateByte("apd_update_stage", "update_stage.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.updateStage; },
+				"exact reliable-first dispatch stage", {{"enum", {{"1", "reliable_first"}, {"2", "non_reliable_second"}}}});
+			saveUpdateByte("apd_fitted_plane_available", "fitted_plane_available.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.fittedPlaneAvailable; },
+				"one when a fitted-plane candidate was available to this update", {{"binary", true}});
+			saveUpdateByte("apd_fitted_plane_tested", "fitted_plane_tested.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.fittedPlaneTested; },
+				"one when the fitted-plane candidate was scored", {{"binary", true}});
+			saveUpdateByte("apd_fitted_plane_accepted", "fitted_plane_accepted.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.fittedPlaneAccepted; },
+				"one when the fitted plane improved the sequential working incumbent before later refinement", {{"binary", true}});
+			saveUpdateByte("apd_final_refinement_offset", "final_refinement_offset.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return static_cast<uint8_t>(value.finalRefinementOffset+APD_FINAL_REFINEMENT_RADIUS); },
+				"signed final-refinement disparity offset encoded as offset+5", {{"encoded_offset", APD_FINAL_REFINEMENT_RADIUS}});
+			saveUpdateByte("apd_final_refinement_tested_count", "final_refinement_tested_count.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.finalRefinementTested; },
+				"number of in-range conventional candidates tested by final refinement");
+			saveUpdateByte("apd_final_refinement_finite_count", "final_refinement_finite_count.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.finalRefinementFinite; },
+				"number of finite conventional candidates in final refinement");
+			saveUpdateByte("apd_final_refinement_accepted", "final_refinement_accepted.png",
+				[](const PatchMatchAPDInstrumentUpdate& value) { return value.finalRefinementAccepted; },
+				"one when final native refinement passed the strict 0.10 improvement threshold", {{"binary", true}});
+		}
+	} else if (maps.apdRequested && maps.apdStageActive && maps.mapsRequested) {
+		manifest["write_errors"].push_back(maps.apdMapsAvailable ?
+			"apd_map_capture_incomplete" : "apd_map_capture_not_admitted");
+	}
+
 	const bool eventMapsComplete(
 		maps.numLogicalStates > 0 && numPasses == 1 + (maps.numLogicalStates-1)*2 &&
 		passCostImprovements.size() >= area * (size_t)numPasses &&
@@ -2606,7 +3780,7 @@ nlohmann::json ConfiguredPatchMatchCUDAParametersJson()
 			sampleOffsets.push_back({x, y});
 		}
 	}
-	return {
+	nlohmann::json parameters = {
 		{"geometric_weight", 0.1f},
 		{"refine_depth_ratio", 0.005f},
 		{"refine_normal_radians", 0.01f * (float)M_PI},
@@ -2636,6 +3810,8 @@ nlohmann::json ConfiguredPatchMatchCUDAParametersJson()
 			{"source_view_footprints_captured_by_kernel", false}
 		}}
 	};
+	parameters["adaptive_patch_deformation"] = APDContractJson(OPTDENSE::nPatchMatchCUDAAPD);
+	return parameters;
 }
 
 nlohmann::json EffectivePatchMatchCUDAParametersJson(const PatchMatch::Params& params)
@@ -2647,6 +3823,9 @@ nlohmann::json EffectivePatchMatchCUDAParametersJson(const PatchMatch::Params& p
 	metadata["low_resolution_prior_available"] = params.bLowResProcessed;
 	metadata["init_top_k_effective"] = params.nInitTopK;
 	metadata["keep_cost_threshold"] = params.fThresholdKeepCost;
+	metadata["adaptive_patch_deformation"] = APDContractJson(params.nAPDMode);
+	metadata["adaptive_patch_deformation"]["multiscale_stage"] =
+		APDMultiscaleStageJson(params);
 	return metadata;
 }
 
@@ -2707,6 +3886,13 @@ bool WriteDMapRunMetadata(const String& root, int geometricIteration)
 		{"reference_patch_sample_values", false},
 		{"source_view_patch_footprints", false}
 	};
+	metadata["instrumentation"]["capabilities"]["apd_exact_iteration_summary"] =
+		OPTDENSE::nPatchMatchCUDAAPD == static_cast<unsigned>(APDMode::DEFORMABLE_COST);
+	metadata["instrumentation"]["capabilities"]["apd_exact_pixel_maps"] =
+		writeMaps && OPTDENSE::nPatchMatchCUDAAPD == static_cast<unsigned>(APDMode::DEFORMABLE_COST);
+	metadata["instrumentation"]["capabilities"]["apd_targeted_profile_anchor_and_view_trace"] =
+		OPTDENSE::nPatchMatchInstrumentLevel >= 2 &&
+		OPTDENSE::nPatchMatchCUDAAPD == static_cast<unsigned>(APDMode::DEFORMABLE_COST);
 	metadata["reporting_contract"] = {
 		{"mechanics_granularity", "logical PatchMatch iteration"},
 		{"timing_granularity", "checkerboard phase"},
@@ -2738,7 +3924,7 @@ bool WriteDMapRunMetadata(const String& root, int geometricIteration)
 	metadata["level_contract"] = {
 		{"summary", {
 			{"outputs", "JSON/CSV summaries, logical-iteration counters, and phase-level kernel timings"},
-			{"overhead", "device snapshots and one post-pass diagnostic rescore; no full-resolution map downloads"}
+			{"overhead", "non-APD captures use device snapshots and one post-pass diagnostic rescore; APD exact aggregates use instrumented hot-kernel counters; no full-resolution map downloads"}
 		}},
 		{"prefilter", {
 			{"outputs", "summary outputs plus one exact full-resolution depth snapshot immediately before production filtering"},
@@ -2761,14 +3947,14 @@ bool WriteDMapRunMetadata(const String& root, int geometricIteration)
 		{"diagnostic_snapshots_or_kernels", false},
 		{"instrumentation_device_state_changes", false}
 	};
-	metadata["measurement_model"] = "prefilter, summary, and debug use Process<false>; maps mode uses direct Process<true> production-path records and retains separately labeled post-pass proxies";
-	metadata["candidate_accounting_mode"] = "exact in admitted maps captures; explicitly unavailable in summary/debug or budget-degraded captures";
+	metadata["measurement_model"] = "prefilter and non-APD summary/debug use Process<false>; APD exact aggregate summary/debug and maps mode use direct Process<true> production-path records and retain separately labeled post-pass proxies";
+	metadata["candidate_accounting_mode"] = "exact in admitted generic maps captures; exact APD working-objective aggregates in admitted APD summary/deep captures; terminal APD native refinement uses separate schema-v3 fields and is not folded into working-domain candidate masks";
 	metadata["candidate_accepted_semantics"] = {
 		{"initialization", ExactCandidateAcceptedSemantics(true)},
 		{"iteration", ExactCandidateAcceptedSemantics(false)},
 		{"cross_stage_comparison", "initialization accepted can exceed finite; iterative accepted counts are sequential improvement events rather than final winners"}
 	};
-	metadata["confidence_gap_mode"] = "exact ProcessPixel winner-versus-runner-up in admitted maps captures; retained local-neighbor proxy otherwise";
+	metadata["confidence_gap_mode"] = "exact ProcessPixel winner-versus-runner-up in admitted generic maps captures; exact APD working-objective winner-versus-runner-up aggregates in admitted APD summary/deep captures; retained local-neighbor proxy otherwise";
 	metadata["cuda_exact_kernel_resources"] = {
 		{"measurement_status", "unavailable_without_build_bound_receipt"},
 		{"measurement_values", nullptr},
@@ -2785,6 +3971,7 @@ bool WriteDMapRunMetadata(const String& root, int geometricIteration)
 		{"0", "current_or_initialization"}, {"1-8", "directional_propagation"},
 		{"9", "depth_refinement"}, {"10", "normal_refinement"},
 		{"11", "random_normal_refinement"}, {"12", "surface_normal_refinement"},
+		{"13-20", "apd_immutable_anchor_propagation"}, {"21", "apd_fitted_plane"},
 		{"255", "unavailable"}
 	};
 	metadata["exact_view_decisions"] = {
@@ -2792,6 +3979,10 @@ bool WriteDMapRunMetadata(const String& root, int geometricIteration)
 		{"3", "rejected_not_sampled"}, {"4", "initialization_top_k"},
 		{"5", "initialization_threshold_tie"}, {"6", "initialization_rejected"}
 	};
+	metadata["apd_view_selection_modes"] = nlohmann::json::object();
+	for (int mode=0; mode<PM_APD_INSTRUMENT_VIEW_SELECTION_MODES; ++mode)
+		metadata["apd_view_selection_modes"][std::to_string(mode)] =
+			APDViewSelectionModeName(mode);
 	metadata["candidate_source_enum"] = nlohmann::json::array();
 	for (int i = DMAP_SOURCE_UNKNOWN; i <= DMAP_SOURCE_OTHER; ++i)
 		metadata["candidate_source_enum"].push_back({{"code", i}, {"name", DMapCandidateSourceName(i)}});
@@ -3320,6 +4511,11 @@ void WriteDMapArtifacts(
 	}
 	nlohmann::json missingMaps(nlohmann::json::array());
 	const bool exactAvailable(extendedMaps && extendedMaps->exactAvailable);
+	const bool apdEnabled(params.nAPDMode == static_cast<unsigned>(APDMode::DEFORMABLE_COST));
+	const bool apdAvailable(extendedMaps && extendedMaps->apdAvailable &&
+		extendedMaps->apdStageActive);
+	const bool apdMapsAvailable(extendedMaps && extendedMaps->apdMapsAvailable &&
+		extendedMaps->apdStageActive);
 	missingMaps.push_back("depth_initial");
 	if (!writeMaps) {
 		if (!prefilterAvailable)
@@ -3386,15 +4582,31 @@ void WriteDMapArtifacts(
 		{"artifact", prefilterAvailable ? nlohmann::json("maps/depth_final_before_filter.pfm") : nlohmann::json(nullptr)},
 		{"unavailable_reason", extendedMaps ? extendedMaps->prefilterUnavailableReason.c_str() : "resource plan unavailable"}
 	};
+	summary["apd_observability"] = APDObservabilityJson(params.nAPDMode, extendedMaps);
+	summary["apd_multiscale"] = extendedMaps && extendedMaps->apdMultiscale.is_object() &&
+		!extendedMaps->apdMultiscale.empty() ?
+		extendedMaps->apdMultiscale : APDMultiscaleStageJson(params);
 	summary["candidate_acceptance"] = CandidateAcceptanceJson(counters);
-	summary["candidate_accounting_mode"] = exactAvailable ? "exact_production_hot_kernel_full_frame" : "unavailable_post_pass_snapshot";
-	summary["confidence_gap_mode"] = exactAvailable ? "exact_process_pixel_winner_runner_up_full_frame" : "post_pass_current_plus_eight_neighbors";
+	summary["candidate_accounting_mode"] = apdAvailable ?
+		(apdMapsAvailable ? "exact_apd_working_objective_full_frame" : "exact_apd_working_objective_aggregate") :
+		(exactAvailable ? "exact_production_hot_kernel_full_frame" : "unavailable_post_pass_snapshot");
+	summary["confidence_gap_mode"] = apdAvailable ?
+		(apdMapsAvailable ? "exact_apd_working_winner_runner_up_full_frame" : "exact_apd_working_winner_runner_up_aggregate") :
+		(exactAvailable ? "exact_process_pixel_winner_runner_up_full_frame" : "post_pass_current_plus_eight_neighbors");
 	summary["unavailable_signals"] = nlohmann::json::array();
-	if (!exactAvailable) {
+	if (!exactAvailable && !apdAvailable) {
 		summary["unavailable_signals"].push_back("candidate_family_tested_finite_accepted");
 		summary["unavailable_signals"].push_back("exact_propagation_vs_refinement_acceptance");
 		summary["unavailable_signals"].push_back("exact_same_pass_runner_up_gap");
 		summary["unavailable_signals"].push_back("exact_per_view_reliability_and_contributions");
+	}
+	if (apdEnabled && !apdAvailable)
+		summary["unavailable_signals"].push_back("apd_exact_iteration_mechanics");
+	if (apdEnabled && !apdMapsAvailable)
+		summary["unavailable_signals"].push_back("apd_exact_full_frame_pixel_mechanics");
+	if (apdEnabled) {
+		summary["unavailable_signals"].push_back("apd_historical_coarsest_monte_carlo_view_weights");
+		summary["unavailable_signals"].push_back("apd_multiscale_resume_state_across_process_restart");
 	}
 	if (ignoreMaskRequested && !ignoreMaskLoaded)
 		summary["unavailable_signals"].push_back("ignore_mask_rejection_count");
@@ -3411,6 +4623,11 @@ void WriteDMapArtifacts(
 			{"exact_available", extendedMaps->exactAvailable},
 			{"prefilter_requested", extendedMaps->prefilterRequested},
 			{"prefilter_available", extendedMaps->prefilterAvailable},
+				{"apd_requested", extendedMaps->apdRequested},
+				{"apd_stage_active", extendedMaps->apdStageActive},
+				{"apd_summary_available", extendedMaps->apdAvailable && extendedMaps->apdStageActive},
+				{"apd_maps_available", extendedMaps->apdMapsAvailable && extendedMaps->apdStageActive},
+				{"apd_multiscale_maps_available", extendedMaps->apdRequested && extendedMaps->mapsAvailable},
 			{"prefilter_unavailable_reason", extendedMaps->prefilterUnavailableReason.c_str()},
 			{"exact_unavailable_reason", extendedMaps->exactUnavailableReason.c_str()},
 			{"estimated_device_bytes", extendedMaps->estimatedDeviceBytes},
@@ -3503,6 +4720,23 @@ void WriteDMapArtifacts(
 				{"num_views", extendedMaps ? extendedMaps->numViews : 0},
 				{"record_pixel_bytes", sizeof(PatchMatchInstrumentExactPixel)},
 				{"record_view_bytes", sizeof(PatchMatchInstrumentExactView)}
+			}},
+			{"apd_capture", {
+				{"schema_name", "openmvs.dmap.apd_pixel_mechanics"},
+				{"schema_version", PM_APD_INSTRUMENT_SCHEMA_VERSION},
+				{"requested", extendedMaps && extendedMaps->apdRequested},
+				{"stage_active", extendedMaps && extendedMaps->apdStageActive},
+				{"summary_available", apdAvailable},
+				{"maps_available", apdMapsAvailable},
+				{"num_iterations", extendedMaps ? std::max(0, extendedMaps->numLogicalStates-1) : 0},
+				{"state_record_bytes", sizeof(PatchMatchAPDInstrumentState)},
+				{"update_record_bytes", sizeof(PatchMatchAPDInstrumentUpdate)},
+				{"working_score_persisted", false},
+				{"persistent_winner_conventionally_rescored", true},
+				{"anchor_state", "immutable_for_non_reliable_stage_after_reliable_first_updates"},
+				{"anchor_candidate_slots", {PM_EXACT_CANDIDATE_APD_ANCHOR_0, PM_EXACT_CANDIDATE_APD_ANCHOR_7}},
+				{"fitted_plane_candidate_slot", PM_EXACT_CANDIDATE_APD_FITTED_PLANE},
+				{"final_refinement_candidate_accounting", "separate_native_domain_fields_not_working_candidate_masks"}
 			}},
 			{"observer_sidecars", {
 				{"complete", publicationWriteErrors.empty()},
@@ -3929,11 +5163,7 @@ void PatchMatch::AllocateImageCUDA(size_t i, const cv::Mat1f& image, bool bInitI
 	}
 }
 
-#ifdef _USE_DMAP_INSTRUMENTATION
 void PatchMatch::EstimateDepthMap(DepthData& depthData, int geometricIteration, ConfAdjustRequest* pConfRequest)
-#else
-void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConfRequest)
-#endif
 {
 	TD_TIMER_STARTD();
 
@@ -3951,6 +5181,15 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 	params.nInitTopK = MINF(params.nInitTopK, params.nNumViews);
 	params.fDepthMin = depthData.dMin;
 	params.fDepthMax = depthData.dMax;
+	params.nAPDMode = OPTDENSE::nPatchMatchCUDAAPD;
+	const bool apdRequested(
+		params.nAPDMode == static_cast<unsigned>(APDMode::DEFORMABLE_COST));
+	APDMultiscaleDepthState apdCarryState;
+	if (apdRequested && params.bGeomConsistency && fullResDepthData.apdMultiscaleState.IsValid())
+		apdCarryState = fullResDepthData.apdMultiscaleState;
+	// The shared DepthData slot is only a cross-event mailbox. This invocation
+	// owns the state until it either publishes the next stage or releases it.
+	fullResDepthData.apdMultiscaleState.Release();
 	if (prevNumImages < numImages) {
 		images.resize(numImages);
 		cameras.resize(numImages);
@@ -3972,8 +5211,12 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 	const bool instrumentSelected(InstrumentImageEnabled(instrumentImageID, instrumentImageName));
 	const bool instrumentMapsRequested(instrumentSelected && InstrumentWriteMaps());
 	const bool instrumentPrefilterRequested(instrumentSelected && InstrumentPrefilterRequested());
+	const bool instrumentAPDRequested(
+		params.nAPDMode == static_cast<unsigned>(APDMode::DEFORMABLE_COST) &&
+		(!instrumentPrefilterRequested || instrumentMapsRequested));
 	const bool instrumentExactRequested(
-		instrumentMapsRequested && !OPTDENSE::strDMapInstrumentationDir.empty());
+		instrumentMapsRequested && !instrumentAPDRequested &&
+		!OPTDENSE::strDMapInstrumentationDir.empty());
 	if (instrumentSelected && !OPTDENSE::strDMapInstrumentationDir.empty()) {
 		const String instrumentRoot(InstrumentRunRoot(geometricIteration));
 		const String instrumentDepthMapDir(DMapDepthMapDir(
@@ -3999,7 +5242,8 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 			false,
 			instrumentMapsRequested,
 			instrumentExactRequested,
-			instrumentPrefilterRequested));
+			instrumentPrefilterRequested,
+			instrumentAPDRequested));
 		instrumentFullResolutionPriorityReserveBytes =
 			fullResolutionPriorityPlan.estimatedStorageBytes;
 	}
@@ -4010,6 +5254,63 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 		DepthData currentDepthData(DepthMapsData::ScaleDepthData(fullResDepthData, scale));
 		DepthData& depthData(scaleNumber==0 ? fullResDepthData : currentDepthData);
 		const Image8U::Size size(depthData.images.front().image.size());
+		const unsigned apdLevelCount(OPTDENSE::nSubResolutionLevels+1u);
+		const unsigned apdLevelIndex(params.bGeomConsistency ?
+			OPTDENSE::nSubResolutionLevels : totalScaleNumber-scaleNumber);
+		const unsigned apdStageIndex(params.bGeomConsistency ?
+			OPTDENSE::nSubResolutionLevels+1u+
+				static_cast<unsigned>(geometricIteration >= 0 ? geometricIteration : 0) :
+			apdLevelIndex);
+		APDStageClock apdClock;
+		apdClock.levelIndex = apdLevelIndex;
+		apdClock.levelCount = apdLevelCount;
+		apdClock.stageIndex = apdStageIndex;
+		apdClock.geometricConsistency = params.bGeomConsistency;
+		APDMultiscaleTransferStatus apdTransferStatus(
+			APDMultiscaleTransferStatus::UNAVAILABLE_NO_SOURCE);
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		const bool instrumentAPDSourceStateAvailable(apdRequested && apdCarryState.IsValid());
+		const APDMultiscaleStateHeader instrumentAPDSourceStateHeader(apdCarryState.header);
+		#endif
+		Image8U apdTransferredReliability;
+		Image8U apdTransferredAnchorCounts;
+		Image8U apdTransferredDeformableEligible;
+		if (apdRequested && apdCarryState.IsValid()) {
+			apdTransferStatus = ValidateAPDMultiscaleTransfer(
+				apdCarryState.header, apdClock, (unsigned)size.width, (unsigned)size.height);
+			if (apdTransferStatus == APDMultiscaleTransferStatus::VALID) {
+				cv::resize(apdCarryState.reliabilityMap, apdTransferredReliability,
+					size, 0, 0, cv::INTER_NEAREST);
+				cv::resize(apdCarryState.anchorCountMap, apdTransferredAnchorCounts,
+					size, 0, 0, cv::INTER_NEAREST);
+				cv::resize(apdCarryState.deformableEligibleMap,
+					apdTransferredDeformableEligible, size, 0, 0, cv::INTER_NEAREST);
+				apdClock.hasTransferredState = true;
+			}
+		}
+		params.nAPDLevelIndex = apdLevelIndex;
+		params.nAPDLevelCount = apdLevelCount;
+		params.nAPDStageIndex = apdStageIndex;
+		params.nAPDTransferStatus = static_cast<unsigned>(apdTransferStatus);
+		params.bAPDTransferredState = apdClock.hasTransferredState;
+		Image8U apdOutputReliability;
+		Image8U apdOutputAnchorCounts;
+		Image8U apdOutputDeformableEligible;
+		PatchMatchAPDMultiscaleIO apdMultiscaleIO;
+		if (apdRequested) {
+			apdOutputReliability.create(size);
+			apdOutputAnchorCounts.create(size);
+			apdOutputDeformableEligible.create(size);
+			ASSERT(apdOutputReliability.isContinuous() &&
+				apdOutputAnchorCounts.isContinuous() &&
+				apdOutputDeformableEligible.isContinuous());
+			apdMultiscaleIO.transferredReliability = apdClock.hasTransferredState ?
+				apdTransferredReliability.ptr<uint8_t>() : nullptr;
+			apdMultiscaleIO.outputReliability = apdOutputReliability.ptr<uint8_t>();
+			apdMultiscaleIO.outputAnchorCounts = apdOutputAnchorCounts.ptr<uint8_t>();
+			apdMultiscaleIO.outputDeformableEligible =
+				apdOutputDeformableEligible.ptr<uint8_t>();
+		}
 		params.bLowResProcessed = false;
 		if (scaleNumber != totalScaleNumber) {
 			// all resolutions, but the smallest one, if multi-resolution is enabled
@@ -4191,7 +5492,12 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 					instrumentMapsRequested && scaleNumber != 0,
 					scaleNumber == 0 && instrumentMapsRequested,
 					scaleNumber == 0 && instrumentExactRequested,
-					scaleNumber == 0 && instrumentPrefilterRequested);
+					scaleNumber == 0 && instrumentPrefilterRequested,
+					instrumentAPDRequested);
+				instrumentExtendedMaps.apdStageActive = params.bAPDTransferredState;
+				if (instrumentAPDRequested && instrumentMapsRequested)
+					instrumentExtendedMaps.exactUnavailableReason =
+						_T("generic exact candidate/view maps are unavailable for APD; use the APD-specific exact mechanics capture");
 			}
 			InstrumentStorageReservation instrumentStorageReservation;
 			if (instrumentSelected && instrumentExtendedMaps.estimatedStorageBytes > 0) {
@@ -4279,8 +5585,12 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 		float4* cudaInstrumentLogicalScoreSecondary(nullptr);
 		float4* cudaInstrumentExactLogicalScorePrimary(nullptr);
 		float4* cudaInstrumentExactLogicalScoreSecondary(nullptr);
-		PatchMatchInstrumentExactPixel* cudaInstrumentExactPixels(nullptr);
-		PatchMatchInstrumentExactView* cudaInstrumentExactViews(nullptr);
+			PatchMatchInstrumentExactPixel* cudaInstrumentExactPixels(nullptr);
+			PatchMatchInstrumentExactView* cudaInstrumentExactViews(nullptr);
+			PatchMatchAPDInstrumentCounters* cudaInstrumentAPDCounters(nullptr);
+			PatchMatchAPDInstrumentState* cudaInstrumentAPDStates(nullptr);
+			PatchMatchAPDInstrumentUpdate* cudaInstrumentAPDUpdates(nullptr);
+			PatchMatchAPDInstrumentTrace* cudaInstrumentAPDTraces(nullptr);
 		float4* cudaInstrumentFinalViewWeights(nullptr);
 		float4* cudaInstrumentFinalViewCosts(nullptr);
 		float4* cudaInstrumentFinalViewPhotometricCosts(nullptr);
@@ -4309,8 +5619,38 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 			CUDA_CHECK(cudaMemsetAsync(cudaInstrumentUpdateSources, 0, sizeof(uint8_t) * (size_t)instrumentArea, cudaStream));
 			CUDA_CHECK(cudaMalloc((void**)&cudaInstrumentPlanesBeforePass, sizeof(Point4) * (size_t)instrumentArea));
 			CUDA_CHECK(cudaMalloc((void**)&cudaInstrumentCostsBeforePass, sizeof(float) * (size_t)instrumentArea));
-			CUDA_CHECK(cudaMalloc((void**)&cudaInstrumentSelectedViewsBeforePass, sizeof(uint32_t) * (size_t)instrumentArea));
-			if (writeInstrumentMaps && scaleNumber == 0) {
+				CUDA_CHECK(cudaMalloc((void**)&cudaInstrumentSelectedViewsBeforePass, sizeof(uint32_t) * (size_t)instrumentArea));
+				if (instrumentExtendedMaps.apdAvailable &&
+					instrumentExtendedMaps.apdStageActive && params.nEstimationIters > 0) {
+					const size_t apdIterationCount((size_t)params.nEstimationIters);
+					instrumentExtendedMaps.apdCounters.resize(apdIterationCount);
+					CUDA_CHECK(cudaMalloc((void**)&cudaInstrumentAPDCounters,
+						sizeof(PatchMatchAPDInstrumentCounters) * apdIterationCount));
+					CUDA_CHECK(cudaMemsetAsync(cudaInstrumentAPDCounters, 0,
+						sizeof(PatchMatchAPDInstrumentCounters) * apdIterationCount, cudaStream));
+					if (instrumentExtendedMaps.apdMapsAvailable) {
+						const size_t apdMapArea((size_t)instrumentArea * apdIterationCount);
+						instrumentExtendedMaps.apdStates.resize(apdMapArea);
+						instrumentExtendedMaps.apdUpdates.resize(apdMapArea);
+						CUDA_CHECK(cudaMalloc((void**)&cudaInstrumentAPDStates,
+							sizeof(PatchMatchAPDInstrumentState) * apdMapArea));
+						CUDA_CHECK(cudaMalloc((void**)&cudaInstrumentAPDUpdates,
+							sizeof(PatchMatchAPDInstrumentUpdate) * apdMapArea));
+						CUDA_CHECK(cudaMemsetAsync(cudaInstrumentAPDStates, 0,
+							sizeof(PatchMatchAPDInstrumentState) * apdMapArea, cudaStream));
+						CUDA_CHECK(cudaMemsetAsync(cudaInstrumentAPDUpdates, 0,
+							sizeof(PatchMatchAPDInstrumentUpdate) * apdMapArea, cudaStream));
+					}
+					if (instrumentExtendedMaps.traceAvailable && !activeTracePixels.empty()) {
+						const size_t apdTraceCount(activeTracePixels.size() * apdIterationCount);
+						instrumentExtendedMaps.apdTraces.resize(apdTraceCount);
+						CUDA_CHECK(cudaMalloc((void**)&cudaInstrumentAPDTraces,
+							sizeof(PatchMatchAPDInstrumentTrace) * apdTraceCount));
+						CUDA_CHECK(cudaMemsetAsync(cudaInstrumentAPDTraces, 0,
+							sizeof(PatchMatchAPDInstrumentTrace) * apdTraceCount, cudaStream));
+					}
+				}
+				if (writeInstrumentMaps && scaleNumber == 0) {
 				instrumentValidBeforeFilter.resize((size_t)instrumentArea, 0);
 				CUDA_CHECK(cudaMalloc((void**)&cudaInstrumentValidBeforeFilter, sizeof(uint8_t) * instrumentValidBeforeFilter.size()));
 				CUDA_CHECK(cudaMemsetAsync(cudaInstrumentValidBeforeFilter, 0, sizeof(uint8_t) * instrumentValidBeforeFilter.size(), cudaStream));
@@ -4434,8 +5774,12 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 			instrumentContext.logicalScoreSecondary = cudaInstrumentLogicalScoreSecondary;
 			instrumentContext.exactLogicalScorePrimary = cudaInstrumentExactLogicalScorePrimary;
 			instrumentContext.exactLogicalScoreSecondary = cudaInstrumentExactLogicalScoreSecondary;
-			instrumentContext.exactPixels = cudaInstrumentExactPixels;
-			instrumentContext.exactViews = cudaInstrumentExactViews;
+				instrumentContext.exactPixels = cudaInstrumentExactPixels;
+				instrumentContext.exactViews = cudaInstrumentExactViews;
+				instrumentContext.apdCounters = cudaInstrumentAPDCounters;
+				instrumentContext.apdStates = cudaInstrumentAPDStates;
+				instrumentContext.apdUpdates = cudaInstrumentAPDUpdates;
+				instrumentContext.apdTraces = cudaInstrumentAPDTraces;
 			instrumentContext.finalViewWeights = cudaInstrumentFinalViewWeights;
 			instrumentContext.finalViewCosts = cudaInstrumentFinalViewCosts;
 			instrumentContext.finalViewPhotometricCosts = cudaInstrumentFinalViewPhotometricCosts;
@@ -4453,7 +5797,8 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 			instrumentContext.numTracePixels = (int32_t)activeTracePixels.size();
 			instrumentContext.imageID = (int32_t)depthData.GetView().GetID();
 			instrumentContext.scaleNumber = (int32_t)scaleNumber;
-			instrumentContext.numLogicalStates = instrumentExtendedMaps.numLogicalStates;
+				instrumentContext.numLogicalStates = instrumentExtendedMaps.numLogicalStates;
+				instrumentContext.numAPDIterations = params.nEstimationIters;
 			instrumentContext.viewStride = instrumentExtendedMaps.numViews;
 			instrumentContext.sampled = (OPTDENSE::nPatchMatchInstrumentLevel >= 2);
 			instrumentContext.exact = instrumentExtendedMaps.exactAvailable;
@@ -4474,9 +5819,26 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 #ifdef _USE_DMAP_INSTRUMENTATION
 			RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData(),
 				instrumentEnabled ? instrumentUpdateSources.data() : nullptr,
-				instrumentEnabled ? &instrumentContext : nullptr);
-			if (instrumentEnabled) {
-				CUDA_CHECK(cudaMemcpyAsync(instrumentCounters.data(), cudaInstrumentCounters, sizeof(PatchMatchInstrumentCounters) * instrumentCounters.size(), cudaMemcpyDeviceToHost, cudaStream));
+				instrumentEnabled ? &instrumentContext : nullptr,
+				apdRequested ? &apdMultiscaleIO : nullptr);
+				if (instrumentEnabled) {
+					CUDA_CHECK(cudaMemcpyAsync(instrumentCounters.data(), cudaInstrumentCounters, sizeof(PatchMatchInstrumentCounters) * instrumentCounters.size(), cudaMemcpyDeviceToHost, cudaStream));
+					if (!instrumentExtendedMaps.apdCounters.empty())
+						CUDA_CHECK(cudaMemcpyAsync(instrumentExtendedMaps.apdCounters.data(), cudaInstrumentAPDCounters,
+							sizeof(PatchMatchAPDInstrumentCounters) * instrumentExtendedMaps.apdCounters.size(),
+							cudaMemcpyDeviceToHost, cudaStream));
+					if (!instrumentExtendedMaps.apdStates.empty())
+						CUDA_CHECK(cudaMemcpyAsync(instrumentExtendedMaps.apdStates.data(), cudaInstrumentAPDStates,
+							sizeof(PatchMatchAPDInstrumentState) * instrumentExtendedMaps.apdStates.size(),
+							cudaMemcpyDeviceToHost, cudaStream));
+					if (!instrumentExtendedMaps.apdUpdates.empty())
+						CUDA_CHECK(cudaMemcpyAsync(instrumentExtendedMaps.apdUpdates.data(), cudaInstrumentAPDUpdates,
+							sizeof(PatchMatchAPDInstrumentUpdate) * instrumentExtendedMaps.apdUpdates.size(),
+							cudaMemcpyDeviceToHost, cudaStream));
+					if (!instrumentExtendedMaps.apdTraces.empty())
+						CUDA_CHECK(cudaMemcpyAsync(instrumentExtendedMaps.apdTraces.data(), cudaInstrumentAPDTraces,
+							sizeof(PatchMatchAPDInstrumentTrace) * instrumentExtendedMaps.apdTraces.size(),
+							cudaMemcpyDeviceToHost, cudaStream));
 				if (!instrumentValidBeforeFilter.empty())
 					CUDA_CHECK(cudaMemcpyAsync(instrumentValidBeforeFilter.data(), cudaInstrumentValidBeforeFilter, sizeof(uint8_t) * instrumentValidBeforeFilter.size(), cudaMemcpyDeviceToHost, cudaStream));
 				if (!instrumentFilterRejectReasons.empty())
@@ -4515,7 +5877,8 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 					CUDA_CHECK(cudaMemcpyAsync(instrumentTraceRecords.data(), cudaInstrumentTraceRecords, sizeof(PatchMatchInstrumentTraceRecord) * instrumentTraceRecords.size(), cudaMemcpyDeviceToHost, cudaStream));
 			}
 #else
-			RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData());
+			RunCUDA(depthData.confMap.getData(), (uint32_t*)depthData.viewsMap.getData(),
+				apdRequested ? &apdMultiscaleIO : nullptr);
 #endif
 			CUDA_CHECK(cudaEventRecord(g_constMemReady, cudaStream));
 		}
@@ -4523,6 +5886,61 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 		// reads from the pinned host buffer
 		CUDA_CHECK(cudaStreamSynchronize(cudaStream));
 		CUDA_CHECK(cudaGetLastError());
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if (instrumentEnabled && apdRequested) {
+			instrumentExtendedMaps.apdMultiscale = APDMultiscaleObservabilityJson(
+				params,
+				instrumentAPDSourceStateAvailable ? &instrumentAPDSourceStateHeader : nullptr,
+				apdTransferredReliability,
+				apdTransferredAnchorCounts,
+				apdTransferredDeformableEligible,
+				apdOutputReliability,
+				apdOutputAnchorCounts,
+				apdOutputDeformableEligible);
+			if (instrumentExtendedMaps.apdMapsAvailable) {
+				auto copyByteMap = [](const Image8U& source, std::vector<uint8_t>& destination) {
+					if (source.empty()) {
+						destination.clear();
+						return;
+					}
+					ASSERT(source.isContinuous());
+					const uint8_t* begin(source.ptr<uint8_t>());
+					destination.assign(begin, begin+(size_t)source.area());
+				};
+				copyByteMap(apdTransferredReliability,
+					instrumentExtendedMaps.apdTransferredReliability);
+				copyByteMap(apdTransferredAnchorCounts,
+					instrumentExtendedMaps.apdTransferredAnchorCounts);
+				copyByteMap(apdTransferredDeformableEligible,
+					instrumentExtendedMaps.apdTransferredDeformableEligible);
+				copyByteMap(apdOutputReliability,
+					instrumentExtendedMaps.apdOutputReliability);
+				copyByteMap(apdOutputAnchorCounts,
+					instrumentExtendedMaps.apdOutputAnchorCounts);
+				copyByteMap(apdOutputDeformableEligible,
+					instrumentExtendedMaps.apdOutputDeformableEligible);
+			}
+			if (!AppendAPDMultiscaleStage(
+				instrumentDir, instrumentImageID, (int)scaleNumber, size,
+				instrumentExtendedMaps.apdMultiscale))
+			{
+				RecordInstrumentSidecarWriteError(
+					instrumentSidecarWriteErrors, "apd_multiscale_stages.jsonl", (int)scaleNumber);
+			}
+		}
+		#endif
+		if (apdRequested) {
+			apdCarryState.Release();
+			apdCarryState.header.version = APD_MULTISCALE_STATE_VERSION;
+			apdCarryState.header.width = (uint32_t)size.width;
+			apdCarryState.header.height = (uint32_t)size.height;
+			apdCarryState.header.sourceLevelIndex = apdLevelIndex;
+			apdCarryState.header.sourceStageIndex = apdStageIndex;
+			apdCarryState.reliabilityMap = apdOutputReliability;
+			apdCarryState.anchorCountMap = apdOutputAnchorCounts;
+			apdCarryState.deformableEligibleMap = apdOutputDeformableEligible;
+			ASSERT(apdCarryState.IsValid());
+		}
 		if (params.bLowResProcessed)
 			CUDA_CHECK(cudaFreeAsync(cudaLowDepths, cudaStream));
 #ifdef _USE_DMAP_INSTRUMENTATION
@@ -4531,11 +5949,27 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 		if (instrumentEnabled) {
 				if (!depthData.confMap.empty())
 					instrumentCostMap = depthData.confMap.clone();
-				instrumentIterationCounters = AggregateInstrumentIterations(instrumentCounters, instrumentExtendedMaps.exactAvailable);
+				instrumentIterationCounters = AggregateInstrumentIterations(
+					instrumentCounters,
+					instrumentExtendedMaps.exactAvailable ||
+						(instrumentExtendedMaps.apdAvailable && instrumentExtendedMaps.apdStageActive));
 				if (!AppendInstrumentCounters(instrumentDir, (int)depthData.GetView().GetID(), (int)scaleNumber, size, instrumentIterationCounters))
 					RecordInstrumentSidecarWriteError(instrumentSidecarWriteErrors, "counters.csv", (int)scaleNumber);
-				if (!AppendInstrumentTraces(instrumentDir, (int)depthData.GetView().GetID(), (int)scaleNumber, activeTracePixels, instrumentTraceRecords, numInstrumentPasses, instrumentExtendedMaps.exactAvailable))
+				// APD instrumented kernels also emit one exact record per logical
+				// iteration (from the pixel's active checkerboard phase), even though
+				// the generic exact full-frame map bundle is deliberately unavailable.
+				const bool exactHotKernelTraceRecords(
+					instrumentExtendedMaps.exactAvailable ||
+						(instrumentExtendedMaps.apdAvailable && instrumentExtendedMaps.apdStageActive));
+				if (!AppendInstrumentTraces(instrumentDir, (int)depthData.GetView().GetID(), (int)scaleNumber, activeTracePixels, instrumentTraceRecords, numInstrumentPasses, exactHotKernelTraceRecords))
 					RecordInstrumentSidecarWriteError(instrumentSidecarWriteErrors, "traces.jsonl", (int)scaleNumber);
+				if (!AppendAPDInstrumentation(
+					instrumentDir, (int)depthData.GetView().GetID(), (int)scaleNumber, size,
+					params.nNumViews, activeTracePixels, instrumentExtendedMaps))
+				{
+					RecordInstrumentSidecarWriteError(
+						instrumentSidecarWriteErrors, "apd_iteration.csv_or_apd_traces.jsonl", (int)scaleNumber);
+				}
 				if (!AppendInstrumentTimings(instrumentDir, (int)depthData.GetView().GetID(), (int)scaleNumber, instrumentKernelTimingsMs))
 					RecordInstrumentSidecarWriteError(instrumentSidecarWriteErrors, "timings.csv", (int)scaleNumber);
 				if (!WriteDMapIterationCSV(DMapDepthMapDir(instrumentRoot, instrumentImageID, instrumentImageName), instrumentImageID, instrumentImageName, (int)scaleNumber, size, instrumentIterationCounters))
@@ -4577,8 +6011,16 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 				CUDA_CHECK(cudaFree(cudaInstrumentExactLogicalScoreSecondary));
 			if (cudaInstrumentExactPixels)
 				CUDA_CHECK(cudaFree(cudaInstrumentExactPixels));
-			if (cudaInstrumentExactViews)
-				CUDA_CHECK(cudaFree(cudaInstrumentExactViews));
+				if (cudaInstrumentExactViews)
+					CUDA_CHECK(cudaFree(cudaInstrumentExactViews));
+				if (cudaInstrumentAPDCounters)
+					CUDA_CHECK(cudaFree(cudaInstrumentAPDCounters));
+				if (cudaInstrumentAPDStates)
+					CUDA_CHECK(cudaFree(cudaInstrumentAPDStates));
+				if (cudaInstrumentAPDUpdates)
+					CUDA_CHECK(cudaFree(cudaInstrumentAPDUpdates));
+				if (cudaInstrumentAPDTraces)
+					CUDA_CHECK(cudaFree(cudaInstrumentAPDTraces));
 			if (cudaInstrumentFinalViewWeights)
 				CUDA_CHECK(cudaFree(cudaInstrumentFinalViewWeights));
 			if (cudaInstrumentFinalViewCosts)
@@ -4779,6 +6221,14 @@ void PatchMatch::EstimateDepthMap(DepthData& depthData, ConfAdjustRequest* pConf
 			lowResViewsMap = depthData.viewsMap;
 		}
 	}
+	const bool apdHasNextStage(
+		apdRequested &&
+		(geometricIteration < 0 ? OPTDENSE::nEstimationGeometricIters > 0u :
+			geometricIteration+1 < (int)OPTDENSE::nEstimationGeometricIters));
+	if (apdHasNextStage && apdCarryState.IsValid())
+		fullResDepthData.apdMultiscaleState = apdCarryState;
+	else
+		fullResDepthData.apdMultiscaleState.Release();
 
 	#ifndef _USE_DMAP_INSTRUMENTATION
 	// apply ignore mask

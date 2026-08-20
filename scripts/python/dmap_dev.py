@@ -73,6 +73,8 @@ RUNTIME_BOUNDARY_RECEIPT_SCHEMA_NAME = "openmvs.dmap.runtime_boundary_receipt"
 RUNTIME_BOUNDARY_RECEIPT_SCHEMA_VERSION = 1
 CAPTURE_INTENT_SCHEMA_NAME = "openmvs.dmap.capture_intent"
 CAPTURE_INTENT_SCHEMA_VERSION = 1
+TRACE_RERUN_EXECUTIONS_SCHEMA_NAME = "openmvs.dmap.trace_rerun_executions"
+TRACE_RERUN_EXECUTIONS_SCHEMA_VERSION = 1
 PRIMARY_RANSAC_THRESHOLD_M = 0.02
 RANSAC_THRESHOLDS_M = (0.005, 0.01, 0.02, 0.05)
 MIN_SCENES_FOR_GATE = 5
@@ -375,6 +377,7 @@ class TraceRerunCommand:
     config: Path
     execute: bool = False
     allow_over_budget: bool = False
+    report_dir: Path | None = None
 
 
 @dataclass
@@ -4118,6 +4121,51 @@ def validate_instrumentation_capture_topology(
     )
 
 
+def declared_process_true_map_contracts(
+    manifest: dict[str, Any],
+) -> tuple[bool, bool]:
+    """Return structurally declared generic and APD exact map contracts."""
+
+    exact_capture = manifest.get("exact_capture")
+    generic_exact = (
+        isinstance(exact_capture, dict)
+        and exact_capture.get("requested") is True
+        and exact_capture.get("available") is True
+    )
+    apd_capture = manifest.get("apd_capture")
+    apd_exact = (
+        isinstance(apd_capture, dict)
+        and apd_capture.get("schema_name") == instrumentation_validator.APD_SCHEMA_NAME
+        and apd_capture.get("schema_version")
+        in instrumentation_validator.APD_SUPPORTED_SCHEMA_VERSIONS
+        and apd_capture.get("requested") is True
+        and apd_capture.get("summary_available") is True
+        and apd_capture.get("maps_available") is True
+    )
+    return generic_exact, apd_exact
+
+
+def validated_process_true_map_contracts(
+    manifest: dict[str, Any],
+    validation_result: dict[str, Any],
+) -> tuple[bool, bool]:
+    """Return validated availability of generic and APD exact map contracts."""
+
+    generic_exact, apd_declared = declared_process_true_map_contracts(manifest)
+    apd_capture = manifest.get("apd_capture")
+    apd_validation = validation_result.get("apd_validation")
+    apd_exact = (
+        apd_declared
+        and isinstance(apd_validation, dict)
+        and apd_validation.get("schema_name") == apd_capture.get("schema_name")
+        and apd_validation.get("schema_version") == apd_capture.get("schema_version")
+        and apd_validation.get("requested") is True
+        and apd_validation.get("available") is True
+        and apd_validation.get("implementation_label") != "disabled"
+    )
+    return generic_exact, apd_exact
+
+
 def validate_completed_run_mode(run_dir: Path, mode: str) -> tuple[bool, str]:
     def close_validation(reason: str) -> tuple[bool, str]:
         closure = integrity.validate_capture_artifact_closure(run_dir)
@@ -4278,15 +4326,13 @@ def validate_completed_run_mode(run_dir: Path, mode: str) -> tuple[bool, str]:
                     f"frame {frame_dir.name} deep capture requires schema-v4 "
                     "exact Process<true> evidence"
                 )
-            exact_capture = manifest.get("exact_capture")
-            if (
-                not isinstance(exact_capture, dict)
-                or exact_capture.get("requested") is not True
-                or exact_capture.get("available") is not True
-            ):
+            generic_exact, apd_exact = validated_process_true_map_contracts(
+                manifest, result
+            )
+            if not generic_exact and not apd_exact:
                 return False, (
                     f"frame {frame_dir.name} deep capture does not contain "
-                    "available exact Process<true> maps"
+                    "validated generic or APD-specific exact Process<true> maps"
                 )
             cuda_required = True
             matching = cuda_plans.get(image_id, [])
@@ -4316,12 +4362,23 @@ def validate_completed_run_mode(run_dir: Path, mode: str) -> tuple[bool, str]:
                     schema_version = int(plan.get("schema_version", 0) or 0)
                     fine_level = schema_version < 3 or level == 0
                     if fine_level:
+                        generic_exact_tier = (
+                            generic_exact
+                            and plan.get("exact_requested") is True
+                            and plan.get("exact_available") is True
+                        )
+                        apd_exact_tier = (
+                            apd_exact
+                            and schema_version >= 4
+                            and plan.get("apd_requested") is True
+                            and plan.get("apd_summary_available") is True
+                            and plan.get("apd_maps_available") is True
+                        )
                         tier_valid = (
                             schema_version >= 2
                             and plan.get("maps_requested") is True
                             and plan.get("maps_available") is True
-                            and plan.get("exact_requested") is True
-                            and plan.get("exact_available") is True
+                            and (generic_exact_tier or apd_exact_tier)
                         )
                     else:
                         compatibility = plan.get("compatibility_map_contract")
@@ -4735,6 +4792,21 @@ def capture_signature_compatibility(maps_dir: Path, timing_dir: Path) -> tuple[b
     )
 
 
+def summary_capture_uses_apd_hot_kernel(instrumentation_dir: Path) -> bool:
+    """Return whether a summary capture records exact APD hot-kernel aggregates."""
+    for summary_path in sorted(instrumentation_dir.rglob("summary.json")):
+        summary = read_json(summary_path)
+        observability = summary.get("apd_observability")
+        if (
+            isinstance(observability, dict)
+            and observability.get("enabled") is True
+            and summary.get("candidate_accounting_mode")
+            == "exact_apd_working_objective_aggregate"
+        ):
+            return True
+    return False
+
+
 def discover_run_scenes(config: dict[str, Any], root: Path) -> list[RunScene]:
     discovered: list[RunScene] = []
     occupied_labels = configured_run_labels(config)
@@ -4809,13 +4881,26 @@ def discover_run_scenes(config: dict[str, Any], root: Path) -> list[RunScene]:
                 timing_available = (timing_instrumentation / "run_metadata.json").is_file()
                 if not maps_available and not prefilter_available and not timing_available:
                     continue
-                quality_dir = timing_dir if timing_available else prefilter_dir if prefilter_available else None
-                quality_instrumentation = (
-                    timing_instrumentation if timing_available
-                    else prefilter_instrumentation if prefilter_available
-                    else None
+                apd_summary_diagnostic = (
+                    timing_available
+                    and summary_capture_uses_apd_hot_kernel(timing_instrumentation)
                 )
-                quality_profile = "summary" if timing_available else "prefilter"
+                if timing_available and not apd_summary_diagnostic:
+                    quality_dir = timing_dir
+                    quality_instrumentation = timing_instrumentation
+                    quality_profile = "summary"
+                elif prefilter_available:
+                    quality_dir = prefilter_dir
+                    quality_instrumentation = prefilter_instrumentation
+                    quality_profile = "prefilter"
+                elif timing_available:
+                    quality_dir = timing_dir
+                    quality_instrumentation = timing_instrumentation
+                    quality_profile = "summary"
+                else:
+                    quality_dir = None
+                    quality_instrumentation = None
+                    quality_profile = "prefilter"
                 compatible = True
                 incompatibility_reason = ""
                 if maps_available and quality_dir is not None:
@@ -4823,14 +4908,29 @@ def discover_run_scenes(config: dict[str, Any], root: Path) -> list[RunScene]:
                         map_dir, quality_dir
                     )
                 if quality_instrumentation is not None:
+                    quality_is_diagnostic = (
+                        quality_profile == "summary" and apd_summary_diagnostic
+                    )
                     discovered.append(RunScene(
-                        label=label,
+                        label=(
+                            diagnostic_label(label, "summary")
+                            if quality_is_diagnostic else label
+                        ),
                         role=role,
                         repeat=repeat,
                         scene_id=scene_dir.name,
                         instrumentation_dir=quality_instrumentation,
                         depth_map_dir=quality_dir / "depth_maps",
-                        timing_dir=(timing_instrumentation if timing_available else quality_instrumentation),
+                        timing_dir=quality_instrumentation,
+                        diagnostic_only=quality_is_diagnostic,
+                        diagnostic_only_reason=(
+                            "APD summary uses Process<true> exact hot-kernel aggregates; "
+                            "the production endpoint remains the quality authority"
+                            if quality_is_diagnostic else ""
+                        ),
+                        allow_process_specialization_divergence_for_diagnostics=(
+                            quality_is_diagnostic
+                        ),
                         configured_label=label,
                         capture_profile=quality_profile,
                     ))
@@ -4882,8 +4982,10 @@ def discover_auxiliary_profile_scenes(
         for repeat_dir in sorted(run_root.glob("repeat_*")):
             repeat = int(repeat_dir.name.rsplit("_", 1)[-1])
             for scene_dir in sorted(path for path in repeat_dir.iterdir() if path.is_dir()):
+                summary_dir = scene_dir / "timing"
+                summary_instrumentation = summary_dir / "dmap_instrumentation"
                 summary_available = (
-                    scene_dir / "timing" / "dmap_instrumentation" / "run_metadata.json"
+                    summary_instrumentation / "run_metadata.json"
                 ).is_file()
                 prefilter_dir = scene_dir / "prefilter"
                 prefilter_instrumentation = prefilter_dir / "dmap_instrumentation"
@@ -4891,10 +4993,23 @@ def discover_auxiliary_profile_scenes(
                     prefilter_instrumentation / "run_metadata.json"
                 ).is_file():
                     continue
-                evidence_label = f"{label} [prefilter]"
+                apd_summary_diagnostic = summary_capture_uses_apd_hot_kernel(
+                    summary_instrumentation
+                )
+                evidence_profile = (
+                    "summary" if apd_summary_diagnostic else "prefilter"
+                )
+                evidence_dir = (
+                    summary_dir if apd_summary_diagnostic else prefilter_dir
+                )
+                evidence_instrumentation = (
+                    summary_instrumentation
+                    if apd_summary_diagnostic else prefilter_instrumentation
+                )
+                evidence_label = f"{label} [{evidence_profile}]"
                 suffix = 2
                 while evidence_label in occupied:
-                    evidence_label = f"{label} [prefilter {suffix}]"
+                    evidence_label = f"{label} [{evidence_profile} {suffix}]"
                     suffix += 1
                 occupied.add(evidence_label)
                 auxiliary.append(RunScene(
@@ -4902,15 +5017,18 @@ def discover_auxiliary_profile_scenes(
                     role=role,
                     repeat=repeat,
                     scene_id=scene_dir.name,
-                    instrumentation_dir=prefilter_instrumentation,
-                    depth_map_dir=prefilter_dir / "depth_maps",
-                    timing_dir=prefilter_instrumentation,
+                    instrumentation_dir=evidence_instrumentation,
+                    depth_map_dir=evidence_dir / "depth_maps",
+                    timing_dir=evidence_instrumentation,
                     diagnostic_only=True,
                     diagnostic_only_reason=(
+                        "APD summary uses Process<true> exact hot-kernel aggregates; "
+                        "the production endpoint remains the quality authority"
+                        if apd_summary_diagnostic else
                         "prefilter evidence is auxiliary because summary is the quality authority"
                     ),
                     configured_label=label,
-                    capture_profile="prefilter",
+                    capture_profile=evidence_profile,
                 ))
     return [stage for row in auxiliary for stage in expand_instrumentation_stages(row)]
 
@@ -5370,13 +5488,18 @@ def build_capture_profile_coverage(
             "unavailable_units": counts["unavailable"],
             "process_specialization": (
                 "Process<true>" if profile in {"deep", "trace"}
-                else "Process<false>" if profile in {"endpoint", "summary", "prefilter"}
+                else "Process<false> or APD Process<true> exact aggregates"
+                if profile == "summary"
+                else "Process<false>" if profile in {"endpoint", "prefilter"}
                 else None
             ),
             "quality_authority": (
                 "production_quality_authority" if profile == "endpoint"
+                else "conditional: non-APD Process<false> only after endpoint bit-exact parity; "
+                "APD exact aggregate summary is diagnostic-only"
+                if profile == "summary"
                 else "eligible_only_after_endpoint_bit_exact_parity"
-                if profile in {"summary", "prefilter"}
+                if profile == "prefilter"
                 else "diagnostic_only"
             ),
         })
@@ -9871,11 +9994,13 @@ def build_markdown(
     published_report_dir: Path | None = None,
     low_texture_hysteresis: dict[str, Any] | None = None,
     accepted_gain_census: dict[str, Any] | None = None,
+    mechanics: dict[str, Any] | None = None,
 ) -> str:
     accuracy_ledger = accuracy_ledger if accuracy_ledger is not None else pd.DataFrame()
     accuracy_evidence = accuracy_evidence if accuracy_evidence is not None else pd.DataFrame()
     low_texture_hysteresis = low_texture_hysteresis or {}
     accepted_gain_census = accepted_gain_census or {}
+    mechanics = mechanics or {}
     style = """<style>
 details.scene { margin:18px 0;border:1px solid #aebfcd;border-radius:7px;background:#fff }
 details.scene>summary { cursor:pointer;padding:11px 14px;background:#dce9f2;color:#20384b;font-weight:700 }
@@ -9925,6 +10050,143 @@ summary::marker { color:#4f7f9f }
         *dmap_report_model.render_investigation_guide_markdown().splitlines(), "",
         "## 1. Executive Summary", "",
     ]
+    quality_summary_available = not accuracy_ledger.empty or bool(gates)
+    if not quality_summary_available:
+        annotation_reasons = []
+        if not annotations.empty and "error" in annotations.columns:
+            annotation_reasons = sorted({
+                str(value) for value in annotations["error"].dropna().tolist()
+                if str(value).strip()
+            })
+        annotation_reason = (
+            "; ".join(annotation_reasons)
+            if annotation_reasons else
+            "no paired annotation quality evidence was produced"
+        )
+        lines.extend([
+            '<div class="annotation-model-warning"><strong>Mechanics-only sentinel; '
+            'no quality verdict.</strong> Annotation consistency, accuracy-first gates, '
+            f'and Pareto ranking are unavailable: {html.escape(annotation_reason)}. '
+            'Process&lt;true&gt; mechanics below prove execution and expose behavior; they '
+            'do not establish depth accuracy or an improvement over the production '
+            'control.</div>', "",
+        ])
+        apd_iterations = mechanics.get("apd_iterations") or []
+        selected_apd_iterations: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for row in sorted(
+            (item for item in apd_iterations if isinstance(item, dict)),
+            key=lambda item: (
+                0 if item.get("capture_profile") == "deep" else 1,
+                str(item.get("scene_id")), int(item.get("image_id", -1)),
+                int(item.get("logical_iteration", -1)),
+            ),
+        ):
+            key = (
+                row.get("scene_id"), row.get("image_id"),
+                row.get("estimation_stage"), row.get("geometric_iteration"),
+                row.get("logical_iteration"),
+            )
+            selected_apd_iterations.setdefault(key, row)
+        apd_rows = []
+        apd_c2_rows = []
+        for row in selected_apd_iterations.values():
+            classified = safe_float(row.get("classified"))
+            ratio = lambda key: (
+                safe_float(row.get(key)) / classified
+                if classified not in (None, 0.0) and safe_float(row.get(key)) is not None
+                else None
+            )
+            apd_rows.append([
+                f"{row.get('scene_id')} / {int(row.get('image_id', -1))}",
+                int(row.get("logical_iteration", -1)),
+                fmt_percent(ratio("reliability_reliable")),
+                fmt_percent(ratio("ransac_valid")),
+                fmt_percent(ratio("deformable_updates")),
+                fmt(row.get("anchor_count_mean"), 2),
+                fmt(row.get("center_cost_mean"), 4),
+                fmt(row.get("anchor_mean_cost_mean"), 4),
+                fmt(row.get("working_cost_mean"), 4),
+                fmt(row.get("working_gap_mean"), 4),
+                fmt(row.get("native_persistent_cost_mean"), 4),
+            ])
+            attempted = safe_float(row.get("anchor_view_selection_attempted"))
+            proposals = safe_float(row.get("anchor_proposals_tested"))
+            deformable_updates = safe_float(row.get("deformable_updates"))
+            if attempted is not None:
+                relative = lambda numerator, denominator: (
+                    safe_float(row.get(numerator)) / denominator
+                    if denominator not in (None, 0.0)
+                    and safe_float(row.get(numerator)) is not None
+                    else None
+                )
+                apd_c2_rows.append([
+                    f"{row.get('scene_id')} / {int(row.get('image_id', -1))}",
+                    int(row.get("logical_iteration", -1)),
+                    fmt_percent(relative("anchor_view_selection_used", attempted)),
+                    fmt_percent(relative(
+                        "view_selection_mode_previous_weights_fallback", attempted,
+                    )),
+                    fmt_percent(relative(
+                        "immutable_anchor_state_updates", deformable_updates,
+                    )),
+                    fmt_percent(relative("anchor_proposals_finite", proposals)),
+                    fmt_percent(relative("anchor_proposals_accepted", deformable_updates)),
+                    fmt_percent(relative(
+                        "anchor_propagation_final_winners", deformable_updates,
+                    )),
+                    fmt(row.get("best_anchor_working_cost_mean"), 4),
+                    fmt(row.get("accepted_anchor_native_cost_mean"), 4),
+                ])
+        enabled_contracts = [
+            row for row in (mechanics.get("apd_contracts") or [])
+            if isinstance(row, dict) and row.get("enabled") is True
+        ]
+        if apd_rows:
+            contract = next(
+                (row for row in enabled_contracts if row.get("capture_profile") == "deep"),
+                enabled_contracts[0] if enabled_contracts else {},
+            )
+            lines.extend([
+                "### APD Exact Mechanics", "",
+                (
+                    f"Implementation label: `{contract.get('implementation_label', 'unavailable')}`; "
+                    f"implemented through: `{contract.get('implemented_through', 'unavailable')}`. "
+                    "All values are exact for the diagnostic APD working objective. "
+                    "The native persisted cost is conventionally rescored and is a different score domain."
+                ), "",
+                md_table(
+                    ["scene / image", "iteration", "reliable", "valid RANSAC", "deformable updates", "mean anchors", "center cost", "anchor cost", "working cost", "winner gap", "native persisted cost"],
+                    apd_rows,
+                ), "",
+            ])
+            if apd_c2_rows:
+                lines.extend([
+                    "#### C2 Anchor Views And Propagation", "",
+                    (
+                        "Rates use deformable-update pixels unless labeled as proposal "
+                        "rates. Anchor working cost ranks proposals; accepted native cost "
+                        "is the conventional same-kernel diagnostic rescore."
+                    ), "",
+                    md_table(
+                        [
+                            "scene / image", "iteration", "anchor-evidence views",
+                            "previous-weight fallback", "immutable state", "finite proposals",
+                            "accepted anchor pixels", "final anchor winners",
+                            "best anchor working cost", "accepted anchor native cost",
+                        ],
+                        apd_c2_rows,
+                    ), "",
+                ])
+            missing_mechanics = sorted({
+                str(value)
+                for row in enabled_contracts
+                for value in (row.get("required_mechanics_not_yet_implemented") or [])
+            })
+            if missing_mechanics:
+                lines.extend([
+                    "Required paper mechanics not yet implemented at this checkpoint:", "",
+                    *[f"- {value}" for value in missing_mechanics], "",
+                ])
     if not accuracy_ledger.empty:
         strict_rows = [
             row for row in accuracy_ledger.to_dict("records")
@@ -10017,12 +10279,30 @@ summary::marker { color:#4f7f9f }
         [row["candidate"], row["metric"], row["status"], fmt(row["mean_delta"]), f"[{fmt(row['ci95_low'])}, {fmt(row['ci95_high'])}]", fmt(row["effective_tolerance"]), row["scene_count"]]
         for row in gates
     ]
-    lines.extend([md_table(["variant", "metric", "status", "delta", "95% CI", "tolerance", "scenes"], gate_rows), ""])
-    lines.extend(["### Pareto Summary", "", md_table(
-        ["variant", "Pareto", "dominated by"],
-        [[row["candidate"], "yes" if row["pareto"] else "no", ", ".join(row["dominated_by"]) or "-"] for row in pareto],
-    ), "", "### Automatic Mechanism Findings", ""])
-    lines.extend(f"- **{row['candidate']} [{row['strength']}]:** {row['finding']}" for row in findings)
+    if gate_rows:
+        lines.extend([md_table(["variant", "metric", "status", "delta", "95% CI", "tolerance", "scenes"], gate_rows), ""])
+    else:
+        lines.extend([
+            "_Quality gates unavailable because no paired quality metrics were produced._", "",
+        ])
+    lines.extend(["### Pareto Summary", ""])
+    if pareto:
+        lines.extend([md_table(
+            ["variant", "Pareto", "dominated by"],
+            [[row["candidate"], "yes" if row["pareto"] else "no", ", ".join(row["dominated_by"]) or "-"] for row in pareto],
+        ), ""])
+    else:
+        lines.extend([
+            "_Pareto ranking unavailable because no candidate has paired quality metrics._", "",
+        ])
+    lines.extend(["### Automatic Mechanism Findings", ""])
+    if findings:
+        lines.extend(f"- **{row['candidate']} [{row['strength']}]:** {row['finding']}" for row in findings)
+    else:
+        lines.extend([
+            "_No automatic quality finding is available. Use the exact mechanics summary "
+            "above and the interactive investigation interface for diagnostic evidence._"
+        ])
     report_policy_flags: list[str] = []
     if allow_process_specialization_divergence_for_diagnostics(config):
         report_policy_flags.append(
@@ -10051,7 +10331,7 @@ summary::marker { color:#4f7f9f }
         "", "## 2. Algorithm Description", "",
         "CUDA PatchMatch initializes and iteratively refines per-pixel depth/normal hypotheses, jointly selects source views, combines photometric, prior, and optional geometric costs, then filters weak hypotheses. Maps captures use the instrumented `Process<true>` specialization to record direct score components, candidate lifecycle, update attribution, winner gaps, and per-view mechanics in the hot kernel. Read-only post-pass snapshots retain final state and explicitly labeled equal-selected-view proxies. A direct signal is exact for that instrumented invocation; it is not production-equivalent quality evidence unless the complete DMAP set also passes the separate parity gate. Downstream fusion is not instrumented.",
         "",
-        "Instrumentation is disabled unless `--dmap-instrumentation-dir` is non-empty. Disabled, summary, debug, and budget-degraded candidate kernels use `Process<false>`; exact maps use `Process<true>`. The enabled specialization has higher register/local-memory pressure and must remain diagnostic-only whenever kernel-resource, bit-exact production parity, resource-admission, or Compute Sanitizer gates are not all satisfied. Disabled runs do not allocate instrumentation buffers, launch diagnostic kernels, write instrumentation artifacts, or change instrumentation-related CUDA device state. Checkerboard phases are combined for analysis and remain separate only in timing diagnostics.",
+        "Instrumentation is disabled unless `--dmap-instrumentation-dir` is non-empty. Disabled, prefilter, non-APD summary/debug, and budget-degraded candidate kernels use `Process<false>`; APD exact aggregate summary/debug and exact maps use `Process<true>`. Process<true> evidence is diagnostic-only. The enabled specialization has higher register/local-memory pressure and must remain diagnostic-only whenever kernel-resource, bit-exact production parity, resource-admission, or Compute Sanitizer gates are not all satisfied. Disabled runs do not allocate instrumentation buffers, launch diagnostic kernels, write instrumentation artifacts, or change instrumentation-related CUDA device state. Checkerboard phases are combined for analysis and remain separate only in timing diagnostics.",
         "", "## 3. Metrics Description", "",
         "- Estimator validity is the instrumentation snapshot after CUDA keep-cost and ignore-mask filtering, before optional CPU speckle removal and gap filling. Its baseline-relative ledger field remains `valid_coverage_delta` for compatibility.",
         "- Final endpoint valid-depth coverage is read from the terminal production DMAP after all configured optional depth-map postprocessing. Its ledger field is `endpoint_valid_depth_coverage_delta`; unavailable DMAPs remain null with an explicit status and reason.",
@@ -12163,10 +12443,12 @@ def evidence_trace_pixels(baseline: pd.Series, candidate: pd.Series) -> list[dic
 def trace_capture_frames(frames: pd.DataFrame, configured_run: str) -> pd.DataFrame:
     """Resolve one trace-evidence cohort for a configured run identity.
 
-    ``run`` is a presentation label and may be qualified as ``[deep]`` when a
-    Process<true> maps capture is isolated from the production quality cohort.
-    New reports carry ``configured_run`` explicitly so trace selection never
-    needs to reverse-engineer that display label.
+    ``run`` is a presentation label and may be profile-qualified when a
+    Process<true> capture is isolated from the production quality cohort. New
+    reports carry ``configured_run`` and ``capture_profile`` explicitly so
+    trace selection never needs to reverse-engineer that display label. A
+    unique deep cohort is authoritative for automatic trace recommendations;
+    summary evidence is aggregate-only even when APD makes it diagnostic.
     """
 
     required = {"run", "repeat", "scene_id", "image_id"}
@@ -12201,6 +12483,20 @@ def trace_capture_frames(frames: pd.DataFrame, configured_run: str) -> pd.DataFr
             if "diagnostic_only" in group.columns
             else group.iloc[0:0]
         )
+        if "capture_profile" in diagnostic.columns:
+            deep = diagnostic[
+                diagnostic["capture_profile"].astype("string").eq("deep")
+            ]
+            if len(deep) == 1:
+                chosen.append(deep.iloc[0])
+                continue
+            if len(deep) > 1:
+                labels = sorted(deep["run"].astype(str).tolist())
+                raise ValueError(
+                    "trace selection found multiple deep cohorts for configured "
+                    f"run {configured_run!r}, scene {scene_id!r}, image {image_id!r}: "
+                    f"{labels}"
+                )
         if len(diagnostic) == 1:
             chosen.append(diagnostic.iloc[0])
             continue
@@ -12353,6 +12649,27 @@ def observability_run_arguments(
     )
 
 
+def prepare_controlled_program_options_config(
+    run_dir: Path,
+    command_work_dir: Path,
+) -> Path:
+    """Bind an on-demand capture to an explicit empty Boost config file."""
+
+    dmap_drilldown.validate_no_implicit_program_options_file(command_work_dir)
+    program_options_config = run_dir / "generated" / "Densify.drilldown.cfg"
+    if program_options_config.is_symlink():
+        raise RuntimeError(
+            "controlled drill-down program-options path is a symlink: "
+            f"{program_options_config}"
+        )
+    write_immutable_text(
+        program_options_config,
+        "",
+        "controlled empty drill-down program-options file",
+    )
+    return program_options_config
+
+
 def execute_trace_reruns(
     config: dict[str, Any],
     root: Path,
@@ -12402,11 +12719,39 @@ def execute_trace_reruns(
             validated_output_component(scene_id, "trace scene_id"),
             description="trace rerun directory",
         )
+        pixels_by_image: dict[int, list[dict[str, int]]] = {}
+        for pixel in pixels:
+            pixels_by_image.setdefault(int(pixel["image_id"]), []).append(pixel)
+        if run_dir.exists() and any(run_dir.iterdir()):
+            validations = []
+            for image_id, image_pixels in sorted(pixels_by_image.items()):
+                valid, reason = drilldown_run_complete(
+                    run_dir, "trace", image_id, image_pixels
+                )
+                if not valid:
+                    raise RuntimeError(
+                        f"refusing to overwrite incomplete targeted trace run at "
+                        f"{run_dir}: {reason}"
+                    )
+                validations.append({"image_id": image_id, "validation": reason})
+            result = read_json(run_dir / "repro.json")
+            result.update({
+                "run": run_label,
+                "scene_id": scene_id,
+                "trace_pixels": len(pixels),
+                "validation": validations,
+                "reused": True,
+            })
+            executions.append(result)
+            continue
         work_dir = run_dir / "work"
         local_mvs = prepare_locked_profile_workspace(
             config, root, scene, work_dir
         )
         command_work_dir = dmap_working_folder(local_mvs)
+        program_options_config = prepare_controlled_program_options_config(
+            run_dir, command_work_dir
+        )
         trace_config = run_dir / "trace_config.json"
         write_json(trace_config, {"trace_pixels": pixels})
         image_list = ",".join(str(value) for value in sorted({pixel["image_id"] for pixel in pixels}))
@@ -12422,10 +12767,14 @@ def execute_trace_reruns(
                 "--dmap-instrumentation-level",
                 "--dmap-instrumentation-sample-rate",
                 "--dmap-instrumentation-write-maps",
+                "--config-file",
             },
         )
         command = [
-            str(densify_bin), "--working-folder", str(command_work_dir), "--input-file", str(local_mvs),
+            str(densify_bin),
+            "--config-file", str(program_options_config.resolve()),
+            "--working-folder", f"{command_work_dir}{os.sep}",
+            "--input-file", str(local_mvs),
             "--output-file", str(run_dir / "trace_dense.mvs"),
             "--dmap-instrumentation-dir", str(run_dir / "dmap_instrumentation"),
             "--dmap-instrumentation-config", str(trace_config),
@@ -12453,9 +12802,6 @@ def execute_trace_reruns(
         for dmap in sorted(command_work_dir.glob("depth*.dmap")):
             hardlink_or_copy(str(dmap), str(depth_dir / dmap.name))
         integrity.write_capture_artifact_closure(run_dir, "trace")
-        pixels_by_image: dict[int, list[dict[str, int]]] = {}
-        for pixel in pixels:
-            pixels_by_image.setdefault(int(pixel["image_id"]), []).append(pixel)
         validations = []
         for image_id, image_pixels in sorted(pixels_by_image.items()):
             valid, reason = drilldown_run_complete(
@@ -12467,8 +12813,42 @@ def execute_trace_reruns(
                 )
             validations.append({"image_id": image_id, "validation": reason})
         result["validation"] = validations
-    write_json(root / "trace_reruns" / "executions.json", executions)
+    write_json(root / "trace_reruns" / "executions.json", {
+        "schema_name": TRACE_RERUN_EXECUTIONS_SCHEMA_NAME,
+        "schema_version": TRACE_RERUN_EXECUTIONS_SCHEMA_VERSION,
+        "trace_manifest": str(manifest_path.resolve()),
+        "trace_manifest_sha256": dmap_drilldown.file_digest(manifest_path),
+        "executions": executions,
+    })
     return executions
+
+
+def resolve_trace_report_dir(root: Path, requested: Path | None) -> Path:
+    """Resolve the numbered canonical report without silently choosing ambiguity."""
+
+    if requested is not None:
+        return ensure_external_output_path(requested, "trace report directory")
+    reports_root = root / "reports"
+    preferred = reports_root / "01_master_report"
+    if (preferred / "frames.csv").is_file():
+        return preferred
+    if (reports_root / "frames.csv").is_file():
+        return reports_root
+    candidates = (
+        sorted(
+            path for path in reports_root.iterdir()
+            if path.is_dir() and (path / "frames.csv").is_file()
+        )
+        if reports_root.is_dir() else []
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise RuntimeError(
+            "multiple report directories contain frames.csv; pass --report-dir explicitly: "
+            + ", ".join(str(path) for path in candidates)
+        )
+    return preferred
 
 
 def git_dirty() -> bool | None:
@@ -12640,11 +13020,16 @@ def drilldown_run_complete(
         if not target_frames:
             return False, f"no map capture was found for image {image_id} in {stage_label}"
         manifest_states: set[tuple[int, int]] = set()
+        apd_trace_required = False
         for frame_dir in target_frames:
             manifest = read_json(frame_dir / "map_manifest.json")
-            exact_capture = manifest.get("exact_capture") or {}
-            if exact_capture.get("requested") is not True or exact_capture.get("available") is not True:
-                return False, f"exact Process<true> maps are unavailable in {stage_label}"
+            generic_exact, apd_exact = declared_process_true_map_contracts(manifest)
+            if not generic_exact and not apd_exact:
+                return False, (
+                    "generic and APD-specific exact Process<true> maps are "
+                    f"unavailable in {stage_label}"
+                )
+            apd_trace_required = apd_trace_required or apd_exact
             num_iterations = as_integer(manifest.get("num_iterations"))
             num_logical_states = as_integer(manifest.get("num_logical_states"))
             if num_iterations < 0 or num_logical_states != num_iterations + 1:
@@ -12755,6 +13140,50 @@ def drilldown_run_complete(
                 f"trace output in {stage_label} is missing {len(missing)} "
                 "requested pixel/state rows"
             )
+        if apd_trace_required:
+            apd_traces_path = stage_root / "instrumentation" / "apd_traces.jsonl"
+            if not apd_traces_path.is_file():
+                return False, f"APD targeted trace output is missing in {stage_label}"
+            expected_apd_states = {
+                state for state in expected_states if state[2] >= 0
+            }
+            observed_apd_states: set[tuple[int, int, int]] = set()
+            for row in read_jsonl(apd_traces_path):
+                if as_integer(row.get("image_id")) != image_id:
+                    continue
+                if (
+                    row.get("schema_name") != "openmvs.dmap.apd_trace"
+                    or row.get("schema_version")
+                    not in instrumentation_validator.APD_SUPPORTED_SCHEMA_VERSIONS
+                ):
+                    return False, f"APD trace schema is malformed in {stage_label}"
+                trace_index = as_integer(row.get("trace_index"))
+                level = as_integer(row.get("pyramid_level", row.get("scale_number")))
+                iteration = as_integer(row.get("logical_iteration"))
+                coordinate = (as_integer(row.get("x")), as_integer(row.get("y")))
+                state = (trace_index, level, iteration)
+                if expected_coordinates.get((level, trace_index)) != coordinate:
+                    return False, (
+                        f"APD trace output in {stage_label} does not bind its compact "
+                        "slot to the requested pixel layout"
+                    )
+                if state not in expected_apd_states:
+                    return False, (
+                        f"APD trace output in {stage_label} contains an undeclared "
+                        "state row"
+                    )
+                if state in observed_apd_states:
+                    return False, (
+                        f"APD trace output in {stage_label} contains a duplicate "
+                        "state row"
+                    )
+                observed_apd_states.add(state)
+            missing_apd = expected_apd_states - observed_apd_states
+            if missing_apd:
+                return False, (
+                    f"APD trace output in {stage_label} is missing {len(missing_apd)} "
+                    "requested pixel/iteration rows"
+                )
         all_expected_states.update(
             (estimation_stage, stage_index, trace_index, level, iteration)
             for trace_index, level, iteration in expected_states
@@ -13002,19 +13431,8 @@ def execute_drilldown_request(
         local_mvs = prepare_locked_profile_workspace(
             config, root, scene, work_dir
         )
-        dmap_drilldown.validate_no_implicit_program_options_file(
-            dmap_working_folder(local_mvs)
-        )
-        program_options_config = run_dir / "generated" / "Densify.drilldown.cfg"
-        if program_options_config.is_symlink():
-            raise RuntimeError(
-                f"controlled drill-down program-options path is a symlink: "
-                f"{program_options_config}"
-            )
-        write_immutable_text(
-            program_options_config,
-            "",
-            "controlled empty drill-down program-options file",
+        program_options_config = prepare_controlled_program_options_config(
+            run_dir, dmap_working_folder(local_mvs)
         )
         trace_config = None
         if profile == "trace":
@@ -13990,6 +14408,7 @@ def build_report(
             accepted_gain_census=report_model.get("mechanics", {}).get(
                 "accepted_gain_census"
             ),
+            mechanics=report_model.get("mechanics"),
         ),
         encoding="utf-8",
     )
@@ -14113,7 +14532,7 @@ def main() -> int:
             return 0 if result["valid"] else 1
         if isinstance(command, TraceRerunCommand):
             config, root = prepare_experiment(command.config, True)
-            report_dir = root / "reports"
+            report_dir = resolve_trace_report_dir(root, command.report_dir)
             frames_path = report_dir / "frames.csv"
             if not frames_path.is_file():
                 build_report(config, root, report_dir, True)

@@ -102,6 +102,57 @@ class ComponentRegistryTest(unittest.TestCase):
                 self.assertEqual(descriptor.minimum_profile, "deep")
                 self.assertTrue(descriptor.description)
 
+    def test_apd_signals_have_explicit_score_domain_semantics(self) -> None:
+        expected = {
+            "apd_reliability_class": ("texture", "apd_reliability_profile", "enum"),
+            "apd_anchor_count": ("patch", "apd_anchor_model", "map"),
+            "apd_deformable_eligible": ("patch", "apd_anchor_model", "enum"),
+            "apd_working_winner_cost": ("cost", "apd_working_objective", "map"),
+            "apd_native_persistent_cost": ("cost", "apd_working_objective", "map"),
+            "apd_update_source": ("candidate_update", "apd_candidate_update", "enum"),
+            "apd_view_selection_mode": ("view_selection", "apd_anchor_view_selection", "enum"),
+            "apd_anchor_evidence_count": ("view_selection", "apd_anchor_view_selection", "map"),
+            "apd_working_selected_views_mask": ("view_selection", "apd_anchor_view_selection", "enum"),
+            "apd_selected_view_weight_sum": ("view_selection", "apd_anchor_view_selection", "map"),
+            "apd_best_anchor_working_cost": ("propagation", "apd_anchor_propagation", "map"),
+            "apd_anchor_accepted_slot": ("propagation", "apd_anchor_propagation", "enum"),
+            "apd_immutable_anchor_state": ("propagation", "apd_anchor_propagation", "enum"),
+            "apd_update_stage": ("candidate_update", "apd_reliable_first_schedule", "enum"),
+            "apd_fitted_plane_valid": ("geometry", "apd_fitted_plane", "enum"),
+            "apd_fitted_plane_working_cost": ("cost", "apd_fitted_plane", "map"),
+            "apd_fitted_plane_accepted": ("candidate_update", "apd_fitted_plane", "enum"),
+            "apd_final_refinement_best_cost": ("cost", "apd_final_refinement", "map"),
+            "apd_final_refinement_improvement": ("cost", "apd_final_refinement", "map"),
+            "apd_final_refinement_accepted": ("candidate_update", "apd_final_refinement", "enum"),
+        }
+
+        for signal, values in expected.items():
+            with self.subTest(signal=signal):
+                descriptor = component_registry.descriptor_from_row({"signal": signal})
+                self.assertEqual(
+                    (descriptor.mechanism, descriptor.component_id, descriptor.measurement_kind),
+                    values,
+                )
+                self.assertEqual(descriptor.minimum_profile, "deep")
+
+    def test_apd_multiscale_signals_have_explicit_state_semantics(self) -> None:
+        expected = {
+            "apd_transferred_reliability": "enum",
+            "apd_transferred_anchor_count": "map",
+            "apd_transferred_deformable_eligible": "enum",
+            "apd_output_reliability": "enum",
+            "apd_output_anchor_count": "map",
+            "apd_output_deformable_eligible": "enum",
+        }
+
+        for signal, measurement_kind in expected.items():
+            with self.subTest(signal=signal):
+                descriptor = component_registry.descriptor_from_row({"signal": signal})
+                self.assertEqual(descriptor.mechanism, "multiscale")
+                self.assertEqual(descriptor.component_id, "apd_multiscale_state")
+                self.assertEqual(descriptor.measurement_kind, measurement_kind)
+                self.assertEqual(descriptor.minimum_profile, "deep")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -121,6 +121,7 @@ DEFVAR_OPTDENSE_bool(bEstimateConfidenceCUDA, "Estimate Confidence CUDA", "when 
 DEFVAR_OPTDENSE_uint32(nEstimationIters, "Estimation Iters", "Number of patch-match iterations", "3")
 DEFVAR_OPTDENSE_uint32(nEstimationGeometricIters, "Estimation Geometric Iters", "Number of geometric consistent patch-match iterations (0 - disabled)", "2")
 DEFVAR_OPTDENSE_uint32(nPatchMatchCUDAInstances, "PatchMatch CUDA Instances", "Number of parallel CUDA PatchMatch worker instances (clamped to nMaxThreads)", "4")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDAAPD, "PatchMatch CUDA APD", "Adaptive Patch Deformation mode (0 - disabled, 1 - paper deformable cost)", "0")
 #ifdef _USE_DMAP_INSTRUMENTATION
 DEFVAR_OPTDENSE_uint32(nPatchMatchInstrumentLevel, "PatchMatch Instrument Level", "CUDA PatchMatch instrumentation level (0 - off, 1 - counters, 2 - sampled traces)", "0")
 DEFVAR_OPTDENSE_string(strPatchMatchInstrumentConfig, "PatchMatch Instrument Config", "JSON configuration file for CUDA PatchMatch instrumentation", "")
@@ -166,6 +167,9 @@ DepthData::DepthData(const DepthData& srcDepthData) :
 	depthMap(srcDepthData.depthMap),
 	normalMap(srcDepthData.normalMap),
 	confMap(srcDepthData.confMap),
+	#ifdef _USE_CUDA
+	apdMultiscaleState(srcDepthData.apdMultiscaleState),
+	#endif
 	dMin(srcDepthData.dMin),
 	dMax(srcDepthData.dMax),
 	size(srcDepthData.size),
@@ -335,9 +339,13 @@ unsigned DepthData::DecRef()
 // Compute the memory size occupied by the depth-data images (in bytes)
 size_t MVS::DepthData::GetMemorySize() const
 {
+	size_t nBytes = 0;
+	#ifdef _USE_CUDA
+	nBytes += apdMultiscaleState.GetMemorySize();
+	#endif
 	if (IsEmpty())
-		return 0;
-	size_t nBytes = depthMap.memory_size();
+		return nBytes;
+	nBytes += depthMap.memory_size();
 	if (!normalMap.empty())
 		nBytes += normalMap.memory_size();
 	if (!confMap.empty())

@@ -588,7 +588,710 @@ def add_optional_stage_manifests(
     )
 
 
+def make_apd_validation_fixture() -> tuple[dict, dict, list[dict], dict]:
+    pixels = WIDTH * HEIGHT
+    arrays: dict[str, np.ndarray] = {}
+    float_values = {
+        "apd_average_baseline": 1.0,
+        "apd_current_disparity": 2.0,
+        "apd_global_minimum_offset": 0.0,
+        "apd_global_minimum_cost": 0.1,
+        "apd_profile_separation": 0.3,
+        "apd_nearest_reliable_distance": 1.0,
+        "apd_ransac_threshold": 0.01,
+        "apd_ransac_center_residual": 0.0,
+        "apd_ransac_mean_inlier_residual": 0.001,
+        "apd_fitted_plane_depth": 1.1,
+        "apd_working_winner_cost": 0.5,
+        "apd_native_persistent_cost": 0.6,
+        "apd_runner_up_working_cost": 0.7,
+        "apd_winner_runner_up_gap": 0.2,
+        "apd_center_cost": 0.4,
+        "apd_anchor_mean_cost": 0.5333333333333333,
+        "apd_deformable_photometric_cost": 0.5,
+        "apd_geometric_cost": 0.0,
+        "apd_native_minus_working_cost": 0.1,
+        "apd_native_stored_cost_before": 0.7,
+        "apd_incumbent_working_cost": 0.6,
+        "apd_best_anchor_working_cost": 0.55,
+        "apd_accepted_anchor_native_cost": -1.0,
+        "apd_accepted_anchor_index": -1.0,
+        "apd_fitted_plane_working_cost": 0.65,
+        "apd_fitted_plane_native_cost": 0.7,
+        "apd_final_refinement_incumbent_cost": 0.6,
+        "apd_final_refinement_best_cost": 0.55,
+        "apd_final_refinement_improvement": 0.05,
+        "apd_final_refinement_depth": 1.01,
+        "apd_candidate_tested_mask": float(519681 | (1 << 21)),
+        "apd_candidate_finite_mask": float(519681 | (1 << 21)),
+        "apd_candidate_accepted_mask": 0.0,
+    }
+    byte_values = {
+        "apd_reliability_class": 1,
+        "apd_profile_reason": 6,
+        "apd_profile_eta": 6,
+        "apd_profile_finite_count": 61,
+        "apd_profile_local_minimum_count": 2,
+        "apd_profile_plateau_start": 30,
+        "apd_profile_plateau_end": 30,
+        "apd_sector_candidate_count": 6,
+        "apd_ransac_inlier_count": 6,
+        "apd_ransac_outlier_count": 0,
+        "apd_anchor_count": 6,
+        "apd_anchor_reason": 6,
+        "apd_ransac_valid": 1,
+        "apd_deformable_eligible": 1,
+        "apd_fitted_plane_valid": 1,
+        "apd_update_source": 0,
+        "apd_winner_slot": 0,
+        "apd_runner_up_slot": 9,
+        "apd_candidate_tested_count": 11,
+        "apd_candidate_finite_count": 11,
+        "apd_candidate_accepted_count": 0,
+        "apd_selected_view_count": 1,
+        "apd_deformable_active": 1,
+        "apd_view_selection_mode": 1,
+        "apd_anchor_evidence_count": 6,
+        "apd_anchor_proposal_count": 6,
+        "apd_anchor_finite_count": 6,
+        "apd_anchor_accepted_slot": 255,
+        "apd_immutable_anchor_state": 1,
+        "apd_selected_view_weight_sum": 32,
+        "apd_update_stage": 2,
+        "apd_fitted_plane_available": 1,
+        "apd_fitted_plane_tested": 1,
+        "apd_fitted_plane_accepted": 0,
+        "apd_final_refinement_offset": 4,
+        "apd_final_refinement_tested_count": 11,
+        "apd_final_refinement_finite_count": 11,
+        "apd_final_refinement_accepted": 0,
+    }
+    arrays.update({signal: scalar(value) for signal, value in float_values.items()})
+    arrays.update({
+        signal: np.full((HEIGHT, WIDTH), value, dtype=np.uint8)
+        for signal, value in byte_values.items()
+    })
+    working_view_mask = np.zeros((HEIGHT, WIDTH, 4), dtype=np.uint8)
+    working_view_mask[:, :, 0] = 1
+    arrays["apd_working_selected_views_mask"] = working_view_mask
+    entries: list[dict] = []
+    logical_maps: dict = {}
+    for signal, values in arrays.items():
+        state_signal = signal in (
+            validator.APD_STATE_FLOAT_SIGNALS | validator.APD_STATE_BYTE_SIGNALS
+        )
+        float_signal = signal in (
+            validator.APD_STATE_FLOAT_SIGNALS | validator.APD_UPDATE_FLOAT_SIGNALS
+        )
+        rgba_signal = signal in validator.APD_UPDATE_RGBA_SIGNALS
+        extension = ".pfm" if float_signal else ".png"
+        entry = {
+            "signal": signal,
+            "logical_iteration": 0,
+            "stage": "iteration",
+            "stage_index": 1,
+            "role": "apd_logical_iteration_state"
+            if state_signal else "apd_logical_iteration_update",
+            "measurement_quality": "exact",
+            "measurement_basis": "apd_same_stream_mechanics_record"
+            if state_signal else "apd_process_pixel_candidate_record",
+            "dtype": (
+                "float32" if float_signal else "uint8x4" if rgba_signal else "uint8"
+            ),
+            "path": f"apd_states/iteration01/{signal.removeprefix('apd_')}{extension}",
+            "semantics": "focused APD validator fixture",
+            "apd_schema_name": validator.APD_SCHEMA_NAME,
+            "apd_schema_version": validator.APD_SCHEMA_VERSION,
+        }
+        entries.append(entry)
+        logical_maps[(signal, 0)] = (entry, Path(entry["path"]), values)
+
+    profile_counts = {name: 0 for name in validator.APD_PROFILE_REASON_NAMES}
+    profile_counts["unreliable_multi_minimum_separation_not_above_t3"] = pixels
+    anchor_reasons = {name: 0 for name in validator.APD_ANCHOR_REASON_NAMES}
+    anchor_reasons["ready"] = pixels
+    source_counts = {name: 0 for name in validator.APD_UPDATE_SOURCE_NAMES}
+    source_counts["none"] = pixels
+    anchor_histogram = {str(index): 0 for index in range(9)}
+    anchor_histogram["6"] = pixels
+    manifest = {
+        "num_iterations": 1,
+        "apd_capture": {
+            "schema_name": validator.APD_SCHEMA_NAME,
+            "schema_version": validator.APD_SCHEMA_VERSION,
+            "requested": True,
+            "maps_available": True,
+            "summary_available": True,
+            "num_iterations": 1,
+            "state_record_bytes": 64,
+            "update_record_bytes": 120,
+            "working_score_persisted": False,
+            "persistent_winner_conventionally_rescored": True,
+            "anchor_state": (
+                "immutable_for_non_reliable_stage_after_reliable_first_updates"
+            ),
+            "anchor_candidate_slots": [13, 20],
+            "fitted_plane_candidate_slot": 21,
+            "final_refinement_candidate_accounting": (
+                "separate_native_domain_fields_not_working_candidate_masks"
+            ),
+        },
+    }
+    summary = {
+        "apd_observability": {
+            "schema_name": validator.APD_SUMMARY_SCHEMA_NAME,
+            "schema_version": validator.APD_SUMMARY_SCHEMA_VERSION,
+            "requested": True,
+            "enabled": True,
+            "maps_available": True,
+            "summary_available": True,
+            "exact_author_code_equivalence_claimed": False,
+            "implementation_label": "paper_partial",
+            "implemented_through": "APD14-C3",
+            "target_label": "paper_mechanics_complete_openmvs",
+            "required_mechanics_not_yet_implemented": [
+                "explicit multiscale APD state transfer and stage clocks"
+            ],
+            "state_record_bytes": 64,
+            "update_record_bytes": 120,
+            "trace_record_bytes": 1548,
+            "profile": {
+                "separation_convention": (
+                    "sqrt(sum_squared_minimum_cost_differences)/(number_of_minima-1)"
+                ),
+            },
+            "pins": {
+                "paper": "CVPR 2023 APD",
+                "official_repository_commit": "38660f3",
+                "colleague_donor_commit": "c6f0f2c",
+            },
+            "schedule": {
+                "ordered_stages": [
+                    "reliable_black",
+                    "reliable_red",
+                    "anchor_and_fitted_plane_generation",
+                    "non_reliable_black",
+                    "non_reliable_red",
+                ],
+            },
+            "fitted_plane": {
+                "candidate_position": (
+                    "before random depth and normal refinement in each "
+                    "non-reliable pixel update"
+                ),
+            },
+            "final_refinement": {
+                "disparity_radius": 5,
+                "minimum_strict_improvement": 0.1,
+            },
+            "iterations": [{
+                "logical_iteration": 0,
+                "classified_pixels": pixels,
+                "reliability": {
+                    "unknown": 0,
+                    "unreliable": pixels,
+                    "reliable": 0,
+                },
+                "profile_reason_counts": profile_counts,
+                "global_minimum_cost": {"mean": 0.1, "samples": pixels},
+                "profile_separation": {"mean": 0.3, "samples": pixels},
+                "anchor_model": {
+                    "anchor_count_histogram": anchor_histogram,
+                    "anchor_count_mean": 6.0,
+                    "reason_counts": anchor_reasons,
+                    "ransac_valid_pixels": pixels,
+                    "deformable_eligible_pixels": pixels,
+                },
+                "updates": {
+                    "deformable_updates": pixels,
+                    "source_counts": source_counts,
+                    "working_gap_samples": pixels,
+                    "working_gap_mean": 0.2,
+                    "center_cost_mean": 0.4,
+                    "anchor_mean_cost_mean": 0.5333333333333333,
+                    "working_cost_mean": 0.5,
+                    "native_persistent_cost_mean": 0.6,
+                    "immutable_anchor_state_updates": pixels,
+                    "stage_counts": {
+                        "all_compatibility": 0,
+                        "reliable_first": 0,
+                        "non_reliable_second": pixels,
+                    },
+                },
+                "anchor_view_selection": {
+                    "attempted_pixels": pixels,
+                    "anchor_evidence_pixels": pixels,
+                    "mode_counts": {
+                        "native": 0,
+                        "anchor_evidence": pixels,
+                        "previous_weights_fallback": 0,
+                        "selected_mask_fallback": 0,
+                        "first_view_fallback": 0,
+                    },
+                },
+                "anchor_propagation": {
+                    "tested_candidates": 6 * pixels,
+                    "finite_candidates": 6 * pixels,
+                    "accepted_events": 0,
+                    "final_winner_pixels": 0,
+                    "best_working_cost_samples": pixels,
+                    "best_working_cost_mean": 0.55,
+                    "accepted_native_cost_samples": 0,
+                    "accepted_native_cost_mean": None,
+                },
+                "fitted_plane": {
+                    "available_pixels": pixels,
+                    "tested_pixels": pixels,
+                    "finite_pixels": pixels,
+                    "accepted_events": 0,
+                    "final_winner_pixels": 0,
+                },
+                "final_native_refinement": {
+                    "eligible_pixels": pixels,
+                    "tested_candidates": 11 * pixels,
+                    "finite_candidates": 11 * pixels,
+                    "accepted_pixels": 0,
+                },
+            }],
+        },
+    }
+    return manifest, summary, entries, logical_maps
+
+
 class DMapInstrumentationSchemaV4Tests(unittest.TestCase):
+
+    def test_apd_multiscale_maps_validate_metadata_domains_and_statistics(self) -> None:
+        pixels = WIDTH * HEIGHT
+        reliability = np.full((HEIGHT, WIDTH), 2, dtype=np.uint8)
+        anchors = np.full((HEIGHT, WIDTH), 1, dtype=np.uint8)
+        eligible = np.full((HEIGHT, WIDTH), 1, dtype=np.uint8)
+        stage = {
+            "schema_name": "openmvs.dmap.apd_multiscale_stage",
+            "schema_version": 1,
+            "state_schema_version": 1,
+            "clock": {
+                "level_index": 0,
+                "level_count": 2,
+                "stage_index": 0,
+                "status": "valid",
+            },
+            "transfer": {
+                "status": "unavailable_no_source",
+                "available": False,
+            },
+            "schedule": {"policy": "conventional_native"},
+            "input_state": {"available": False},
+            "output_state": {
+                "available": True,
+                "reliability": {
+                    "num_pixels": pixels,
+                    "unknown": 0,
+                    "unreliable": 0,
+                    "reliable": pixels,
+                    "reliable_ratio": 1.0,
+                },
+                "anchor_count_provenance": {
+                    "num_pixels": pixels,
+                    "nonzero": pixels,
+                    "nonzero_ratio": 1.0,
+                    "maximum": 1,
+                },
+                "deformable_eligible_provenance": {
+                    "num_pixels": pixels,
+                    "nonzero": pixels,
+                    "nonzero_ratio": 1.0,
+                    "maximum": 1,
+                },
+            },
+        }
+        entries = []
+        maps = {}
+        for signal, role, values in (
+            ("apd_output_reliability", "multiscale_output", reliability),
+            ("apd_output_anchor_count", "multiscale_output_provenance", anchors),
+            (
+                "apd_output_deformable_eligible",
+                "multiscale_output_provenance",
+                eligible,
+            ),
+        ):
+            entries.append({
+                "signal": signal,
+                "dtype": "uint8",
+                "role": role,
+                "measurement_quality": "derived_exact",
+                "measurement_basis": (
+                    "native_selected_view_mask_uniform_compatibility_classifier"
+                ),
+                "lossless": True,
+                "state_schema_version": 1,
+            })
+            maps[(signal, None)] = values
+        checks: list[dict] = []
+
+        result = validator.validate_apd_multiscale_maps(
+            manifest={"apd_capture": {"requested": True}, "apd_multiscale": stage},
+            summary={"apd_multiscale": stage},
+            entries=entries,
+            maps=maps,
+            width=WIDTH,
+            height=HEIGHT,
+            check=lambda name, passed, detail: checks.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+        )
+
+        self.assertTrue(result["available"])
+        self.assertTrue(all(check["passed"] for check in checks), checks)
+        maps[("apd_output_deformable_eligible", None)] = np.full(
+            (HEIGHT, WIDTH), 2, dtype=np.uint8
+        )
+        corrupted: list[dict] = []
+        validator.validate_apd_multiscale_maps(
+            manifest={"apd_capture": {"requested": True}, "apd_multiscale": stage},
+            summary={"apd_multiscale": stage},
+            entries=entries,
+            maps=maps,
+            width=WIDTH,
+            height=HEIGHT,
+            check=lambda name, passed, detail: corrupted.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+        )
+        domain = next(
+            check for check in corrupted
+            if check["name"] == "apd_multiscale_map_domains"
+        )
+        self.assertFalse(domain["passed"])
+
+    def test_apd_maps_validate_exact_contract_domains_and_closure(self) -> None:
+        manifest, summary, entries, logical_maps = make_apd_validation_fixture()
+        checks: list[dict] = []
+
+        result = validator.validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=entries,
+            logical_maps=logical_maps,
+            width=WIDTH,
+            height=HEIGHT,
+            tolerance=0.0,
+            expect_geometric_zero=True,
+            check=lambda name, passed, detail: checks.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+        )
+
+        self.assertTrue(result["available"])
+        self.assertTrue(all(check["passed"] for check in checks), checks)
+        logical_maps[("apd_winner_runner_up_gap", 0)] = (
+            {}, Path("corrupted_gap.pfm"), scalar(0.3)
+        )
+        corrupted: list[dict] = []
+        validator.validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=entries,
+            logical_maps=logical_maps,
+            width=WIDTH,
+            height=HEIGHT,
+            tolerance=0.0,
+            expect_geometric_zero=True,
+            check=lambda name, passed, detail: corrupted.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+        )
+        closure = next(
+            check for check in corrupted if check["name"] == "apd_cost_closure"
+        )
+        self.assertFalse(closure["passed"])
+
+    def test_apd_schema_v3_accepts_c4_complete_multiscale_contract(self) -> None:
+        manifest, summary, entries, logical_maps = make_apd_validation_fixture()
+        manifest["apd_capture"]["stage_active"] = True
+        observability = summary["apd_observability"]
+        observability.update({
+            "stage_active": True,
+            "implementation_label": "paper_mechanics_complete_openmvs",
+            "implemented_through": "APD14-C4",
+            "required_mechanics_not_yet_implemented": [],
+            "multiscale": {
+                "state_schema_version": 1,
+                "coarsest_schedule": "conventional_native",
+                "iteration_zero_consumes": "transferred_reliability",
+                "checkerboard_exposure": "timings_only",
+            },
+            "compatibility_behavior": {
+                "coarsest_reliability_view_weights": (
+                    "uniform expansion of the native selected-view mask"
+                ),
+            },
+        })
+        checks: list[dict] = []
+
+        result = validator.validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=entries,
+            logical_maps=logical_maps,
+            width=WIDTH,
+            height=HEIGHT,
+            tolerance=0.0,
+            expect_geometric_zero=True,
+            check=lambda name, passed, detail: checks.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+        )
+
+        self.assertTrue(result["available"])
+        self.assertTrue(all(check["passed"] for check in checks), checks)
+
+    def test_apd_c4_iteration_zero_dispatch_uses_transferred_reliability(self) -> None:
+        manifest, summary, entries, logical_maps = make_apd_validation_fixture()
+        stage = {
+            "schema_name": "openmvs.dmap.apd_multiscale_stage",
+            "schema_version": 1,
+            "state_schema_version": 1,
+            "transfer": {"available": True, "status": "valid"},
+            "schedule": {
+                "policy": "adaptive_patch_deformation",
+                "consumes_transferred_reliability_at_iteration_zero": True,
+            },
+        }
+        manifest["apd_multiscale"] = stage
+        summary["apd_multiscale"] = stage
+        update = logical_maps[("apd_update_stage", 0)]
+        logical_maps[("apd_update_stage", 0)] = (
+            update[0], update[1], np.ones((HEIGHT, WIDTH), dtype=np.uint8)
+        )
+        summary["apd_observability"]["iterations"][0]["updates"][
+            "stage_counts"
+        ] = {
+            "all_compatibility": 0,
+            "reliable_first": WIDTH * HEIGHT,
+            "non_reliable_second": 0,
+        }
+        transferred = np.full((HEIGHT, WIDTH), 2, dtype=np.uint8)
+        checks: list[dict] = []
+
+        validator.validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=entries,
+            logical_maps=logical_maps,
+            width=WIDTH,
+            height=HEIGHT,
+            tolerance=0.0,
+            expect_geometric_zero=True,
+            check=lambda name, passed, detail: checks.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+            multiscale_maps={
+                ("apd_transferred_reliability", None): transferred,
+            },
+        )
+
+        relationships = next(
+            check for check in checks if check["name"] == "apd_map_relationships"
+        )
+        self.assertTrue(relationships["passed"], relationships)
+        self.assertEqual(
+            relationships["detail"]["dispatch"]["0"]["basis"],
+            "apd_transferred_reliability",
+        )
+
+        corrupted: list[dict] = []
+        validator.validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=entries,
+            logical_maps=logical_maps,
+            width=WIDTH,
+            height=HEIGHT,
+            tolerance=0.0,
+            expect_geometric_zero=True,
+            check=lambda name, passed, detail: corrupted.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+            multiscale_maps={
+                ("apd_transferred_reliability", None): np.full(
+                    (HEIGHT, WIDTH), 1, dtype=np.uint8
+                ),
+            },
+        )
+        corrupted_relationships = next(
+            check for check in corrupted if check["name"] == "apd_map_relationships"
+        )
+        self.assertFalse(corrupted_relationships["passed"])
+        self.assertTrue(any(
+            "apd_transferred_reliability/update-stage mismatch" in error
+            for error in corrupted_relationships["detail"]["errors"]
+        ))
+
+    def test_apd_rejects_working_view_and_anchor_count_drift(self) -> None:
+        manifest, summary, entries, logical_maps = make_apd_validation_fixture()
+        selected = logical_maps[("apd_selected_view_count", 0)]
+        logical_maps[("apd_selected_view_count", 0)] = (
+            selected[0], selected[1], np.full((HEIGHT, WIDTH), 2, dtype=np.uint8)
+        )
+        proposals = logical_maps[("apd_anchor_proposal_count", 0)]
+        logical_maps[("apd_anchor_proposal_count", 0)] = (
+            proposals[0], proposals[1], np.full((HEIGHT, WIDTH), 5, dtype=np.uint8)
+        )
+        checks: list[dict] = []
+
+        validator.validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=entries,
+            logical_maps=logical_maps,
+            width=WIDTH,
+            height=HEIGHT,
+            tolerance=0.0,
+            expect_geometric_zero=True,
+            check=lambda name, passed, detail: checks.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+        )
+
+        relationships = next(
+            check for check in checks if check["name"] == "apd_map_relationships"
+        )
+        self.assertFalse(relationships["passed"])
+        self.assertTrue(any(
+            "working-view mask/count mismatch" in error
+            for error in relationships["detail"]["errors"]
+        ))
+        self.assertTrue(any(
+            "anchor evidence/proposal mismatch" in error
+            for error in relationships["detail"]["errors"]
+        ))
+
+    def test_apd_schema_v3_rejects_stage_and_final_refinement_drift(self) -> None:
+        manifest, summary, entries, logical_maps = make_apd_validation_fixture()
+        stage = logical_maps[("apd_update_stage", 0)]
+        logical_maps[("apd_update_stage", 0)] = (
+            stage[0], stage[1], np.full((HEIGHT, WIDTH), 1, dtype=np.uint8)
+        )
+        accepted = logical_maps[("apd_final_refinement_accepted", 0)]
+        logical_maps[("apd_final_refinement_accepted", 0)] = (
+            accepted[0], accepted[1], np.ones((HEIGHT, WIDTH), dtype=np.uint8)
+        )
+        checks: list[dict] = []
+
+        validator.validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=entries,
+            logical_maps=logical_maps,
+            width=WIDTH,
+            height=HEIGHT,
+            tolerance=0.0,
+            expect_geometric_zero=True,
+            check=lambda name, passed, detail: checks.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+        )
+
+        relationships = next(
+            check for check in checks if check["name"] == "apd_map_relationships"
+        )
+        self.assertFalse(relationships["passed"])
+        errors = relationships["detail"]["errors"]
+        self.assertTrue(any("update-stage mismatch" in error for error in errors))
+        self.assertTrue(any("accepted final refinement" in error for error in errors))
+
+    def test_apd_maps_accept_explicit_disabled_contract_without_maps(self) -> None:
+        manifest, summary, _entries, _logical_maps = make_apd_validation_fixture()
+        manifest["apd_capture"].update({
+            "requested": False,
+            "maps_available": False,
+            "summary_available": False,
+        })
+        observability = summary["apd_observability"]
+        observability.update({
+            "requested": False,
+            "enabled": False,
+            "maps_available": False,
+            "summary_available": False,
+            "mode": 0,
+            "mode_name": "disabled",
+            "implementation_label": "disabled",
+            "implemented_through": "none",
+            "targeted_trace_available": False,
+            "iterations": [],
+            "required_mechanics_not_yet_implemented": [],
+        })
+        checks: list[dict] = []
+
+        result = validator.validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=[],
+            logical_maps={},
+            width=WIDTH,
+            height=HEIGHT,
+            tolerance=0.0,
+            expect_geometric_zero=True,
+            check=lambda name, passed, detail: checks.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+        )
+
+        self.assertFalse(result["requested"])
+        self.assertFalse(result["available"])
+        self.assertTrue(all(check["passed"] for check in checks), checks)
+
+    def test_apd_disabled_contract_retains_schema_v1_compatibility(self) -> None:
+        manifest, summary, _entries, _logical_maps = make_apd_validation_fixture()
+        capture = manifest["apd_capture"]
+        capture.update({
+            "schema_version": 1,
+            "requested": False,
+            "maps_available": False,
+            "summary_available": False,
+            "state_record_bytes": 56,
+            "update_record_bytes": 64,
+        })
+        capture.pop("anchor_state")
+        capture.pop("anchor_candidate_slots")
+        observability = summary["apd_observability"]
+        observability.update({
+            "schema_version": 1,
+            "requested": False,
+            "enabled": False,
+            "maps_available": False,
+            "summary_available": False,
+            "mode": 0,
+            "mode_name": "disabled",
+            "implementation_label": "disabled",
+            "implemented_through": "none",
+            "state_record_bytes": 56,
+            "update_record_bytes": 64,
+            "trace_record_bytes": 996,
+            "targeted_trace_available": False,
+            "iterations": [],
+            "required_mechanics_not_yet_implemented": [],
+        })
+        checks: list[dict] = []
+
+        result = validator.validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=[],
+            logical_maps={},
+            width=WIDTH,
+            height=HEIGHT,
+            tolerance=0.0,
+            expect_geometric_zero=True,
+            check=lambda name, passed, detail: checks.append({
+                "name": name, "passed": passed, "detail": detail,
+            }),
+        )
+
+        self.assertFalse(result["requested"])
+        self.assertTrue(all(check["passed"] for check in checks), checks)
+
     def test_deep_capture_enforces_claimed_reference_patch_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             frame_dir = v4_frame_dir(directory)

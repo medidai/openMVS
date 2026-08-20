@@ -2787,11 +2787,7 @@ bool DepthMapsData::EstimateDepthMap(IIndex idxImage, int nGeometricIter)
 			confRequest.params = MakeConfRefineParams();
 			pConfRequest = &confRequest;
 		}
-		#ifdef _USE_DMAP_INSTRUMENTATION
 		pmCUDAPool[s_slot]->EstimateDepthMap(depthData, nGeometricIter, pConfRequest);
-		#else
-		pmCUDAPool[s_slot]->EstimateDepthMap(depthData, pConfRequest);
-		#endif
 		if (pConfRequest) {
 			g_confAdjustComputeNS.fetch_add(confRequest.computeNS, std::memory_order_relaxed);
 			depthData.bConfAdjusted = confRequest.done;

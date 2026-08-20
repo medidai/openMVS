@@ -235,9 +235,10 @@
       },
       {
         key: "multiscale", title: "Inspect a multiscale change",
-        summary: "Find the pyramid level where two runs first diverge, then connect that change to the final endpoint.",
+        summary: "Compare transferred state, the first consuming iteration, and the published next-stage state before judging final depth effects.",
         steps: [
-          "Select the same pyramid level in both runs and compare initialization, complete logical iterations, and final state separately.",
+          "Select the same pyramid level in both runs. Start with APD transferred reliability and output reliability, then inspect anchor-count and deformable-eligibility provenance.",
+          "Confirm the stage clock, transfer status, eta, and RANSAC threshold in the frame mechanics metadata.",
           "Inspect the same pixels with Shared display scale and compare capture stages separately.",
           "Use any transfer or hierarchy signals declared by the component registry; their absence must remain explicit.",
           "Use same-iteration comparisons only when logical iterations have the same meaning in both runs.",
@@ -296,6 +297,9 @@
     multiscale: {
       alignment: "final", sourceView: "auto", target: "maps-heading",
       preferredSignals: [
+        "apd_transferred_reliability", "apd_output_reliability",
+        "apd_transferred_anchor_count", "apd_output_anchor_count",
+        "apd_transferred_deformable_eligible", "apd_output_deformable_eligible",
         "reference_rgb", "cost_total_production_exact", "gap_winner_runner_up_exact",
         "depth_delta", "normal_angle_delta", "view_churn", "depth_final_after_filter",
       ],
@@ -1036,6 +1040,9 @@
       `<span class="status-pill ${failures ? "error" : "good"}">${failures} failed aggregate gates</span>`,
       `<span class="status-pill ${pixel.omitted_artifacts ? "warning" : "good"}">Exact pixel payloads ${pixel.selected_artifacts}/${pixel.eligible_artifacts} / ${((pixel.encoded_pixel_output_bytes || 0) / 1048576).toFixed(1)} MiB</span>`,
       `<span class="status-pill ${mechanics.exact_hot_kernel ? "good" : "warning"}">Exact hot-kernel tables ${mechanics.exact_hot_kernel ? "available" : "unavailable"}</span>`,
+      `<span class="status-pill ${mechanics.apd_iteration_mechanics ? "good" : "warning"}">APD iteration mechanics ${mechanics.apd_iteration_mechanics ? "available" : "unavailable"}</span>`,
+      `<span class="status-pill ${mechanics.apd_multiscale_stages ? "good" : "warning"}">APD multiscale stages ${mechanics.apd_multiscale_stages ? "available" : "unavailable"}</span>`,
+      `<span class="status-pill ${mechanics.apd_targeted_traces ? "good" : "warning"}">APD targeted traces ${mechanics.apd_targeted_traces ? "available" : "unavailable"}</span>`,
       `<span class="status-pill ${mechanics.cpu_view_ranking ? "good" : "warning"}">CPU view ranking ${mechanics.cpu_view_ranking ? "available" : "unavailable"}</span>`,
       `<span class="status-pill ${filterStatus[0]}">Sequential filters ${filterStatus[1]}</span>`,
       `<span class="status-pill ${confidenceStatus[0]}">Confidence adjustment ${confidenceStatus[1]}</span>`,
@@ -1489,7 +1496,8 @@
     controls.iteration.disabled = state.alignment === "final";
     controls.mapPreset.innerHTML = [
       ["overview", "Overview"], ["cost", "Cost and candidate mechanics"],
-      ["view", "View selection"], ["filtering", "Sequential filtering"], ["custom", "Custom"],
+      ["apd", "APD mechanics"], ["view", "View selection"],
+      ["filtering", "Sequential filtering"], ["custom", "Custom"],
     ].map(([value, label]) => option(value, label, value === state.mapPreset)).join("");
     const mechanisms = [...new Set(model.signals.map((signal) => signal.mechanism).filter(Boolean))].sort();
     if (state.mechanism !== "all" && !mechanisms.includes(state.mechanism)) state.mechanism = "all";
@@ -1556,6 +1564,24 @@
     ));
     if (state.mapPreset === "overview") {
       state.signals = available.filter((signal) => signal.default).slice(0, 8).map((signal) => signal.name);
+      return;
+    }
+    if (state.mapPreset === "apd") {
+      const preferred = [
+        "reference_rgb", "apd_reliability_class", "apd_profile_reason",
+        "apd_global_minimum_offset", "apd_global_minimum_cost",
+        "apd_profile_separation", "apd_nearest_reliable_distance",
+        "apd_anchor_count", "apd_deformable_eligible", "apd_center_cost",
+        "apd_anchor_mean_cost", "apd_deformable_photometric_cost",
+        "apd_working_winner_cost", "apd_native_persistent_cost",
+        "apd_native_minus_working_cost", "apd_winner_runner_up_gap",
+        "apd_view_selection_mode", "apd_anchor_evidence_count",
+        "apd_working_selected_views_mask", "apd_selected_view_weight_sum",
+        "apd_best_anchor_working_cost", "apd_anchor_accepted_slot",
+        "apd_update_source",
+      ];
+      const names = new Set(available.map((signal) => signal.name));
+      state.signals = preferred.filter((name) => name === "reference_rgb" || names.has(name));
       return;
     }
     const mechanisms = state.mapPreset === "cost" ? new Set(["cost", "candidate_update"]) :
@@ -2490,17 +2516,86 @@
     return `<div class="table-wrap"><table><thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
   }
 
+  function apdProfileSvg(trace) {
+    const values = (trace.paper_profile?.costs || []).map(Number);
+    const finite = values.filter(Number.isFinite);
+    if (values.length < 2 || !finite.length) return `<span class="mechanics-unavailable">profile unavailable</span>`;
+    const width = 320, height = 94, left = 30, right = 8, top = 8, bottom = 20;
+    const low = Math.min(...finite, 0);
+    const highRaw = Math.max(...finite, 0.5);
+    const high = highRaw > low ? highRaw : low + 1;
+    const x = (index) => left + index * (width - left - right) / (values.length - 1);
+    const y = (value) => top + (high - value) * (height - top - bottom) / (high - low);
+    const points = values.map((value, index) => Number.isFinite(value) ? `${x(index).toFixed(2)},${y(value).toFixed(2)}` : "").filter(Boolean).join(" ");
+    const minimum = finite.length ? Math.min(...finite) : null;
+    const minimumIndex = minimum == null ? -1 : values.indexOf(minimum);
+    const thresholdLine = (value, label, color) => value >= low && value <= high
+      ? `<line x1="${left}" x2="${width - right}" y1="${y(value)}" y2="${y(value)}" stroke="${color}" stroke-dasharray="3 3"/><text x="2" y="${y(value) + 3}" fill="${color}" font-size="8">${label}</text>` : "";
+    return `<svg class="apd-profile-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="APD 61-sample disparity cost profile">
+      <rect x="${left}" y="${top}" width="${width - left - right}" height="${height - top - bottom}" fill="#f7fafc" stroke="#cad5df"/>
+      ${thresholdLine(0.15, "T2", "#2a9d8f")}${thresholdLine(0.5, "T1", "#c85a54")}
+      <line x1="${x(30)}" x2="${x(30)}" y1="${top}" y2="${height - bottom}" stroke="#6b7280" stroke-dasharray="2 3"/>
+      <polyline points="${points}" fill="none" stroke="#355c7d" stroke-width="1.7" stroke-linejoin="round"/>
+      ${minimumIndex >= 0 ? `<circle cx="${x(minimumIndex)}" cy="${y(minimum)}" r="3" fill="#d1495b"/>` : ""}
+      <text x="${left}" y="${height - 5}" font-size="8" fill="#5b6772">-30</text><text x="${x(30) - 3}" y="${height - 5}" font-size="8" fill="#5b6772">0</text><text x="${width - right - 13}" y="${height - 5}" font-size="8" fill="#5b6772">+30</text>
+    </svg>`;
+  }
+
+  function apdTraceCards(rows) {
+    if (!rows.length) return "";
+    const shown = rows.slice(0, 24);
+    const cards = shown.map((row) => {
+      const profile = row.paper_profile || {};
+      const anchor = row.anchor_model || {};
+      const update = row.update || {};
+      const finalRefinement = update.final_refinement || {};
+      const anchors = (anchor.anchors || []).filter(Boolean).map((item) => [
+        item.slot, `${item.x}, ${item.y}`, item.candidate_valid ?? "n/a",
+        item.snapshot_selected_views ?? "n/a", format(item.normalized_plane_residual, 6),
+        format(item.candidate_working_cost), format(item.candidate_native_rescore),
+      ]);
+      const views = (row.views || []).map((item) => [
+        item.view_index, item.reliability_weight, format(item.selection_prior),
+        format(item.sampling_score), format(item.sampling_probability),
+        format(item.center_cost), format(item.anchor_mean_cost), format(item.working_cost),
+      ]);
+      return `<details class="apd-trace-card"><summary>${escapeHtml(row.run)} / ${escapeHtml(row.label || "pixel")} / (${escapeHtml(row.x)}, ${escapeHtml(row.y)})</summary>
+        <div class="apd-trace-grid"><div>${apdProfileSvg(row)}<p class="mechanics-note">Reliability <strong>${escapeHtml(profile.reliability)}</strong>: ${escapeHtml(profile.reason || "unknown")}; minimum offset ${escapeHtml(profile.global_minimum_offset ?? "n/a")}, minimum cost ${escapeHtml(format(profile.global_minimum_cost))}, separation ${escapeHtml(format(profile.separation))}.</p></div>
+        <dl class="apd-trace-facts"><dt>Update stage</dt><dd>${escapeHtml(update.update_stage ?? "n/a")}</dd><dt>Anchor outcome</dt><dd>${escapeHtml(anchor.reason || "unknown")}</dd><dt>RANSAC</dt><dd>${escapeHtml(anchor.ransac_valid ?? "n/a")} / ${escapeHtml(anchor.inlier_count ?? "n/a")} inliers / ${escapeHtml(anchor.outlier_count ?? "n/a")} outliers</dd><dt>Fitted plane</dt><dd>${escapeHtml(anchor.fitted_plane_valid ?? "n/a")} at depth ${escapeHtml(format(anchor.fitted_plane_depth))}</dd><dt>Fitted proposal</dt><dd>${escapeHtml(update.fitted_plane_available ?? "n/a")} / tested ${escapeHtml(update.fitted_plane_tested ?? "n/a")} / accepted ${escapeHtml(update.fitted_plane_accepted ?? "n/a")}</dd><dt>Fitted working / native</dt><dd>${escapeHtml(format(update.fitted_plane_working_cost))} / ${escapeHtml(format(update.fitted_plane_native_cost))}</dd><dt>Immutable state</dt><dd>${escapeHtml(update.immutable_anchor_state ?? "n/a")}</dd><dt>View selection</dt><dd>${escapeHtml(update.view_selection_mode || "unavailable")} / ${escapeHtml(update.anchor_evidence_count ?? "n/a")} anchors</dd><dt>Working views</dt><dd>mask ${escapeHtml(update.working_selected_views ?? "n/a")} / ${escapeHtml(update.selected_view_count ?? "n/a")} views / weight ${escapeHtml(update.selected_view_weight_sum ?? "n/a")}</dd><dt>Accepted anchor</dt><dd>${escapeHtml(update.accepted_anchor_index ?? "none")} / slot ${escapeHtml(update.anchor_accepted_slot ?? "none")}</dd><dt>Anchor working / native</dt><dd>${escapeHtml(format(update.best_anchor_working_cost))} / ${escapeHtml(format(update.accepted_anchor_native_cost))}</dd><dt>Working winner</dt><dd>${escapeHtml(update.source || "none")} / slot ${escapeHtml(update.winner_slot ?? "n/a")}</dd><dt>Working / native</dt><dd>${escapeHtml(format(update.working_winner_cost))} / ${escapeHtml(format(update.native_persistent_cost))}</dd><dt>Winner gap</dt><dd>${escapeHtml(format(update.winner_runner_up_gap))}</dd><dt>Final native search</dt><dd>${escapeHtml(finalRefinement.accepted ?? "n/a")} / offset ${escapeHtml(finalRefinement.offset ?? "n/a")} / ${escapeHtml(finalRefinement.finite_count ?? "n/a")}/${escapeHtml(finalRefinement.tested_count ?? "n/a")} finite/tested</dd><dt>Final cost gain</dt><dd>${escapeHtml(format(finalRefinement.incumbent_cost))} → ${escapeHtml(format(finalRefinement.best_cost))} / gain ${escapeHtml(format(finalRefinement.improvement))}</dd></dl></div>
+        <div class="apd-trace-tables">${smallTable(["Anchor", "Pixel", "Valid", "Snapshot views", "Plane residual", "Working cost", "Native rescore"], anchors) || `<p class="mechanics-unavailable">No anchors retained.</p>`}${smallTable(["View", "Weight", "Prior", "Sampling score", "Probability", "Center cost", "Anchor mean", "Working cost"], views) || `<p class="mechanics-unavailable">Per-view APD components unavailable.</p>`}</div>
+      </details>`;
+    }).join("");
+    const omitted = rows.length - shown.length;
+    return `${cards}${omitted > 0 ? `<p class="mechanics-note">Showing 24 of ${rows.length} matching trace rows; use the recorded JSONL source for the complete bounded capture.</p>` : ""}`;
+  }
+
   function renderMechanics() {
     const mechanics = model.mechanics || {};
     const current = frame();
-    const runs = new Set([state.baseline, state.variant]);
-    const match = (row) => {
+    const selectedRuns = [
+      {label: state.baseline, repeat: state.baselineRepeat},
+      {label: state.variant, repeat: state.variantRepeat},
+    ].map((selection) => ({
+      ...selection,
+      configuredRun: model.runs.find((run) => (
+        run.label === selection.label && Number(run.repeat) === Number(selection.repeat)
+      ))?.configured_run || selection.label,
+    }));
+    const selectedRunFor = (row, allowConfiguredRun = false) => (
+      selectedRuns.find((selection) => (
+        row.run === selection.label
+        && Number(row.repeat ?? 0) === Number(selection.repeat)
+      )) || (allowConfiguredRun ? selectedRuns.find((selection) => (
+        (row.configured_run || row.run) === selection.configuredRun
+        && Number(row.repeat ?? 0) === Number(selection.repeat)
+      )) : null)
+    );
+    const match = (row, allowConfiguredRun = false) => {
       const key = row.estimation_stage === "geometric_consistency" ? `geometric_consistency:${row.geometric_iteration}` : "photometric";
-      const repeat = row.run === state.baseline ? state.baselineRepeat : state.variantRepeat;
-      return row.scene_id === state.scene && Number(row.image_id) === Number(current?.image_id) && runs.has(row.run) && Number(row.repeat ?? 0) === Number(repeat) && key === state.captureStage && mechanicsPyramidLevelMatches(row);
+      return row.scene_id === state.scene && Number(row.image_id) === Number(current?.image_id) && Boolean(selectedRunFor(row, allowConfiguredRun)) && key === state.captureStage && mechanicsPyramidLevelMatches(row);
     };
-    const aligned = (rows) => {
-      const matched = rows.filter(match);
+    const aligned = (rows, allowConfiguredRun = false) => {
+      const matched = rows.filter((row) => match(row, allowConfiguredRun));
       if (state.alignment === "same") return matched.filter((row) => Number(row.logical_iteration) === Number(state.iteration));
       const finalByRun = new Map();
       matched.forEach((row) => {
@@ -2543,6 +2638,75 @@
       formatPercent(row.fractions_below?.["0.00025"]),
       formatPercent(row.fractions_below?.["0.0005"]),
       formatPercent(row.fractions_below?.["0.001"]),
+    ]);
+    const apdIterationEvidence = aligned(mechanics.apd_iterations || []);
+    const apdMultiscaleEvidence = (mechanics.apd_multiscale_stages || [])
+      .filter(match)
+      .sort((left, right) => Number(left.level_index ?? -1) - Number(right.level_index ?? -1));
+    const apdMultiscaleRows = apdMultiscaleEvidence.map((row) => [
+      row.run,
+      pyramidLevelLabel(pyramidLevelOf(row)),
+      row.stage_index ?? "n/a",
+      row.stage_clock_status || "unavailable",
+      row.transfer_status || "unavailable",
+      row.schedule_policy || "unavailable",
+      row.reliability_eta ?? "n/a",
+      format(row.ransac_normalized_threshold, 5),
+      formatPercent(row.input_reliable_ratio),
+      formatPercent(row.output_reliable_ratio),
+      formatPercent(row.input_anchor_nonzero_ratio),
+      formatPercent(row.output_anchor_nonzero_ratio),
+      formatPercent(row.input_deformable_eligible_ratio),
+      formatPercent(row.output_deformable_eligible_ratio),
+      row.classifier_view_weight_quality || "unavailable",
+      row.valid ?? false,
+      (row.validation_errors || []).join(", ") || "-",
+    ]);
+    const prefixedCounts = (row, prefix) => Object.entries(row)
+      .filter(([key, value]) => key.startsWith(prefix) && Number(value) > 0)
+      .map(([key, value]) => `${key.slice(prefix.length)}=${value}`).join(", ") || "none";
+    const apdIterationRows = apdIterationEvidence.map((row) => {
+      const classified = Math.max(1, Number(row.classified || 0));
+      return [
+        row.run, pyramidLevelLabel(pyramidLevelOf(row)),
+        `iteration ${Number(row.logical_iteration) + 1}`,
+        row.classified, formatPercent(Number(row.reliability_reliable || 0) / classified),
+        formatPercent(Number(row.deformable_eligible || 0) / classified),
+        row.ransac_valid, format(row.anchor_count_mean, 3),
+        formatPercent(Number(row.deformable_updates || 0) / classified),
+        format(row.global_minimum_cost_mean), format(row.separation_mean),
+        format(row.center_cost_mean), format(row.anchor_mean_cost_mean),
+        format(row.working_cost_mean), format(row.native_persistent_cost_mean),
+        format(row.working_gap_mean),
+        formatPercent(Number(row.anchor_view_selection_used || 0) / Math.max(1, Number(row.anchor_view_selection_attempted || 0))),
+        prefixedCounts(row, "view_selection_mode_"),
+        `${row.anchor_proposals_accepted || 0}/${row.anchor_proposals_finite || 0}/${row.anchor_proposals_tested || 0}`,
+        row.anchor_propagation_final_winners || 0,
+        format(row.best_anchor_working_cost_mean),
+        format(row.accepted_anchor_native_cost_mean),
+        `${row.stage_reliable_first || 0}/${row.stage_non_reliable_second || 0}`,
+        `${row.fitted_plane_accepted || 0}/${row.fitted_plane_finite || 0}/${row.fitted_plane_tested || 0}/${row.fitted_plane_available || 0}`,
+        `${row.final_refinement_accepted || 0}/${row.final_refinement_candidates_finite || 0}/${row.final_refinement_candidates_tested || 0}/${row.final_refinement_pixels || 0}`,
+        prefixedCounts(row, "source_"),
+      ];
+    });
+    const apdTraceRows = aligned(mechanics.apd_traces || [], true).sort((left, right) =>
+      String(left.run).localeCompare(String(right.run)) || Number(left.trace_index) - Number(right.trace_index));
+    const contractMatch = (row) => {
+      const key = row.estimation_stage === "geometric_consistency" ? `geometric_consistency:${row.geometric_iteration}` : "photometric";
+      return row.scene_id === state.scene && Boolean(selectedRunFor(
+        row, row.capture_profile === "trace"
+      )) && key === state.captureStage;
+    };
+    const apdContractRows = (mechanics.apd_contracts || []).filter(contractMatch).map((row) => [
+      row.run, row.mode_name || row.mode, row.implementation_label || "unavailable",
+      row.implemented_through || "unavailable", row.target_label || "unavailable",
+      row.exact_author_code_equivalence_claimed ?? "n/a",
+      (row.required_mechanics_not_yet_implemented || []).join(", ") || "none",
+    ]);
+    const apdTraceSourceRows = (mechanics.apd_trace_sources || []).filter(contractMatch).map((row) => [
+      row.run, row.kind, row.available, row.rows_included ?? "n/a", row.truncated ?? false,
+      row.reason || "available", row.path || "unavailable",
     ]);
     const iterationRows = aligned(mechanics.exact_iterations || []);
     const updates = iterationRows.map((row) => {
@@ -2625,10 +2789,9 @@
       row.cost_map_unavailable_reason || "-",
       row.measurement_basis || "-",
     ]);
-    const maskRows = (current?.run_frames || []).filter((row) => {
-      const repeat = row.run === state.baseline ? state.baselineRepeat : state.variantRepeat;
-      return runs.has(row.run) && Number(row.repeat) === Number(repeat);
-    }).map((row) => {
+        const maskRows = (current?.run_frames || []).filter((row) => (
+          Boolean(selectedRunFor(row))
+        )).map((row) => {
       const mask = row.ignore_mask || {};
       const rejected = mask.status === "not_requested" ? "n/a" :
         (mask.rejection_count_available ? (mask.rejected_pixels ?? 0) : "unavailable");
@@ -2636,6 +2799,9 @@
     });
     const unavailable = (label, available) => available ? "" : `<p class="mechanics-unavailable">${escapeHtml(label)} unavailable for this capture. The model retains this absence explicitly.</p>`;
     const extensionBlocks = [];
+    if (apdContractRows.length || apdMultiscaleRows.length || apdIterationRows.length || apdTraceSourceRows.length) {
+      extensionBlocks.push(`<div class="mechanics-block apd-mechanics-block"><h3>Adaptive Patch Deformation mechanics <small>(iteration schema v3 / multiscale schema v1)</small></h3><p class="mechanics-note">Exact complete-iteration evidence. Reliable pixels update first; the fitted plane and immutable anchor/view snapshot are then generated for the non-reliable stage. APD working costs rank deformation candidates, while persistent and final-refinement costs use the conventional native domain. Process&lt;true&gt; mechanics do not establish quality.</p>${smallTable(["Run", "Mode", "Implementation label", "Checkpoint", "Target label", "Exact author-code equivalence", "Required mechanics unavailable"], apdContractRows)}<h4>Stage clocks and transferred state</h4><p class="mechanics-note">The coarsest stage remains native. Its output reliability seed is compatibility-derived from the exact final selected-view mask because historical native Monte Carlo weights are unavailable. Later stages consume the transferred reliability map exactly at iteration zero.</p>${smallTable(["Run", "Pyramid", "Stage", "Clock", "Transfer", "Schedule", "Eta", "RANSAC threshold", "Reliable in", "Reliable out", "Anchors in", "Anchors out", "Eligible in", "Eligible out", "Classifier weights", "Valid", "Errors"], apdMultiscaleRows) || unavailable("APD multiscale stage records", false)}<h4>Complete logical iterations</h4>${smallTable(["Run", "Pyramid", "State", "Classified", "Reliable", "Deformable eligible", "Valid RANSAC", "Mean anchors", "Deformable updates", "Profile min cost", "Profile separation", "Center cost", "Anchor cost", "Working cost", "Native cost", "Working gap", "Anchor-view use", "View modes", "Accepted/finite/tested anchors", "Final anchor winners", "Best anchor cost", "Accepted anchor native", "Reliable/non-reliable stage", "Fitted accepted/finite/tested/available", "Final accepted/finite/tested/eligible", "Winner sources"], apdIterationRows) || unavailable("APD complete-iteration counters", false)}${smallTable(["Run", "Artifact", "Available", "Rows embedded", "Truncated", "Reason", "Source"], apdTraceSourceRows)}<h4>Selected-pixel APD profiles, view evidence, fitted plane, and anchor candidates</h4>${apdTraceCards(apdTraceRows) || unavailable("APD targeted profile and anchor traces", false)}</div>`);
+    }
     if (hysteresisRows.length) {
       extensionBlocks.push(`<div class="mechanics-block"><h3>Low-texture update hysteresis <small>(optional extension)</small></h3><p class="mechanics-note">Counts combine both checkerboards into one logical iteration. Rejection rates use only legacy-improving gate-controlled proposals; refinement can contribute multiple sequential proposals per pixel.</p>${smallTable(["Run", "Eligible pixels", "Propagation accepted", "Propagation rejected", "Propagation rejection", "Refinement accepted", "Refinement rejected", "Refinement rejection", "Mean required gain", "Mean best proposed gain"], hysteresisRows)}</div>`);
     }

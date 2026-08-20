@@ -155,6 +155,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	unsigned nEstimationIters;
 	unsigned nEstimationGeometricIters;
 	unsigned nPatchMatchCUDAInstances;
+	unsigned nPatchMatchCUDAAPD;
 	unsigned nEstimateColors;
 	unsigned nEstimateNormals;
 	unsigned nFuseFilter;
@@ -182,6 +183,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("iters", boost::program_options::value(&nEstimationIters)->default_value(numIters), "number of patch-match iterations")
 		("geometric-iters", boost::program_options::value(&nEstimationGeometricIters)->default_value(2), "number of geometric consistent patch-match iterations (0 - disabled)")
 		("patch-match-cuda-instances", boost::program_options::value(&nPatchMatchCUDAInstances)->default_value(4), "number of parallel CUDA PatchMatch worker instances (clamped to nMaxThreads)")
+		("patch-match-cuda-apd", boost::program_options::value(&nPatchMatchCUDAAPD)->default_value(0), "Adaptive Patch Deformation mode for CUDA PatchMatch (0 - disabled, 1 - paper deformable cost)")
 		("estimate-colors", boost::program_options::value(&nEstimateColors)->default_value(2), "estimate the colors for the dense point-cloud (0 - disabled, 1 - final, 2 - estimate)")
 		("estimate-normals", boost::program_options::value(&nEstimateNormals)->default_value(2), "estimate the normals for the dense point-cloud (0 - disabled, 1 - final, 2 - estimate)")
 		("estimate-scale", boost::program_options::value(&OPT::fEstimateScale)->default_value(0.f), "estimate the point-scale for the dense point-cloud (scale multiplier, 0 - disabled)")
@@ -276,6 +278,10 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	}
 	if (OPT::strInputFileName.empty())
 		return false;
+	if (nPatchMatchCUDAAPD > 1u) {
+		VERBOSE("error: --patch-match-cuda-apd must be 0 or 1 (got %u)", nPatchMatchCUDAAPD);
+		return false;
+	}
 #ifdef _USE_DMAP_INSTRUMENTATION
 	{
 		const bool bDMapInstrumentation(!OPT::strDMapInstrumentationDir.empty());
@@ -351,6 +357,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	OPTDENSE::nEstimationIters = nEstimationIters;
 	OPTDENSE::nEstimationGeometricIters = nEstimationGeometricIters;
 	OPTDENSE::nPatchMatchCUDAInstances = nPatchMatchCUDAInstances;
+	OPTDENSE::nPatchMatchCUDAAPD = nPatchMatchCUDAAPD;
 #ifdef _USE_DMAP_INSTRUMENTATION
 	{
 		const bool bDMapInstrumentation(!OPT::strDMapInstrumentationDir.empty());

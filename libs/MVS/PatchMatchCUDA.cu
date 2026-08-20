@@ -30,6 +30,7 @@
 */
 
 #include "PatchMatchCUDA.inl"
+#include "PatchMatchAPDCUDA.h"
 #ifdef _USE_DMAP_INSTRUMENTATION
 #include <vector>
 #endif
@@ -53,6 +54,17 @@
 
 // patch stepping
 #define nSizeStep 2
+
+static_assert(MVS::CUDA::APD_BAD_COST == fBadCost, "APD and production bad-cost sentinels must match");
+static_assert(MVS::CUDA::APD_SECTOR_COUNT == MAX_VIEWS, "APD candidate storage assumes 32 sectors");
+#ifdef _USE_DMAP_INSTRUMENTATION
+static_assert(MVS::CUDA::APD_PROFILE_SIZE == MVS::CUDA::PM_APD_INSTRUMENT_PROFILE_SAMPLES,
+	"APD trace profile schema must match the paper profile");
+static_assert(MVS::CUDA::APD_SECTOR_COUNT == MVS::CUDA::PM_APD_INSTRUMENT_SECTORS,
+	"APD trace sector schema must match the paper sectors");
+static_assert(MVS::CUDA::APD_MAX_ANCHORS == MVS::CUDA::PM_APD_INSTRUMENT_ANCHORS,
+	"APD trace anchor schema must match the paper anchor cap");
+#endif
 
 // Launch-bounds tuning. Default uses 256 threads/block with 2 resident
 // blocks/SM, letting the warp scheduler interleave across blocks while
@@ -390,9 +402,10 @@ __device__ __noinline__ void InstrumentPixel(
 			atomicAdd(&counter.lowResPrior, 1u);
 		if (refVariance < 0.0025f)
 			atomicAdd(&counter.lowTexture, 1u);
-		if (source == PM_SOURCE_PROPAGATE)
+		if (source == PM_SOURCE_PROPAGATE || source == PM_SOURCE_APD_ANCHOR_PROPAGATE)
 			atomicAdd(&counter.propagationWins, 1u);
-		if (source >= PM_SOURCE_REFINE_DEPTH && source <= PM_SOURCE_REFINE_SURFACE_NORMAL)
+		if ((source >= PM_SOURCE_REFINE_DEPTH && source <= PM_SOURCE_REFINE_SURFACE_NORMAL) ||
+			source == PM_SOURCE_APD_FITTED_PLANE || source == PM_SOURCE_APD_FINAL_REFINEMENT)
 			atomicAdd(&counter.refinementWins, 1u);
 		if (source != PM_SOURCE_NONE)
 			atomicAdd(&counter.accepted, 1u);
@@ -933,6 +946,180 @@ __device__ float ScorePlane(const RefPatchCache& cache, const CUDA::Camera& refC
 	return max(0.f, min(2.f, ncc));
 }
 
+// Paper APD uses an unweighted 11x11 support sampled asymmetrically: the
+// center window walks by theta=2 (36 samples), while every anchor window walks
+// by w/2=5 (9 samples). Invalid support contributes the OpenMVS bad-cost
+// sentinel; this is an explicit integration adaptation from the released
+// implementation's value 2 so candidate validity remains conventional.
+__device__ inline float ScorePlaneAPDPatch(
+	const Matrix3& homography,
+	const ImagePixels refImage,
+	const ImagePixels trgImage,
+	const CUDA::Camera& trgCamera,
+	const Point2i& center,
+	const APDPatchKind patchKind)
+{
+	if (!APDReferencePatchFits(
+		center.x(), center.y(), g_cameras[0].size.x(), g_cameras[0].size.y()))
+		return fBadCost;
+	float sumRef(0.f), sumRefRef(0.f), sumTrg(0.f), sumTrgTrg(0.f), sumRefTrg(0.f);
+	const unsigned sampleCount(APDPatchSampleCount(patchKind));
+	for (unsigned sample=0; sample<sampleCount; ++sample) {
+		const APDPatchOffset offset(MakeAPDPatchOffset(patchKind, sample));
+		const Point2i refPoint(center.x()+offset.x, center.y()+offset.y);
+		const Point3 projectedH(homography*refPoint.cast<float>().homogeneous());
+		if (!isfinite(projectedH.z()) || fabsf(projectedH.z()) < FLT_EPSILON)
+			return fBadCost;
+		const float inverseZ(__fdividef(1.f, projectedH.z()));
+		const float targetX(projectedH.x()*inverseZ);
+		const float targetY(projectedH.y()*inverseZ);
+		if (!isfinite(targetX) || !isfinite(targetY) || targetX < 0.f || targetY < 0.f ||
+			targetX >= static_cast<float>(trgCamera.size.x()-1) ||
+			targetY >= static_cast<float>(trgCamera.size.y()-1))
+			return fBadCost;
+		const float refPixel(tex2D<float>(refImage, refPoint.x()+0.5f, refPoint.y()+0.5f));
+		const float targetPixel(tex2D<float>(trgImage, targetX+0.5f, targetY+0.5f));
+		sumRef += refPixel;
+		sumRefRef += refPixel*refPixel;
+		sumTrg += targetPixel;
+		sumTrgTrg += targetPixel*targetPixel;
+		sumRefTrg += refPixel*targetPixel;
+	}
+	const float inverseCount(1.f/static_cast<float>(sampleCount));
+	const float meanRef(sumRef*inverseCount);
+	const float meanTrg(sumTrg*inverseCount);
+	const float varianceRef(sumRefRef*inverseCount-meanRef*meanRef);
+	const float varianceTrg(sumTrgTrg*inverseCount-meanTrg*meanTrg);
+	constexpr float minimumVariance(1e-5f);
+	if (!(varianceRef >= minimumVariance) || !(varianceTrg >= minimumVariance))
+		return fBadCost;
+	const float covariance(sumRefTrg*inverseCount-meanRef*meanTrg);
+	return max(0.f, min(2.f, 1.f-covariance*rsqrtf(varianceRef*varianceTrg)));
+}
+
+struct APDViewScoreComponents {
+	float centerCost = fBadCost;
+	float anchorMeanCost = fBadCost;
+	float deformablePhotometricCost = fBadCost;
+	float geometricCost = 0.f;
+	float totalCost = fBadCost;
+	uint8_t validAnchorSupportCount = 0u;
+	uint8_t invalidAnchorSupportCount = 0u;
+};
+
+struct APDAggregateScoreComponents {
+	float centerCost = -1.f;
+	float anchorMeanCost = -1.f;
+	float deformablePhotometricCost = -1.f;
+	float geometricCost = -1.f;
+};
+
+template <bool GEOM, bool CAPTURE_COMPONENTS = false>
+__device__ inline float ScorePlaneAPD(
+	const ImagePixels* images,
+	const ImagePixels* depthImages,
+	const Point2i& p,
+	const Point4& plane,
+	const uint32_t* anchors,
+	const uint8_t anchorCount,
+	const int targetView,
+	APDViewScoreComponents* capturedComponents = nullptr)
+{
+	const CUDA::Camera& targetCamera(g_cameras[targetView+1]);
+	const Matrix3 homography(ComputeHomography(g_cameras[0], targetCamera, p.cast<float>(), plane));
+	const float centerCost(ScorePlaneAPDPatch(
+		homography, images[0], images[targetView+1], targetCamera, p, APDPatchKind::CENTER));
+	if (centerCost >= fBadCost || !isfinite(centerCost)) {
+		if constexpr (CAPTURE_COMPONENTS) {
+			if (capturedComponents)
+				*capturedComponents = APDViewScoreComponents{};
+		}
+		return fBadCost;
+	}
+	APDAnchorCostAccumulator anchorCosts;
+	const int width(g_cameras[0].size.x());
+	const int area(width*g_cameras[0].size.y());
+	for (unsigned slot=0; slot<min(static_cast<unsigned>(anchorCount), APD_MAX_ANCHORS); ++slot) {
+		const uint32_t anchorIndex(anchors[slot]);
+		if (anchorIndex >= static_cast<uint32_t>(area)) {
+			AccumulateAPDAnchorCost(anchorCosts, false, 0.f);
+			continue;
+		}
+		const Point2i anchor(
+			static_cast<int>(anchorIndex%static_cast<uint32_t>(width)),
+			static_cast<int>(anchorIndex/static_cast<uint32_t>(width)));
+		const float anchorCost(ScorePlaneAPDPatch(
+			homography, images[0], images[targetView+1], targetCamera,
+			anchor, APDPatchKind::ANCHOR));
+		AccumulateAPDAnchorCost(anchorCosts, anchorCost < fBadCost, anchorCost);
+	}
+	const APDScoreDecision score(EvaluateAPDWorkingScore(
+		true, APDReliabilityClass::UNRELIABLE, true,
+		anchorCount >= APD_MIN_INLIERS, centerCost, anchorCosts));
+	float geometricCost(0.f);
+	if constexpr (GEOM)
+		geometricCost = 0.1f*GeometricConsistencyWeight(
+			depthImages[targetView], g_cameras[0], targetCamera, plane, p);
+	const float cost(score.workingCost+geometricCost);
+	if constexpr (CAPTURE_COMPONENTS) {
+		if (capturedComponents) {
+			capturedComponents->centerCost = centerCost;
+			capturedComponents->anchorMeanCost = score.anchorMeanCost;
+			capturedComponents->deformablePhotometricCost = score.workingCost;
+			capturedComponents->geometricCost = geometricCost;
+			capturedComponents->totalCost = cost;
+			capturedComponents->validAnchorSupportCount = static_cast<uint8_t>(
+				min(anchorCosts.validSupportCount, 255u));
+			capturedComponents->invalidAnchorSupportCount = static_cast<uint8_t>(
+				min(anchorCosts.invalidSupportCount, 255u));
+		}
+	}
+	return cost;
+}
+
+template <bool GEOM, bool CAPTURE_COMPONENTS = false>
+__device__ inline void MultiViewScorePlaneAPD(
+	const ImagePixels* images,
+	const ImagePixels* depthImages,
+	const Point2i& p,
+	const Point4& plane,
+	const uint32_t* anchors,
+	const uint8_t anchorCount,
+	float* costVector,
+	APDViewScoreComponents* capturedComponents = nullptr)
+{
+	for (int view=0; view<g_params.nNumViews; ++view) {
+		APDViewScoreComponents* components(nullptr);
+		if constexpr (CAPTURE_COMPONENTS)
+			components = capturedComponents ? capturedComponents+view : nullptr;
+		costVector[view] = ScorePlaneAPD<GEOM, CAPTURE_COMPONENTS>(
+			images, depthImages, p, plane, anchors, anchorCount, view, components);
+	}
+}
+
+__device__ inline float AggregateAPDViewScores(
+	const unsigned* viewWeights,
+	const float* costVector,
+	const int numViews)
+{
+	float weightedCost(0.f);
+	unsigned weightSum(0u);
+	for (int view=0; view<numViews; ++view) {
+		weightedCost += static_cast<float>(viewWeights[view])*costVector[view];
+		weightSum += viewWeights[view];
+	}
+	return weightSum > 0u ? weightedCost/static_cast<float>(weightSum) : fBadCost;
+}
+
+__device__ inline unsigned APDCostRank(const float* costs, const int view, const int numViews)
+{
+	unsigned rank(0u);
+	for (int other=0; other<numViews; ++other)
+		if (costs[other] < costs[view] || (costs[other] == costs[view] && other < view))
+			++rank;
+	return rank;
+}
+
 // compute photometric score for all neighbor images;
 // GEOM-templated so geom-consistency loop is dead-code eliminated when off
 template <bool GEOM>
@@ -969,6 +1156,65 @@ __device__ inline float AggregateMultiViewScores(const unsigned* viewWeights, co
 		if (viewWeights[imgId])
 			cost += viewWeights[imgId] * costVector[imgId];
 	return cost / float(NUM_SAMPLES);
+}
+
+template <bool GEOM, bool APD, bool CAPTURE_APD_COMPONENTS = false>
+__device__ inline float ScorePatchMatchCandidate(
+	const RefPatchCache& refCache,
+	const ImagePixels* images,
+	const ImagePixels* depthImages,
+	const Point2i& p,
+	const Point4& plane,
+	const float lowDepth,
+	const bool apdActive,
+	const uint32_t* anchors,
+	const uint8_t anchorCount,
+	const unsigned* viewWeights,
+	float* costVector,
+	APDAggregateScoreComponents* capturedAggregate = nullptr)
+{
+	if constexpr (APD) {
+		if (apdActive) {
+			if constexpr (CAPTURE_APD_COMPONENTS) {
+				APDViewScoreComponents viewComponents[MAX_VIEWS];
+				MultiViewScorePlaneAPD<GEOM, true>(
+					images, depthImages, p, plane, anchors, anchorCount, costVector,
+					viewComponents);
+				const float cost(AggregateAPDViewScores(
+					viewWeights, costVector, g_params.nNumViews));
+				if (capturedAggregate) {
+					float centerSum(0.f);
+					float anchorSum(0.f);
+					float deformableSum(0.f);
+					float geometricSum(0.f);
+					unsigned weightSum(0u);
+					for (int view=0; view<g_params.nNumViews; ++view) {
+						const unsigned weight(viewWeights[view]);
+						centerSum += static_cast<float>(weight)*viewComponents[view].centerCost;
+						anchorSum += static_cast<float>(weight)*viewComponents[view].anchorMeanCost;
+						deformableSum += static_cast<float>(weight)*viewComponents[view].deformablePhotometricCost;
+						geometricSum += static_cast<float>(weight)*viewComponents[view].geometricCost;
+						weightSum += weight;
+					}
+					if (weightSum > 0u) {
+						const float inverseWeight(1.f/static_cast<float>(weightSum));
+						capturedAggregate->centerCost = centerSum*inverseWeight;
+						capturedAggregate->anchorMeanCost = anchorSum*inverseWeight;
+						capturedAggregate->deformablePhotometricCost = deformableSum*inverseWeight;
+						capturedAggregate->geometricCost = geometricSum*inverseWeight;
+					}
+				}
+				return cost;
+			} else {
+				MultiViewScorePlaneAPD<GEOM, false>(
+					images, depthImages, p, plane, anchors, anchorCount, costVector);
+				return AggregateAPDViewScores(
+					viewWeights, costVector, g_params.nNumViews);
+			}
+		}
+	}
+	MultiViewScorePlane<GEOM>(refCache, images, depthImages, p, plane, lowDepth, costVector);
+	return AggregateMultiViewScores(viewWeights, costVector, g_params.nNumViews);
 }
 
 #ifdef _USE_DMAP_INSTRUMENTATION
@@ -1164,6 +1410,11 @@ __device__ PatchMatchInstrumentCostComponents WriteExactIterationViews(
 	const size_t viewBase = writeViews ?
 		((size_t)instrumentParams.exactLogicalStateIndex * instrumentParams.area + pixelIndex) *
 			(size_t)instrumentParams.viewStride : 0;
+	unsigned totalViewWeight(0u);
+	for (int view=0; view<numViews; ++view)
+		totalViewWeight += viewWeights[view];
+	const float contributionDenominator(
+		totalViewWeight > 0u ? static_cast<float>(totalViewWeight) : 1.f);
 	for (int view = 0; view < numViews; ++view) {
 		const unsigned weight(viewWeights[view]);
 		if (!writeViews && !weight)
@@ -1190,7 +1441,8 @@ __device__ PatchMatchInstrumentCostComponents WriteExactIterationViews(
 		record.photometricCost = components.photoPriorCost;
 		record.geometricCost = components.geometricCost;
 		record.totalCost = components.totalCost;
-		record.weightedContribution = (float)weight * components.totalCost / (float)NUM_SAMPLES;
+		record.weightedContribution = (float)weight * components.totalCost /
+			contributionDenominator;
 		record.selectionPrior = selectionPriors[view];
 		record.samplingScore = samplingScore;
 		record.samplingProbability = probability;
@@ -1199,7 +1451,7 @@ __device__ PatchMatchInstrumentCostComponents WriteExactIterationViews(
 			agreeCount, badCount, decision, selected, selected,
 			IsFiniteCandidateCost(components.totalCost), true);
 	}
-	NormalizeInstrumentCostComponents(aggregate, (float)NUM_SAMPLES);
+	NormalizeInstrumentCostComponents(aggregate, contributionDenominator);
 	return aggregate;
 }
 
@@ -1279,10 +1531,14 @@ __device__ PatchMatchInstrumentCostComponents WriteExactInitializationViews(
 // The shared viewWeights basis across (3) and (4) ensures plane hypotheses
 // are evaluated on a consistent view-selection footing within this pixel.
 #ifdef _USE_DMAP_INSTRUMENTATION
-template <bool GEOM, bool INSTRUMENT>
+template <bool GEOM, bool INSTRUMENT, bool APD>
 __device__ void ProcessPixel(
 	const ImagePixels* images, const ImagePixels* depthImages,
 	Point4* planes, const float* lowDepths, float* costs, RandState* randStates, unsigned* selectedViews,
+	const uint8_t* apdReliability, const uint32_t* apdAnchors,
+	const uint8_t* apdAnchorCounts, const Point4* apdPlanesSnapshot,
+	const unsigned* apdSelectedViewsSnapshot, const Point4* apdFittedPlanes,
+	const uint8_t* apdFittedPlaneValid, uint8_t* apdViewWeights, APDUpdateStage apdStage,
 	uint8_t* updateSources,
 	PatchMatchInstrumentCounters* instrumentCounters,
 	PatchMatchInstrumentTraceRecord* instrumentTraceRecords,
@@ -1290,8 +1546,15 @@ __device__ void ProcessPixel(
 	const PatchMatchInstrumentKernelParams& instrumentParams,
 	const Point2i& p, const int iter)
 #else
-template <bool GEOM>
-__device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depthImages, Point4* planes, const float* lowDepths, float* costs, RandState* randStates, unsigned* selectedViews, const Point2i& p, const int iter)
+template <bool GEOM, bool APD>
+__device__ void ProcessPixel(
+	const ImagePixels* images, const ImagePixels* depthImages,
+	Point4* planes, const float* lowDepths, float* costs, RandState* randStates,
+	unsigned* selectedViews, const uint8_t* apdReliability, const uint32_t* apdAnchors,
+	const uint8_t* apdAnchorCounts, const Point4* apdPlanesSnapshot,
+	const unsigned* apdSelectedViewsSnapshot, const Point4* apdFittedPlanes,
+	const uint8_t* apdFittedPlaneValid, uint8_t* apdViewWeights, APDUpdateStage apdStage,
+	const Point2i& p, const int iter)
 #endif
 {
 	const int width = g_cameras[0].size.x();
@@ -1299,6 +1562,20 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	if (p.x() >= width || p.y() >= height)
 		return;
 	const int idx = Point2Idx(p, width);
+	const APDReliabilityClass apdReliabilityClass(
+		APD && apdReliability ? static_cast<APDReliabilityClass>(apdReliability[idx]) :
+		APDReliabilityClass::UNKNOWN);
+	if constexpr (APD)
+		if (!APDShouldProcess(apdReliabilityClass, apdStage))
+			return;
+	const bool apdActive(
+		APD && apdReliability && apdAnchors && apdAnchorCounts && apdPlanesSnapshot &&
+		apdSelectedViewsSnapshot &&
+		apdReliabilityClass == APDReliabilityClass::UNRELIABLE &&
+		apdAnchorCounts[idx] >= APD_MIN_INLIERS);
+	const uint32_t* pixelAPDAnchors(apdActive ? apdAnchors+(size_t)idx*APD_MAX_ANCHORS : nullptr);
+	const uint8_t pixelAPDAnchorCount(apdActive ?
+		min(apdAnchorCounts[idx], static_cast<uint8_t>(APD_MAX_ANCHORS)) : 0u);
 #ifdef _USE_DMAP_INSTRUMENTATION
 	const Point4 instrumentPlaneBefore(planes[idx]);
 	const float instrumentStoredCostBefore(costs[idx]);
@@ -1315,6 +1592,19 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	uint8_t exactRunnerUpSlot = PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE;
 	uint8_t exactWinnerSlot = PM_EXACT_CANDIDATE_CURRENT;
 	float exactWinningViewCosts[MAX_VIEWS];
+	APDAggregateScoreComponents exactWinningAPDComponents;
+	APDAggregateScoreComponents exactPropagationAPDComponents[8];
+	PatchMatchAPDInstrumentTrace* apdTrace(nullptr);
+	if constexpr (INSTRUMENT && APD) {
+		const int traceIndex(instrumentTraceMap && instrumentParams.numTracePixels > 0 ?
+			instrumentTraceMap[idx] : -1);
+		if (instrumentParams.apdTraces && traceIndex >= 0 &&
+			traceIndex < instrumentParams.numTracePixels && iter >= 0)
+		{
+			apdTrace = &instrumentParams.apdTraces[
+				(size_t)iter*instrumentParams.numTracePixels+traceIndex];
+		}
+	}
 #endif
 	RandState* randState = &randStates[idx];
 	float lowDepth = 0;
@@ -1349,8 +1639,48 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	int positions[8];
 	float neighborDepths[8];
 	float costArray[8][MAX_VIEWS];
+	uint32_t validAnchorMask = 0u;
+	uint32_t anchorSelectedViews[APD_MAX_ANCHORS] = {};
 
 	for (int posId=0; posId<8; ++posId) {
+		if constexpr (APD) {
+			if (apdActive) {
+				if (posId >= pixelAPDAnchorCount)
+					continue;
+				const uint32_t anchorIndex(pixelAPDAnchors[posId]);
+				if (anchorIndex >= static_cast<uint32_t>(width*height))
+					continue;
+				const Point2i anchorPoint(
+					static_cast<int>(anchorIndex%static_cast<uint32_t>(width)),
+					static_cast<int>(anchorIndex/static_cast<uint32_t>(width)));
+				Point4 anchorPlane(LoadPlaneLDG(&apdPlanesSnapshot[anchorIndex]));
+				const float anchorDepth(InterpolatePixel(
+					g_cameras[0], p, anchorPoint, anchorPlane.w(),
+					anchorPlane.topLeftCorner<3,1>()));
+				if (!isfinite(anchorDepth) || anchorDepth < g_params.fDepthMin ||
+					anchorDepth > g_params.fDepthMax)
+					continue;
+				anchorPlane.w() = anchorDepth;
+				valid[posId] = true;
+				positions[posId] = static_cast<int>(anchorIndex);
+				neighborDepths[posId] = anchorDepth;
+				anchorSelectedViews[posId] = apdSelectedViewsSnapshot[anchorIndex];
+				validAnchorMask |= 1u << posId;
+#ifdef _USE_DMAP_INSTRUMENTATION
+				SetBit(validNeighbors, posId);
+				if constexpr (INSTRUMENT) {
+					if (apdTrace) {
+						apdTrace->anchorCandidateValid[posId] = 1u;
+						apdTrace->anchorSelectedViews[posId] = anchorSelectedViews[posId];
+					}
+				}
+#endif
+				MultiViewScorePlaneAPD<GEOM, false>(
+					images, depthImages, p, anchorPlane, pixelAPDAnchors,
+					pixelAPDAnchorCount, costArray[posId]);
+				continue;
+			}
+		}
 		const int2* samples = dirs[posId];
 		Point2i bestNx; float bestConf(FLT_MAX);
 		for (int dirId=0; dirId<numDirs[posId]; ++dirId) {
@@ -1378,16 +1708,27 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	// multi-hypothesis view selection
 	float viewSelectionPriors[MAX_VIEWS] = {};
 	const int nNumViews = g_params.nNumViews;
-	for (int posId = 0; posId < 4; ++posId) {
+	const int viewPriorCandidates(apdActive ? static_cast<int>(APD_MAX_ANCHORS) : 4);
+	for (int posId = 0; posId < viewPriorCandidates; ++posId) {
 		if (valid[posId]) {
-			const unsigned selectedView = selectedViews[neighborPositions[posId]];
+			const unsigned selectedView(apdActive ? anchorSelectedViews[posId] :
+				selectedViews[neighborPositions[posId]]);
 			for (int j = 0; j < nNumViews; ++j)
 				viewSelectionPriors[j] += (IsBitSet(selectedView, j) ? 0.9f : 0.1f);
 		}
 	}
-	float samplingProbs[MAX_VIEWS];
-	const float thCost = 0.8f * __expf(Square((float)iter) / (-2.f * 4.f*4.f));
+	float samplingProbs[MAX_VIEWS] = {};
+	const float thCost(apdActive ? APDViewCostThreshold(static_cast<unsigned>(iter)) :
+		0.8f*__expf(Square((float)iter)/(-2.f*4.f*4.f)));
 	for (int imgId = 0; imgId < nNumViews; ++imgId) {
+		if (apdActive) {
+			const APDAnchorViewEvidence evidence(ComputeAPDAnchorViewEvidence(
+				&costArray[0][0], MAX_VIEWS, anchorSelectedViews, validAnchorMask,
+				pixelAPDAnchorCount, static_cast<unsigned>(imgId), thCost));
+			viewSelectionPriors[imgId] = evidence.prior;
+			samplingProbs[imgId] = evidence.samplingScore;
+			continue;
+		}
 		float sumW = 0;
 		unsigned count = 0;
 		unsigned countBad = 0;
@@ -1409,16 +1750,78 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 			samplingProbs[imgId] = 0.f;
 		}
 	}
-	PDF2CDF(samplingProbs, nNumViews);
 	unsigned viewWeights[MAX_VIEWS] = {};
-	for (int sample = 0; sample < NUM_SAMPLES; ++sample) {
-		const float randProb = curand_uniform(randState);
-		for (int imgId = 0; imgId < nNumViews; ++imgId) {
-			if (samplingProbs[imgId] > randProb) {
-				++viewWeights[imgId];
-				break;
+	APDViewSelectionMode apdViewSelectionMode(APDViewSelectionMode::NATIVE);
+	float probabilityMass(0.f);
+	for (int imgId=0; imgId<nNumViews; ++imgId)
+		probabilityMass += samplingProbs[imgId];
+#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (INSTRUMENT && APD) {
+		if (apdTrace && apdActive) {
+			for (int view=0; view<nNumViews; ++view) {
+				apdTrace->viewSelectionPriors[view] = viewSelectionPriors[view];
+				apdTrace->viewSamplingScores[view] = samplingProbs[view];
+				apdTrace->viewSamplingProbabilities[view] =
+					probabilityMass > 0.f && isfinite(probabilityMass) ?
+					samplingProbs[view]/probabilityMass : -1.f;
 			}
 		}
+	}
+#endif
+	if (!apdActive || (probabilityMass > 0.f && isfinite(probabilityMass))) {
+		PDF2CDF(samplingProbs, nNumViews);
+		for (int sample = 0; sample < NUM_SAMPLES; ++sample) {
+			const float randProb(apdActive ?
+				min(curand_uniform(randState), 1.f-FLT_EPSILON) : curand_uniform(randState));
+			for (int imgId = 0; imgId < nNumViews; ++imgId) {
+				if (samplingProbs[imgId] > randProb) {
+					++viewWeights[imgId];
+					break;
+				}
+			}
+		}
+		if (apdActive)
+			apdViewSelectionMode = APDViewSelectionMode::ANCHOR_EVIDENCE;
+	} else if constexpr (APD) {
+		const uint8_t* previousWeights(apdViewWeights ?
+			apdViewWeights+(size_t)idx*MAX_VIEWS : nullptr);
+		unsigned fallbackWeightSum(0u);
+		if (previousWeights) {
+			for (int view=0; view<nNumViews; ++view) {
+				viewWeights[view] = previousWeights[view];
+				fallbackWeightSum += viewWeights[view];
+			}
+		}
+		if (fallbackWeightSum > 0u) {
+			apdViewSelectionMode = APDViewSelectionMode::PREVIOUS_WEIGHTS_FALLBACK;
+		} else {
+			const unsigned previousMask(apdSelectedViewsSnapshot[idx]);
+			for (int view=0; view<nNumViews; ++view)
+				if (IsBitSet(previousMask, view)) {
+					viewWeights[view] = 1u;
+					++fallbackWeightSum;
+				}
+			if (fallbackWeightSum > 0u) {
+				apdViewSelectionMode = APDViewSelectionMode::SELECTED_MASK_FALLBACK;
+			} else {
+				viewWeights[0] = 1u;
+				apdViewSelectionMode = APDViewSelectionMode::FIRST_VIEW_FALLBACK;
+			}
+		}
+	}
+	if constexpr (APD) {
+		if (apdViewWeights) {
+			uint8_t* pixelViewWeights(apdViewWeights+(size_t)idx*MAX_VIEWS);
+			for (int view=0; view<MAX_VIEWS; ++view)
+				pixelViewWeights[view] = view < nNumViews ?
+					static_cast<uint8_t>(viewWeights[view]) : 0u;
+		}
+	#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT)
+			if (apdTrace)
+				for (int view=0; view<nNumViews; ++view)
+					apdTrace->viewWeights[view] = static_cast<uint8_t>(viewWeights[view]);
+	#endif
 	}
 
 	// propagate best neighbor plane
@@ -1432,15 +1835,81 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 		if (viewWeights[imgId])
 			SetBit(newSelectedViews, imgId);
 	float finalCosts[8];
-	for (int posId = 0; posId < 8; ++posId)
-		finalCosts[posId] = valid[posId] ? AggregateMultiViewScores(viewWeights, costArray[posId], nNumViews) : FLT_MAX;
+	for (int posId = 0; posId < 8; ++posId) {
+		if (!valid[posId]) {
+			finalCosts[posId] = FLT_MAX;
+			continue;
+		}
+		if constexpr (APD) {
+			if (apdActive) {
+				Point4 candidatePlane(LoadPlaneLDG(&apdPlanesSnapshot[positions[posId]]));
+				candidatePlane.w() = neighborDepths[posId];
+			#ifdef _USE_DMAP_INSTRUMENTATION
+				finalCosts[posId] = ScorePatchMatchCandidate<GEOM, true, INSTRUMENT>(
+					refCache, images, depthImages, p, candidatePlane, lowDepth, true,
+					pixelAPDAnchors, pixelAPDAnchorCount, viewWeights, costArray[posId],
+					INSTRUMENT ? &exactPropagationAPDComponents[posId] : nullptr);
+			#else
+				finalCosts[posId] = ScorePatchMatchCandidate<GEOM, true>(
+					refCache, images, depthImages, p, candidatePlane, lowDepth, true,
+					pixelAPDAnchors, pixelAPDAnchorCount, viewWeights, costArray[posId]);
+			#endif
+				continue;
+			}
+		}
+		finalCosts[posId] = AggregateMultiViewScores(viewWeights, costArray[posId], nNumViews);
+	}
 	const int minCostIdx = FindMinIndex(finalCosts, 8);
+#ifdef _USE_DMAP_INSTRUMENTATION
+	uint8_t anchorProposalCount = 0u;
+	uint8_t anchorFiniteCount = 0u;
+	float bestAnchorWorkingCost = -1.f;
+	uint8_t acceptedAnchorSlot = PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE;
+	uint32_t acceptedAnchorIndex = ~uint32_t(0);
+	float acceptedAnchorNativeCost = -1.f;
+	if constexpr (INSTRUMENT && APD) {
+		if (apdActive) {
+			for (int slot=0; slot<static_cast<int>(APD_MAX_ANCHORS); ++slot) {
+				if (!valid[slot])
+					continue;
+				++anchorProposalCount;
+				if (IsFiniteCandidateCost(finalCosts[slot]))
+					++anchorFiniteCount;
+				if (apdTrace) {
+					apdTrace->anchorCandidateWorkingCosts[slot] = finalCosts[slot];
+					Point4 nativePlane(LoadPlaneLDG(&apdPlanesSnapshot[positions[slot]]));
+					nativePlane.w() = neighborDepths[slot];
+					float nativeViewCosts[MAX_VIEWS];
+					MultiViewScorePlane<GEOM>(
+						refCache, images, depthImages, p, nativePlane, lowDepth, nativeViewCosts);
+					apdTrace->anchorCandidateNativeCosts[slot] = AggregateAPDViewScores(
+						viewWeights, nativeViewCosts, nNumViews);
+				}
+			}
+			if (minCostIdx >= 0 && valid[minCostIdx] &&
+				IsFiniteCandidateCost(finalCosts[minCostIdx]))
+				bestAnchorWorkingCost = finalCosts[minCostIdx];
+		}
+	}
+#endif
 	float costVector[MAX_VIEWS];
-	MultiViewScorePlane<GEOM>(refCache, images, depthImages, p, plane, lowDepth, costVector);
-	cost = AggregateMultiViewScores(viewWeights, costVector, nNumViews);
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	APDAggregateScoreComponents currentAPDComponents;
+	cost = ScorePatchMatchCandidate<GEOM, APD, INSTRUMENT>(
+		refCache, images, depthImages, p, plane, lowDepth, apdActive,
+		pixelAPDAnchors, pixelAPDAnchorCount, viewWeights, costVector,
+		INSTRUMENT ? &currentAPDComponents : nullptr);
+	#else
+	cost = ScorePatchMatchCandidate<GEOM, APD>(
+		refCache, images, depthImages, p, plane, lowDepth, apdActive,
+		pixelAPDAnchors, pixelAPDAnchorCount, viewWeights, costVector);
+	#endif
 #ifdef _USE_DMAP_INSTRUMENTATION
 	const float exactIncumbentCost(cost);
 	if constexpr (INSTRUMENT) {
+		if constexpr (APD)
+			if (apdActive)
+				exactWinningAPDComponents = currentAPDComponents;
 		for (int view = 0; view < nNumViews; ++view)
 			exactWinningViewCosts[view] = costVector[view];
 		TrackExactCandidate(
@@ -1452,8 +1921,10 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 		for (int posId = 0; posId < 8; ++posId) {
 			if (!valid[posId])
 				continue;
+			const int slot(apdActive ? PM_EXACT_CANDIDATE_APD_ANCHOR_0+posId :
+				PM_EXACT_CANDIDATE_PROPAGATION_0+posId);
 			TrackExactCandidate(
-				PM_EXACT_CANDIDATE_PROPAGATION_0 + posId, finalCosts[posId],
+				slot, finalCosts[posId],
 				exactTestedMask, exactFiniteMask, exactTestedCount, exactFiniteCount,
 				exactBestCost, exactBestSlot, exactRunnerUpCost, exactRunnerUpSlot);
 		}
@@ -1477,20 +1948,90 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 #else
 	if (propagationAccepted) {
 #endif
-		plane = LoadPlaneLDG(&planes[positions[minCostIdx]]);
+		plane = apdActive ? LoadPlaneLDG(&apdPlanesSnapshot[positions[minCostIdx]]) :
+			LoadPlaneLDG(&planes[positions[minCostIdx]]);
 		plane.w() = neighborDepths[minCostIdx];
 		cost = finalCosts[minCostIdx];
 		selectedViews[idx] = newSelectedViews;
 #ifdef _USE_DMAP_INSTRUMENTATION
-		updateSource = PM_SOURCE_PROPAGATE;
+		updateSource = apdActive ? PM_SOURCE_APD_ANCHOR_PROPAGATE : PM_SOURCE_PROPAGATE;
 		if constexpr (INSTRUMENT) {
-			exactWinnerSlot = (uint8_t)(PM_EXACT_CANDIDATE_PROPAGATION_0 + minCostIdx);
+			if constexpr (APD) {
+				if (apdActive) {
+					acceptedAnchorSlot = static_cast<uint8_t>(minCostIdx);
+					acceptedAnchorIndex = static_cast<uint32_t>(positions[minCostIdx]);
+					float nativeViewCosts[MAX_VIEWS];
+					MultiViewScorePlane<GEOM>(
+						refCache, images, depthImages, p, plane, lowDepth, nativeViewCosts);
+					acceptedAnchorNativeCost = AggregateAPDViewScores(
+						viewWeights, nativeViewCosts, nNumViews);
+				}
+			}
+			exactWinnerSlot = (uint8_t)((apdActive ? PM_EXACT_CANDIDATE_APD_ANCHOR_0 :
+				PM_EXACT_CANDIDATE_PROPAGATION_0)+minCostIdx);
 			exactAcceptedMask |= 1u << exactWinnerSlot;
 			++exactAcceptedCount;
+			if constexpr (APD)
+				if (apdActive)
+					exactWinningAPDComponents = exactPropagationAPDComponents[minCostIdx];
 			for (int view = 0; view < nNumViews; ++view)
 				exactWinningViewCosts[view] = costArray[minCostIdx][view];
 		}
 #endif
+	}
+	const bool fittedPlaneAvailable(
+		apdActive && apdFittedPlanes && apdFittedPlaneValid && apdFittedPlaneValid[idx] != 0u &&
+		apdFittedPlanes[idx].w() >= g_params.fDepthMin &&
+		apdFittedPlanes[idx].w() <= g_params.fDepthMax);
+	float fittedPlaneWorkingCost(FLT_MAX);
+#ifdef _USE_DMAP_INSTRUMENTATION
+	float fittedPlaneNativeCost(-1.f);
+	bool fittedPlaneAcceptedEvent(false);
+	APDAggregateScoreComponents fittedPlaneAPDComponents;
+#endif
+	if (fittedPlaneAvailable) {
+		const Point4 fittedPlane(LoadPlaneLDG(&apdFittedPlanes[idx]));
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		fittedPlaneWorkingCost = ScorePatchMatchCandidate<GEOM, true, INSTRUMENT>(
+			refCache, images, depthImages, p, fittedPlane, lowDepth, true,
+			pixelAPDAnchors, pixelAPDAnchorCount, viewWeights, costVector,
+			INSTRUMENT ? &fittedPlaneAPDComponents : nullptr);
+		const bool fittedPlaneAccepted(fittedPlaneWorkingCost < cost);
+		fittedPlaneAcceptedEvent = fittedPlaneAccepted;
+		if constexpr (INSTRUMENT) {
+			TrackExactCandidate(
+				PM_EXACT_CANDIDATE_APD_FITTED_PLANE, fittedPlaneWorkingCost,
+				exactTestedMask, exactFiniteMask, exactTestedCount, exactFiniteCount,
+				exactBestCost, exactBestSlot, exactRunnerUpCost, exactRunnerUpSlot);
+			InstrumentCandidate(instrumentCounters, instrumentParams,
+				PM_CANDIDATE_APD_FITTED_PLANE, fittedPlaneWorkingCost,
+				fittedPlaneAccepted);
+			float nativeViewCosts[MAX_VIEWS];
+			MultiViewScorePlane<GEOM>(
+				refCache, images, depthImages, p, fittedPlane, lowDepth, nativeViewCosts);
+			fittedPlaneNativeCost = AggregateAPDViewScores(
+				viewWeights, nativeViewCosts, nNumViews);
+			if (fittedPlaneAccepted) {
+				exactWinnerSlot = PM_EXACT_CANDIDATE_APD_FITTED_PLANE;
+				exactAcceptedMask |= 1u << PM_EXACT_CANDIDATE_APD_FITTED_PLANE;
+				++exactAcceptedCount;
+				exactWinningAPDComponents = fittedPlaneAPDComponents;
+				for (int view=0; view<nNumViews; ++view)
+					exactWinningViewCosts[view] = costVector[view];
+			}
+		}
+		#else
+		fittedPlaneWorkingCost = ScorePatchMatchCandidate<GEOM, true>(
+			refCache, images, depthImages, p, fittedPlane, lowDepth, true,
+			pixelAPDAnchors, pixelAPDAnchorCount, viewWeights, costVector);
+		#endif
+		if (fittedPlaneWorkingCost < cost) {
+			plane = fittedPlane;
+			cost = fittedPlaneWorkingCost;
+			#ifdef _USE_DMAP_INSTRUMENTATION
+			updateSource = PM_SOURCE_APD_FITTED_PLANE;
+			#endif
+		}
 	}
 	const float depth = plane.w();
 
@@ -1502,7 +2043,7 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 	const Point3 normalRand = GenerateRandomNormal(g_cameras[0], p, randState);
 	int numValidPlanes = 3;
 	Point3 surfaceNormal = Point3::Zero();
-	if (valid[0] && valid[1] && valid[2] && valid[3]) {
+	if (!apdActive && valid[0] && valid[1] && valid[2] && valid[3]) {
 		// estimate normal from surrounding surface
 		const Point4 ndepths(
 			LoadPlaneWLDG(&planes[neighborPositions[0]]),
@@ -1520,8 +2061,17 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 		Point4 newPlane;
 		newPlane.topLeftCorner<3,1>() = normals[i];
 		newPlane.w() = depths[i];
-		MultiViewScorePlane<GEOM>(refCache, images, depthImages, p, newPlane, lowDepth, costVector);
-		const float costPlane = AggregateMultiViewScores(viewWeights, costVector, nNumViews);
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		APDAggregateScoreComponents candidateAPDComponents;
+		const float costPlane(ScorePatchMatchCandidate<GEOM, APD, INSTRUMENT>(
+			refCache, images, depthImages, p, newPlane, lowDepth, apdActive,
+			pixelAPDAnchors, pixelAPDAnchorCount, viewWeights, costVector,
+			INSTRUMENT ? &candidateAPDComponents : nullptr));
+		#else
+		const float costPlane(ScorePatchMatchCandidate<GEOM, APD>(
+			refCache, images, depthImages, p, newPlane, lowDepth, apdActive,
+			pixelAPDAnchors, pixelAPDAnchorCount, viewWeights, costVector));
+		#endif
 #ifdef _USE_DMAP_INSTRUMENTATION
 		const bool candidateAccepted = cost > costPlane;
 		if constexpr (INSTRUMENT) {
@@ -1536,6 +2086,9 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 				exactWinnerSlot = (uint8_t)slot;
 				exactAcceptedMask |= 1u << slot;
 				++exactAcceptedCount;
+				if constexpr (APD)
+					if (apdActive)
+						exactWinningAPDComponents = candidateAPDComponents;
 				for (int view = 0; view < nNumViews; ++view)
 					exactWinningViewCosts[view] = costVector[view];
 			}
@@ -1556,12 +2109,150 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 						 PM_SOURCE_REFINE_SURFACE_NORMAL;
 #endif
 		}
+		}
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	const float apdWorkingWinnerCost(cost);
+	#endif
+	if constexpr (APD) {
+		if (apdActive) {
+			MultiViewScorePlane<GEOM>(
+				refCache, images, depthImages, p, plane, lowDepth, costVector);
+			const float nativeRescore(AggregateAPDViewScores(viewWeights, costVector, nNumViews));
+			cost = ResolveAPDPersistentScore(true, cost, nativeRescore).cost;
+		}
 	}
 #ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (INSTRUMENT && APD) {
+		PatchMatchAPDInstrumentUpdate apdUpdate;
+		apdUpdate.workingWinnerCost = apdWorkingWinnerCost;
+		apdUpdate.nativePersistentCost = cost;
+		apdUpdate.runnerUpWorkingCost = exactFiniteCount >= 2 &&
+			exactRunnerUpSlot != PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE ? exactRunnerUpCost : -1.f;
+		apdUpdate.winnerRunnerUpGap = apdUpdate.runnerUpWorkingCost >= 0.f ?
+			max(0.f, apdUpdate.runnerUpWorkingCost-exactBestCost) : -1.f;
+		apdUpdate.nativeMinusWorkingCost = cost-apdWorkingWinnerCost;
+		apdUpdate.nativeStoredCostBefore = instrumentStoredCostBefore;
+		apdUpdate.incumbentWorkingCost = exactIncumbentCost;
+		apdUpdate.bestAnchorWorkingCost = bestAnchorWorkingCost;
+		apdUpdate.acceptedAnchorNativeCost = acceptedAnchorNativeCost;
+		apdUpdate.fittedPlaneWorkingCost = IsFiniteCandidateCost(fittedPlaneWorkingCost) ?
+			fittedPlaneWorkingCost : -1.f;
+		apdUpdate.fittedPlaneNativeCost = fittedPlaneNativeCost;
+		apdUpdate.candidateTestedMask = exactTestedMask;
+		apdUpdate.candidateFiniteMask = exactFiniteMask;
+		apdUpdate.candidateAcceptedMask = exactAcceptedMask;
+		apdUpdate.acceptedAnchorIndex = acceptedAnchorIndex;
+		for (int view=0; view<nNumViews; ++view) {
+			if (viewWeights[view])
+				SetBit(apdUpdate.workingSelectedViews, view);
+			apdUpdate.selectedViewWeightSum = static_cast<uint8_t>(
+				min(255u, static_cast<unsigned>(apdUpdate.selectedViewWeightSum)+viewWeights[view]));
+		}
+		apdUpdate.source = static_cast<uint8_t>(updateSource);
+		apdUpdate.winnerSlot = exactWinnerSlot;
+		apdUpdate.runnerUpSlot = apdUpdate.runnerUpWorkingCost >= 0.f ?
+			exactRunnerUpSlot : PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE;
+		apdUpdate.testedCount = exactTestedCount;
+		apdUpdate.finiteCount = exactFiniteCount;
+		apdUpdate.acceptedCount = exactAcceptedCount;
+		apdUpdate.selectedViewCount = static_cast<uint8_t>(CountSelectedViews(
+			apdUpdate.workingSelectedViews));
+		apdUpdate.deformableActive = apdActive ? 1u : 0u;
+		apdUpdate.viewSelectionMode = static_cast<uint8_t>(apdViewSelectionMode);
+		apdUpdate.anchorEvidenceCount = apdActive ?
+			static_cast<uint8_t>(__popc(validAnchorMask)) : 0u;
+		apdUpdate.anchorProposalCount = anchorProposalCount;
+		apdUpdate.anchorFiniteCount = anchorFiniteCount;
+		apdUpdate.anchorAcceptedSlot = acceptedAnchorSlot;
+		apdUpdate.immutableAnchorState = apdActive ? 1u : 0u;
+		apdUpdate.updateStage = static_cast<uint8_t>(apdStage);
+		apdUpdate.fittedPlaneAvailable = fittedPlaneAvailable ? 1u : 0u;
+		apdUpdate.fittedPlaneTested = fittedPlaneAvailable ? 1u : 0u;
+		apdUpdate.fittedPlaneAccepted = fittedPlaneAcceptedEvent ? 1u : 0u;
+		if (apdActive) {
+			apdUpdate.centerCost = exactWinningAPDComponents.centerCost;
+			apdUpdate.anchorMeanCost = exactWinningAPDComponents.anchorMeanCost;
+			apdUpdate.deformablePhotometricCost =
+				exactWinningAPDComponents.deformablePhotometricCost;
+			apdUpdate.geometricCost = exactWinningAPDComponents.geometricCost;
+		}
+
+		for (int view=0; view<nNumViews; ++view) {
+			APDViewScoreComponents components;
+			if (apdActive && apdTrace)
+				ScorePlaneAPD<GEOM, true>(
+					images, depthImages, p, plane, pixelAPDAnchors,
+					pixelAPDAnchorCount, view, &components);
+			if (apdTrace) {
+				apdTrace->viewCenterCosts[view] = apdActive ? components.centerCost : -1.f;
+				apdTrace->viewAnchorMeanCosts[view] = apdActive ? components.anchorMeanCost : -1.f;
+				apdTrace->viewWorkingCosts[view] = apdActive ? components.totalCost : -1.f;
+			}
+		}
+		if (instrumentParams.apdUpdates && iter >= 0 && iter < instrumentParams.numLogicalStates-1)
+			instrumentParams.apdUpdates[(size_t)iter*instrumentParams.area+idx] = apdUpdate;
+		if (apdTrace)
+			apdTrace->update = apdUpdate;
+		if (instrumentParams.apdCounters && iter >= 0 && iter < instrumentParams.numLogicalStates-1) {
+			PatchMatchAPDInstrumentCounters& counter(instrumentParams.apdCounters[iter]);
+			if (apdUpdate.updateStage < 3u)
+				atomicAdd(&counter.stageUpdates[apdUpdate.updateStage], 1u);
+			if (apdUpdate.fittedPlaneAvailable)
+				atomicAdd(&counter.fittedPlaneAvailable, 1u);
+			if (apdUpdate.fittedPlaneTested)
+				atomicAdd(&counter.fittedPlaneTested, 1u);
+			if (apdUpdate.fittedPlaneWorkingCost >= 0.f)
+				atomicAdd(&counter.fittedPlaneFinite, 1u);
+			if (apdUpdate.fittedPlaneAccepted)
+				atomicAdd(&counter.fittedPlaneAccepted, 1u);
+			if (apdUpdate.source == PM_SOURCE_APD_FITTED_PLANE)
+				atomicAdd(&counter.fittedPlaneFinalWinners, 1u);
+			if (updateSource >= 0 && updateSource < PM_INSTRUMENT_NUM_SOURCES)
+				atomicAdd(&counter.updateSource[updateSource], 1u);
+			if (apdActive) {
+				atomicAdd(&counter.deformableUpdates, 1u);
+				atomicAdd(&counter.centerCostSum, apdUpdate.centerCost);
+				atomicAdd(&counter.anchorMeanCostSum, apdUpdate.anchorMeanCost);
+				atomicAdd(&counter.workingCostSum, apdUpdate.workingWinnerCost);
+				atomicAdd(&counter.nativePersistentCostSum, apdUpdate.nativePersistentCost);
+				if (apdUpdate.winnerRunnerUpGap >= 0.f) {
+					atomicAdd(&counter.workingGapSum, apdUpdate.winnerRunnerUpGap);
+					atomicAdd(&counter.workingGapSamples, 1u);
+				}
+				atomicAdd(&counter.anchorViewSelectionAttempted, 1u);
+				if (apdUpdate.viewSelectionMode == static_cast<uint8_t>(APDViewSelectionMode::ANCHOR_EVIDENCE))
+					atomicAdd(&counter.anchorViewSelectionUsed, 1u);
+				if (apdUpdate.viewSelectionMode < PM_APD_INSTRUMENT_VIEW_SELECTION_MODES)
+					atomicAdd(&counter.anchorViewSelectionMode[apdUpdate.viewSelectionMode], 1u);
+				atomicAdd(&counter.anchorProposalsTested,
+					static_cast<uint32_t>(apdUpdate.anchorProposalCount));
+				atomicAdd(&counter.anchorProposalsFinite,
+					static_cast<uint32_t>(apdUpdate.anchorFiniteCount));
+				atomicAdd(&counter.immutableAnchorStateUpdates,
+					static_cast<uint32_t>(apdUpdate.immutableAnchorState));
+				if (apdUpdate.anchorAcceptedSlot != PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE)
+					atomicAdd(&counter.anchorProposalsAccepted, 1u);
+				if (apdUpdate.source == PM_SOURCE_APD_ANCHOR_PROPAGATE)
+					atomicAdd(&counter.anchorPropagationFinalWinners, 1u);
+				if (apdUpdate.bestAnchorWorkingCost >= 0.f) {
+					atomicAdd(&counter.bestAnchorWorkingCostSum, apdUpdate.bestAnchorWorkingCost);
+					atomicAdd(&counter.bestAnchorWorkingCostSamples, 1u);
+				}
+				if (apdUpdate.acceptedAnchorNativeCost >= 0.f) {
+					atomicAdd(&counter.acceptedAnchorNativeCostSum, apdUpdate.acceptedAnchorNativeCost);
+					atomicAdd(&counter.acceptedAnchorNativeCostSamples, 1u);
+				}
+			}
+		}
+	}
 	if constexpr (INSTRUMENT) {
 		const float confidenceGap = exactFiniteCount >= 2 && exactRunnerUpSlot != PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE ?
 			max(0.f, exactRunnerUpCost-exactBestCost) : -1.f;
-		const float viewEntropy = ComputeViewEntropy(viewWeights, nNumViews, (float)NUM_SAMPLES);
+		unsigned selectedWeightSum(0u);
+		for (int view=0; view<nNumViews; ++view)
+			selectedWeightSum += viewWeights[view];
+		const float viewEntropy = ComputeViewEntropy(
+			viewWeights, nNumViews, static_cast<float>(selectedWeightSum));
 		PatchMatchInstrumentCostComponents exactComponents(WriteExactIterationViews<GEOM>(
 			refCache, images, depthImages, p, plane, lowDepth, &costArray[0][0], validNeighbors,
 			viewSelectionPriors, samplingProbs, viewWeights, exactWinningViewCosts,
@@ -1614,10 +2305,11 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 
 // compute the score of the current plane estimate
 #ifdef _USE_DMAP_INSTRUMENTATION
-template <bool GEOM, bool INSTRUMENT>
+template <bool GEOM, bool INSTRUMENT, bool APD>
 __device__ void InitializePixelScore(
 	const ImagePixels *images, const ImagePixels* depthImages,
 	Point4* planes, const float* lowDepths, float* costs, RandState* randStates, unsigned* selectedViews,
+	uint8_t* apdViewWeights,
 	uint8_t* updateSources,
 	PatchMatchInstrumentCounters* instrumentCounters,
 	PatchMatchInstrumentTraceRecord* instrumentTraceRecords,
@@ -1625,8 +2317,11 @@ __device__ void InitializePixelScore(
 	const PatchMatchInstrumentKernelParams& instrumentParams,
 	const Point2i& p)
 #else
-template <bool GEOM>
-__device__ void InitializePixelScore(const ImagePixels *images, const ImagePixels* depthImages, Point4* planes, const float* lowDepths, float* costs, RandState* randStates, unsigned* selectedViews, const Point2i& p)
+template <bool GEOM, bool APD>
+__device__ void InitializePixelScore(
+	const ImagePixels *images, const ImagePixels* depthImages,
+	Point4* planes, const float* lowDepths, float* costs, RandState* randStates,
+	unsigned* selectedViews, uint8_t* apdViewWeights, const Point2i& p)
 #endif
 {
 	const int width = g_cameras[0].size.x();
@@ -1671,6 +2366,14 @@ __device__ void InitializePixelScore(const ImagePixels *images, const ImagePixel
 		if (costVector[imgId] <= costThreshold)
 			SetBit(selectedView, imgId);
 	costs[idx] = cost / nInitTopK;
+	if constexpr (APD) {
+		if (apdViewWeights) {
+			uint8_t* pixelViewWeights(apdViewWeights+(size_t)idx*MAX_VIEWS);
+			for (int view=0; view<MAX_VIEWS; ++view)
+				pixelViewWeights[view] = view < nNumViews &&
+					APDCostRank(costVector, view, nNumViews) < static_cast<unsigned>(nInitTopK) ? 1u : 0u;
+		}
+	}
 #ifdef _USE_DMAP_INSTRUMENTATION
 	if constexpr (INSTRUMENT) {
 		unsigned contributionWeights[MAX_VIEWS] = {};
@@ -1729,12 +2432,13 @@ __global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void InitializeScore(const cudaTextureOb
 	const Point2i p = GetThreadIndex2();
 #ifdef _USE_DMAP_INSTRUMENTATION
 	const PatchMatchInstrumentKernelParams instrumentParams;
-	InitializePixelScore<GEOM, false>(
+	InitializePixelScore<GEOM, false, false>(
 		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
 		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		nullptr,
 		nullptr, nullptr, nullptr, nullptr, instrumentParams, p);
 #else
-	InitializePixelScore<GEOM>((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, planes, lowDepths, costs, (RandState*)randStates, selectedViews, p);
+	InitializePixelScore<GEOM, false>((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, planes, lowDepths, costs, (RandState*)randStates, selectedViews, nullptr, p);
 #endif
 }
 
@@ -1746,12 +2450,14 @@ __global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void BlackPixelProcess(const cudaTexture
 	p.y() = p.y() * 2 + (threadIdx.x % 2 == 0 ? 0 : 1);
 #ifdef _USE_DMAP_INSTRUMENTATION
 	const PatchMatchInstrumentKernelParams instrumentParams;
-	ProcessPixel<GEOM, false>(
+	ProcessPixel<GEOM, false, false>(
 		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
 		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+		APDUpdateStage::ALL,
 		nullptr, nullptr, nullptr, nullptr, instrumentParams, p, iter);
 #else
-	ProcessPixel<GEOM>((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, planes, lowDepths, costs, (RandState*)randStates, selectedViews, p, iter);
+	ProcessPixel<GEOM, false>((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, planes, lowDepths, costs, (RandState*)randStates, selectedViews, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, APDUpdateStage::ALL, p, iter);
 #endif
 }
 template <bool GEOM>
@@ -1761,13 +2467,965 @@ __global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void RedPixelProcess(const cudaTextureOb
 	p.y() = p.y() * 2 + (threadIdx.x % 2 == 0 ? 1 : 0);
 #ifdef _USE_DMAP_INSTRUMENTATION
 	const PatchMatchInstrumentKernelParams instrumentParams;
-	ProcessPixel<GEOM, false>(
+	ProcessPixel<GEOM, false, false>(
 		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
 		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+		APDUpdateStage::ALL,
 		nullptr, nullptr, nullptr, nullptr, instrumentParams, p, iter);
 #else
-	ProcessPixel<GEOM>((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, planes, lowDepths, costs, (RandState*)randStates, selectedViews, p, iter);
+	ProcessPixel<GEOM, false>((const ImagePixels*)textureImages, (const ImagePixels*)textureDepths, planes, lowDepths, costs, (RandState*)randStates, selectedViews, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, APDUpdateStage::ALL, p, iter);
 #endif
+}
+
+template <bool GEOM>
+__global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void InitializeScoreAPD(
+	const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths,
+	Point4* planes, const float* lowDepths, float* costs, curandState* randStates,
+	unsigned* selectedViews, uint8_t* apdViewWeights)
+{
+	const Point2i p(GetThreadIndex2());
+#ifdef _USE_DMAP_INSTRUMENTATION
+	const PatchMatchInstrumentKernelParams instrumentParams;
+	InitializePixelScore<GEOM, false, true>(
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		planes, lowDepths, costs, (RandState*)randStates, selectedViews, apdViewWeights,
+		nullptr, nullptr, nullptr, nullptr, instrumentParams, p);
+#else
+	InitializePixelScore<GEOM, true>(
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		planes, lowDepths, costs, (RandState*)randStates, selectedViews, apdViewWeights, p);
+#endif
+}
+
+template <bool GEOM>
+__global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void BlackPixelProcessAPD(
+	const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths,
+	Point4* planes, const float* lowDepths, float* costs, curandState* randStates,
+	unsigned* selectedViews, const uint8_t* apdReliability, const uint32_t* apdAnchors,
+	const uint8_t* apdAnchorCounts, const Point4* apdPlanesSnapshot,
+	const unsigned* apdSelectedViewsSnapshot, const Point4* apdFittedPlanes,
+	const uint8_t* apdFittedPlaneValid, uint8_t* apdViewWeights,
+	APDUpdateStage apdStage, const int iter)
+{
+	Point2i p(GetThreadIndex2());
+	p.y() = p.y()*2+(threadIdx.x%2 == 0 ? 0 : 1);
+#ifdef _USE_DMAP_INSTRUMENTATION
+	const PatchMatchInstrumentKernelParams instrumentParams;
+	ProcessPixel<GEOM, false, true>(
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		apdReliability, apdAnchors, apdAnchorCounts, apdPlanesSnapshot,
+		apdSelectedViewsSnapshot, apdFittedPlanes, apdFittedPlaneValid, apdViewWeights,
+		apdStage,
+		nullptr, nullptr, nullptr, nullptr, instrumentParams, p, iter);
+#else
+	ProcessPixel<GEOM, true>(
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		apdReliability, apdAnchors, apdAnchorCounts, apdPlanesSnapshot,
+		apdSelectedViewsSnapshot, apdFittedPlanes, apdFittedPlaneValid, apdViewWeights,
+		apdStage, p, iter);
+#endif
+}
+
+template <bool GEOM>
+__global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void RedPixelProcessAPD(
+	const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths,
+	Point4* planes, const float* lowDepths, float* costs, curandState* randStates,
+	unsigned* selectedViews, const uint8_t* apdReliability, const uint32_t* apdAnchors,
+	const uint8_t* apdAnchorCounts, const Point4* apdPlanesSnapshot,
+	const unsigned* apdSelectedViewsSnapshot, const Point4* apdFittedPlanes,
+	const uint8_t* apdFittedPlaneValid, uint8_t* apdViewWeights,
+	APDUpdateStage apdStage, const int iter)
+{
+	Point2i p(GetThreadIndex2());
+	p.y() = p.y()*2+(threadIdx.x%2 == 0 ? 1 : 0);
+#ifdef _USE_DMAP_INSTRUMENTATION
+	const PatchMatchInstrumentKernelParams instrumentParams;
+	ProcessPixel<GEOM, false, true>(
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		apdReliability, apdAnchors, apdAnchorCounts, apdPlanesSnapshot,
+		apdSelectedViewsSnapshot, apdFittedPlanes, apdFittedPlaneValid, apdViewWeights,
+		apdStage,
+		nullptr, nullptr, nullptr, nullptr, instrumentParams, p, iter);
+#else
+	ProcessPixel<GEOM, true>(
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		apdReliability, apdAnchors, apdAnchorCounts, apdPlanesSnapshot,
+		apdSelectedViewsSnapshot, apdFittedPlanes, apdFittedPlaneValid, apdViewWeights,
+		apdStage, p, iter);
+#endif
+}
+
+#ifdef _USE_DMAP_INSTRUMENTATION
+template <bool GEOM>
+__global__ PATCHMATCHCUDA_INSTRUMENT_LAUNCH_BOUNDS void InitializeScoreAPDInstrumented(
+	const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths,
+	Point4* planes, const float* lowDepths, float* costs, curandState* randStates,
+	unsigned* selectedViews, uint8_t* apdViewWeights,
+	uint8_t* updateSources,
+	PatchMatchInstrumentCounters* instrumentCounters,
+	PatchMatchInstrumentTraceRecord* instrumentTraceRecords,
+	const int32_t* instrumentTraceMap,
+	PatchMatchInstrumentKernelParams instrumentParams)
+{
+	const Point2i p(GetThreadIndex2());
+	InitializePixelScore<GEOM, true, true>(
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		planes, lowDepths, costs, (RandState*)randStates, selectedViews, apdViewWeights,
+		updateSources, instrumentCounters, instrumentTraceRecords, instrumentTraceMap,
+		instrumentParams, p);
+}
+
+template <bool GEOM>
+__global__ PATCHMATCHCUDA_INSTRUMENT_LAUNCH_BOUNDS void BlackPixelProcessAPDInstrumented(
+	const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths,
+	Point4* planes, const float* lowDepths, float* costs, curandState* randStates,
+	unsigned* selectedViews, const uint8_t* apdReliability, const uint32_t* apdAnchors,
+	const uint8_t* apdAnchorCounts, const Point4* apdPlanesSnapshot,
+	const unsigned* apdSelectedViewsSnapshot, const Point4* apdFittedPlanes,
+	const uint8_t* apdFittedPlaneValid, uint8_t* apdViewWeights, APDUpdateStage apdStage,
+	uint8_t* updateSources,
+	PatchMatchInstrumentCounters* instrumentCounters,
+	PatchMatchInstrumentTraceRecord* instrumentTraceRecords,
+	const int32_t* instrumentTraceMap,
+	PatchMatchInstrumentKernelParams instrumentParams,
+	const int iter)
+{
+	Point2i p(GetThreadIndex2());
+	p.y() = p.y()*2+(threadIdx.x%2 == 0 ? 0 : 1);
+	ProcessPixel<GEOM, true, true>(
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		apdReliability, apdAnchors, apdAnchorCounts, apdPlanesSnapshot,
+		apdSelectedViewsSnapshot, apdFittedPlanes, apdFittedPlaneValid, apdViewWeights,
+		apdStage,
+		updateSources, instrumentCounters, instrumentTraceRecords, instrumentTraceMap,
+		instrumentParams, p, iter);
+}
+
+template <bool GEOM>
+__global__ PATCHMATCHCUDA_INSTRUMENT_LAUNCH_BOUNDS void RedPixelProcessAPDInstrumented(
+	const cudaTextureObject_t* textureImages, const cudaTextureObject_t* textureDepths,
+	Point4* planes, const float* lowDepths, float* costs, curandState* randStates,
+	unsigned* selectedViews, const uint8_t* apdReliability, const uint32_t* apdAnchors,
+	const uint8_t* apdAnchorCounts, const Point4* apdPlanesSnapshot,
+	const unsigned* apdSelectedViewsSnapshot, const Point4* apdFittedPlanes,
+	const uint8_t* apdFittedPlaneValid, uint8_t* apdViewWeights, APDUpdateStage apdStage,
+	uint8_t* updateSources,
+	PatchMatchInstrumentCounters* instrumentCounters,
+	PatchMatchInstrumentTraceRecord* instrumentTraceRecords,
+	const int32_t* instrumentTraceMap,
+	PatchMatchInstrumentKernelParams instrumentParams,
+	const int iter)
+{
+	Point2i p(GetThreadIndex2());
+	p.y() = p.y()*2+(threadIdx.x%2 == 0 ? 1 : 0);
+	ProcessPixel<GEOM, true, true>(
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		apdReliability, apdAnchors, apdAnchorCounts, apdPlanesSnapshot,
+		apdSelectedViewsSnapshot, apdFittedPlanes, apdFittedPlaneValid, apdViewWeights,
+		apdStage,
+		updateSources, instrumentCounters, instrumentTraceRecords, instrumentTraceMap,
+		instrumentParams, p, iter);
+}
+#endif
+
+#ifdef _USE_DMAP_INSTRUMENTATION
+__device__ inline void CaptureAPDProfileInstrumentation(
+	const Point2i& p,
+	const int pixelIndex,
+	const unsigned logicalIteration,
+	const unsigned eta,
+	const float averageBaseline,
+	const float currentDisparity,
+	const APDProfileSummary& summary,
+	const float* profile,
+	const uint8_t* viewWeights,
+	PatchMatchAPDInstrumentCounters* counters,
+	PatchMatchAPDInstrumentState* states,
+	PatchMatchAPDInstrumentTrace* traces,
+	const int32_t* traceMap,
+	const PatchMatchInstrumentKernelParams& params)
+{
+	if (logicalIteration >= static_cast<unsigned>(max(params.numLogicalStates-1, 0)) ||
+		params.area <= 0)
+		return;
+	PatchMatchAPDInstrumentState state;
+	state.averageBaseline = averageBaseline;
+	state.currentDisparity = currentDisparity;
+	state.globalMinimumCost = summary.globalMinimumIndex < APD_PROFILE_SIZE ?
+		summary.globalMinimumCost : -1.f;
+	state.separation = summary.localMinimumCount > 1u ? summary.separation : -1.f;
+	state.globalMinimumOffset = static_cast<int16_t>(summary.globalMinimumOffset);
+	state.reliability = static_cast<uint8_t>(summary.reliability);
+	state.profileReason = static_cast<uint8_t>(summary.reason);
+	state.eta = static_cast<uint8_t>(min(eta, 255u));
+	state.finiteCount = static_cast<uint8_t>(min(summary.finiteCount, 255u));
+	state.localMinimumCount = static_cast<uint8_t>(min(summary.localMinimumCount, 255u));
+	state.globalMinimumPlateauStart = static_cast<uint8_t>(
+		min(summary.globalMinimumPlateauStart, 255u));
+	state.globalMinimumPlateauEnd = static_cast<uint8_t>(
+		min(summary.globalMinimumPlateauEnd, 255u));
+	const size_t stateIndex((size_t)logicalIteration*params.area+pixelIndex);
+	if (states)
+		states[stateIndex] = state;
+	if (counters) {
+		PatchMatchAPDInstrumentCounters& counter(counters[logicalIteration]);
+		atomicAdd(&counter.classified, 1u);
+		if (state.reliability < 3u)
+			atomicAdd(&counter.reliability[state.reliability], 1u);
+		if (state.profileReason < PM_APD_INSTRUMENT_PROFILE_REASONS)
+			atomicAdd(&counter.profileReason[state.profileReason], 1u);
+		if (state.globalMinimumCost >= 0.f) {
+			atomicAdd(&counter.globalMinimumCostSum, state.globalMinimumCost);
+			atomicAdd(&counter.globalMinimumCostSamples, 1u);
+		}
+		if (state.separation >= 0.f) {
+			atomicAdd(&counter.separationSum, state.separation);
+			atomicAdd(&counter.separationSamples, 1u);
+		}
+	}
+	if (!traces || !traceMap || params.numTracePixels <= 0)
+		return;
+	const int traceIndex(traceMap[pixelIndex]);
+	if (traceIndex < 0 || traceIndex >= params.numTracePixels)
+		return;
+	PatchMatchAPDInstrumentTrace& trace(
+		traces[(size_t)logicalIteration*params.numTracePixels+traceIndex]);
+	trace.valid = 1;
+	trace.imageID = params.imageID;
+	trace.scaleNumber = params.scaleNumber;
+	trace.logicalIteration = static_cast<int32_t>(logicalIteration);
+	trace.x = p.x();
+	trace.y = p.y();
+	trace.state = state;
+	for (unsigned sample=0; sample<APD_PROFILE_SIZE; ++sample)
+		trace.profile[sample] = profile ? profile[sample] : -1.f;
+	for (int view=0; view<PM_INSTRUMENT_MAX_VIEWS; ++view) {
+		trace.viewWeights[view] = viewWeights && view < g_params.nNumViews ? viewWeights[view] : 0u;
+		trace.viewCenterCosts[view] = -1.f;
+		trace.viewAnchorMeanCosts[view] = -1.f;
+		trace.viewWorkingCosts[view] = -1.f;
+		trace.viewSelectionPriors[view] = -1.f;
+		trace.viewSamplingScores[view] = -1.f;
+		trace.viewSamplingProbabilities[view] = -1.f;
+	}
+	for (int sector=0; sector<PM_APD_INSTRUMENT_SECTORS; ++sector)
+		trace.sectorCandidates[sector] = ~uint32_t(0);
+	for (int slot=0; slot<PM_APD_INSTRUMENT_ANCHORS; ++slot) {
+		trace.anchors[slot] = ~uint32_t(0);
+		trace.anchorResiduals[slot] = -1.f;
+		trace.anchorCandidateWorkingCosts[slot] = -1.f;
+		trace.anchorCandidateNativeCosts[slot] = -1.f;
+		trace.anchorSelectedViews[slot] = 0u;
+		trace.anchorCandidateValid[slot] = 0u;
+	}
+}
+#endif
+
+// Native PatchMatch retains only the final selected-view mask. Expanding it to
+// uniform weights preserves the native DMAP while providing a deterministic
+// compatibility input for the APD reliability profile; these are not the
+// historical Monte-Carlo weights used by the official APD strong kernel.
+__global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void SeedAPDViewWeightsFromSelectedViews(
+	const unsigned* selectedViews,
+	uint8_t* apdViewWeights)
+{
+	const Point2i p(GetThreadIndex2());
+	const int width(g_cameras[0].size.x());
+	const int height(g_cameras[0].size.y());
+	if (p.x() >= width || p.y() >= height)
+		return;
+	const int idx(Point2Idx(p, width));
+	const unsigned selectedMask(selectedViews[idx]);
+	uint8_t* pixelViewWeights(apdViewWeights+(size_t)idx*MAX_VIEWS);
+	for (int view=0; view<MAX_VIEWS; ++view)
+		pixelViewWeights[view] = view < g_params.nNumViews && IsBitSet(selectedMask, view) ? 1u : 0u;
+}
+
+template <bool GEOM, bool INSTRUMENT = false>
+__global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void ClassifyAPDProfiles(
+	const cudaTextureObject_t* textureImages,
+	const cudaTextureObject_t* textureDepths,
+	const Point4* planes,
+	const float* lowDepths,
+	const uint8_t* apdViewWeights,
+	uint8_t* reliability,
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	PatchMatchAPDInstrumentCounters* instrumentCounters,
+	PatchMatchAPDInstrumentState* instrumentStates,
+	PatchMatchAPDInstrumentTrace* instrumentTraces,
+	const int32_t* instrumentTraceMap,
+	const PatchMatchInstrumentKernelParams instrumentParams,
+	#endif
+	const unsigned eta,
+	const unsigned logicalIteration)
+{
+	const Point2i p(GetThreadIndex2());
+	const int width(g_cameras[0].size.x());
+	const int height(g_cameras[0].size.y());
+	if (p.x() >= width || p.y() >= height)
+		return;
+	const int idx(Point2Idx(p, width));
+	reliability[idx] = static_cast<uint8_t>(APDReliabilityClass::UNKNOWN);
+	APDProfileSummary summary;
+	const Point4 plane(LoadPlaneLDG(&planes[idx]));
+	if (!(plane.w() > 0.f) || !isfinite(plane.w()) || !apdViewWeights) {
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT)
+			CaptureAPDProfileInstrumentation(p, idx, logicalIteration, eta, 0.f, 0.f,
+				summary, nullptr, nullptr, instrumentCounters, instrumentStates,
+				instrumentTraces, instrumentTraceMap, instrumentParams);
+		#endif
+		return;
+	}
+	const uint8_t* pixelViewWeights(apdViewWeights+(size_t)idx*MAX_VIEWS);
+	float baselineSum(0.f);
+	unsigned baselineCount(0u);
+	for (int view=0; view<g_params.nNumViews; ++view) {
+		if (!pixelViewWeights[view])
+			continue;
+		const Point3 delta(g_cameras[0].pose.C-g_cameras[view+1].pose.C);
+		baselineSum += delta.norm();
+		++baselineCount;
+	}
+	if (baselineCount == 0u) {
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT)
+			CaptureAPDProfileInstrumentation(p, idx, logicalIteration, eta, 0.f, 0.f,
+				summary, nullptr, pixelViewWeights, instrumentCounters, instrumentStates,
+				instrumentTraces, instrumentTraceMap, instrumentParams);
+		#endif
+		return;
+	}
+	const float averageBaseline(baselineSum/static_cast<float>(baselineCount));
+	const float focalLength(g_cameras[0].model.f.x());
+	const float currentDisparity(focalLength*averageBaseline/plane.w());
+	if (!(averageBaseline > 0.f) || !(focalLength > 0.f) ||
+		!(currentDisparity > 0.f) || !isfinite(currentDisparity)) {
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT)
+			CaptureAPDProfileInstrumentation(p, idx, logicalIteration, eta,
+				averageBaseline, currentDisparity, summary, nullptr, pixelViewWeights,
+				instrumentCounters, instrumentStates, instrumentTraces,
+				instrumentTraceMap, instrumentParams);
+		#endif
+		return;
+	}
+	float lowDepth(0.f);
+	if (g_params.bLowResProcessed)
+		lowDepth = lowDepths[idx];
+	RefPatchCache refCache;
+	ComputeRefPatchCache((ImagePixels)textureImages[0], p, refCache);
+	float profile[APD_PROFILE_SIZE];
+	for (int offset=-static_cast<int>(APD_PROFILE_RADIUS);
+		offset<=static_cast<int>(APD_PROFILE_RADIUS); ++offset)
+	{
+		const unsigned profileIndex(static_cast<unsigned>(
+			offset+static_cast<int>(APD_PROFILE_RADIUS)));
+		const float disparity(currentDisparity+static_cast<float>(offset));
+		if (!(disparity > 0.f)) {
+			profile[profileIndex] = fBadCost;
+			continue;
+		}
+		const float depth(focalLength*averageBaseline/disparity);
+		if (!(depth >= g_params.fDepthMin && depth <= g_params.fDepthMax) || !isfinite(depth)) {
+			profile[profileIndex] = fBadCost;
+			continue;
+		}
+		Point4 hypothesis(plane);
+		hypothesis.w() = depth;
+		float viewCosts[MAX_VIEWS];
+		MultiViewScorePlane<GEOM>(refCache,
+			(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+			p, hypothesis, lowDepth, viewCosts);
+		APDWeightedCostAccumulator aggregate;
+		for (int view=0; view<g_params.nNumViews; ++view)
+			AccumulateAPDViewCost(
+				aggregate, pixelViewWeights[view] != 0u,
+				static_cast<float>(pixelViewWeights[view]), viewCosts[view],
+				GEOM ? APD_MAX_NCC_COST+0.4f : APD_MAX_NCC_COST);
+		profile[profileIndex] = min(APD_MAX_NCC_COST, FinishAPDViewCost(aggregate));
+	}
+	summary = SummarizeAPDProfile(
+		profile, APD_PROFILE_SIZE, eta, APDSeparationConvention::PAPER);
+	reliability[idx] = static_cast<uint8_t>(summary.reliability);
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (INSTRUMENT)
+		CaptureAPDProfileInstrumentation(p, idx, logicalIteration, eta,
+			averageBaseline, currentDisparity, summary, profile, pixelViewWeights,
+			instrumentCounters, instrumentStates, instrumentTraces,
+			instrumentTraceMap, instrumentParams);
+	#endif
+}
+
+__global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void FindAPDNearestReliableRows(
+	const uint8_t* reliability,
+	float* rowSquaredDistances,
+	int* rowNearestX,
+	const int width,
+	const int height)
+{
+	const Point2i p(GetThreadIndex2());
+	if (p.x() >= width || p.y() >= height)
+		return;
+	const int idx(Point2Idx(p, width));
+	float bestDistance(FLT_MAX);
+	int bestX(-1);
+	const int begin(max(0, p.x()-APD_NEAREST_SEARCH_RADIUS));
+	const int end(min(width-1, p.x()+APD_NEAREST_SEARCH_RADIUS));
+	for (int x=begin; x<=end; ++x) {
+		if (reliability[Point2Idx(Point2i(x, p.y()), width)] !=
+			static_cast<uint8_t>(APDReliabilityClass::RELIABLE))
+			continue;
+		const float distance(static_cast<float>((x-p.x())*(x-p.x())));
+		if (distance < bestDistance || (distance == bestDistance && x < bestX)) {
+			bestDistance = distance;
+			bestX = x;
+		}
+	}
+	rowSquaredDistances[idx] = bestDistance;
+	rowNearestX[idx] = bestX;
+}
+
+__global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void FindAPDNearestReliableColumns(
+	const float* rowSquaredDistances,
+	const int* rowNearestX,
+	uint32_t* nearestReliable,
+	const int width,
+	const int height)
+{
+	const Point2i p(GetThreadIndex2());
+	if (p.x() >= width || p.y() >= height)
+		return;
+	const int idx(Point2Idx(p, width));
+	float bestDistance(FLT_MAX);
+	uint32_t bestIndex(~uint32_t(0));
+	const int begin(max(0, p.y()-APD_NEAREST_SEARCH_RADIUS));
+	const int end(min(height-1, p.y()+APD_NEAREST_SEARCH_RADIUS));
+	for (int y=begin; y<=end; ++y) {
+		const int rowIndex(Point2Idx(Point2i(p.x(), y), width));
+		const int nearestX(rowNearestX[rowIndex]);
+		if (nearestX < 0)
+			continue;
+		const float dy(static_cast<float>(y-p.y()));
+		const float distance(rowSquaredDistances[rowIndex]+dy*dy);
+		const uint32_t candidate(static_cast<uint32_t>(Point2Idx(Point2i(nearestX, y), width)));
+		if (distance < bestDistance || (distance == bestDistance && candidate < bestIndex)) {
+			bestDistance = distance;
+			bestIndex = candidate;
+		}
+	}
+	nearestReliable[idx] = bestIndex;
+}
+
+__device__ inline APDPoint3 APDCameraPoint(const Point2i& pixel, const float depth)
+{
+	const Point3 point(g_cameras[0].TransformPointI2W(pixel.cast<float>(), depth));
+	return APDPoint3{point.x(), point.y(), point.z()};
+}
+
+#ifdef _USE_DMAP_INSTRUMENTATION
+__device__ inline void CaptureAPDAnchorInstrumentation(
+	const Point2i& p,
+	const int pixelIndex,
+	const int width,
+	const unsigned logicalIteration,
+	const uint32_t nearestReliable,
+	const PatchMatchAPDInstrumentAnchorReason reason,
+	const unsigned candidateCount,
+	const APDModelQuality& quality,
+	const float threshold,
+	const unsigned anchorCount,
+	const uint32_t* sectorCandidates,
+	const uint32_t* anchors,
+	const float* anchorResiduals,
+	const Point4* fittedPlanes,
+	const uint8_t* fittedPlaneValid,
+	PatchMatchAPDInstrumentCounters* counters,
+	PatchMatchAPDInstrumentState* states,
+	PatchMatchAPDInstrumentTrace* traces,
+	const int32_t* traceMap,
+	const PatchMatchInstrumentKernelParams& params)
+{
+	if (logicalIteration >= static_cast<unsigned>(max(params.numLogicalStates-1, 0)) ||
+		params.area <= 0)
+		return;
+	const size_t stateIndex((size_t)logicalIteration*params.area+pixelIndex);
+	const int traceIndex(traceMap && params.numTracePixels > 0 ? traceMap[pixelIndex] : -1);
+	PatchMatchAPDInstrumentTrace* trace(
+		traces && traceIndex >= 0 && traceIndex < params.numTracePixels ?
+		&traces[(size_t)logicalIteration*params.numTracePixels+traceIndex] : nullptr);
+	PatchMatchAPDInstrumentState state(states ? states[stateIndex] :
+		(trace ? trace->state : PatchMatchAPDInstrumentState{}));
+	state.nearestReliable = nearestReliable;
+	if (nearestReliable < static_cast<uint32_t>(params.area)) {
+		const int nearestX(static_cast<int>(nearestReliable%static_cast<uint32_t>(width)));
+		const int nearestY(static_cast<int>(nearestReliable/static_cast<uint32_t>(width)));
+		const float dx(static_cast<float>(nearestX-p.x()));
+		const float dy(static_cast<float>(nearestY-p.y()));
+		state.nearestReliableDistance = sqrtf(dx*dx+dy*dy);
+	}
+	state.ransacThreshold = threshold;
+	state.ransacCenterResidual = quality.valid ? quality.centerResidual : -1.f;
+	state.ransacMeanInlierResidual = quality.valid ? quality.meanInlierResidual : -1.f;
+	state.ransacSamplePacked = quality.valid ?
+		(quality.sample.first | (quality.sample.second << 8) | (quality.sample.third << 16)) :
+		~uint32_t(0);
+	state.candidateCount = static_cast<uint8_t>(min(candidateCount, 255u));
+	state.inlierCount = static_cast<uint8_t>(min(quality.inlierCount, 255u));
+	state.outlierCount = static_cast<uint8_t>(min(quality.outlierCount, 255u));
+	state.anchorCount = static_cast<uint8_t>(min(anchorCount, APD_MAX_ANCHORS));
+	state.anchorReason = static_cast<uint8_t>(reason);
+	state.ransacValid = quality.valid ? 1u : 0u;
+	state.deformableEligible = anchorCount >= APD_MIN_INLIERS ? 1u : 0u;
+	state.fittedPlaneValid = fittedPlaneValid && fittedPlaneValid[pixelIndex] ? 1u : 0u;
+	state.fittedPlaneDepth = state.fittedPlaneValid && fittedPlanes ?
+		fittedPlanes[pixelIndex].w() : -1.f;
+	if (states)
+		states[stateIndex] = state;
+	if (trace) {
+		trace->state = state;
+		for (unsigned sector=0; sector<APD_SECTOR_COUNT; ++sector)
+			trace->sectorCandidates[sector] = sectorCandidates ?
+				sectorCandidates[sector] : ~uint32_t(0);
+		for (unsigned slot=0; slot<APD_MAX_ANCHORS; ++slot) {
+			trace->anchors[slot] = anchors ? anchors[slot] : ~uint32_t(0);
+			trace->anchorResiduals[slot] = anchorResiduals ? anchorResiduals[slot] : -1.f;
+		}
+	}
+	if (counters) {
+		PatchMatchAPDInstrumentCounters& counter(counters[logicalIteration]);
+		if (state.anchorReason < PM_APD_INSTRUMENT_ANCHOR_REASONS)
+			atomicAdd(&counter.anchorReason[state.anchorReason], 1u);
+		atomicAdd(&counter.anchorCountBins[min(anchorCount, APD_MAX_ANCHORS)], 1u);
+		atomicAdd(&counter.anchorCountSum, static_cast<float>(anchorCount));
+		if (quality.valid)
+			atomicAdd(&counter.ransacValid, 1u);
+		if (state.deformableEligible)
+			atomicAdd(&counter.deformableEligible, 1u);
+	}
+}
+#endif
+
+template <bool INSTRUMENT = false>
+__global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void BuildAPDAnchors(
+	const Point4* planes,
+	const uint8_t* reliability,
+	const uint32_t* nearestReliable,
+	uint32_t* anchors,
+	uint8_t* anchorCounts,
+	Point4* fittedPlanes,
+	uint8_t* fittedPlaneValid,
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	PatchMatchAPDInstrumentCounters* instrumentCounters,
+	PatchMatchAPDInstrumentState* instrumentStates,
+	PatchMatchAPDInstrumentTrace* instrumentTraces,
+	const int32_t* instrumentTraceMap,
+	const PatchMatchInstrumentKernelParams instrumentParams,
+	#endif
+	const float ransacThreshold,
+	const uint32_t stageSeed,
+	const unsigned logicalIteration)
+{
+	const Point2i p(GetThreadIndex2());
+	const int width(g_cameras[0].size.x());
+	const int height(g_cameras[0].size.y());
+	if (p.x() >= width || p.y() >= height)
+		return;
+	const int idx(Point2Idx(p, width));
+	uint32_t* pixelAnchors(anchors+(size_t)idx*APD_MAX_ANCHORS);
+	for (unsigned slot=0; slot<APD_MAX_ANCHORS; ++slot)
+		pixelAnchors[slot] = ~uint32_t(0);
+	anchorCounts[idx] = 0u;
+	if (fittedPlanes)
+		fittedPlanes[idx] = Point4::Zero();
+	if (fittedPlaneValid)
+		fittedPlaneValid[idx] = 0u;
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	uint32_t instrumentSectorCandidates[APD_SECTOR_COUNT];
+	float instrumentAnchorResiduals[APD_MAX_ANCHORS];
+	if constexpr (INSTRUMENT) {
+		for (unsigned sector=0; sector<APD_SECTOR_COUNT; ++sector)
+			instrumentSectorCandidates[sector] = ~uint32_t(0);
+		for (unsigned slot=0; slot<APD_MAX_ANCHORS; ++slot)
+			instrumentAnchorResiduals[slot] = -1.f;
+	}
+	#endif
+	if (reliability[idx] != static_cast<uint8_t>(APDReliabilityClass::UNRELIABLE)) {
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT) {
+			const APDModelQuality quality;
+			CaptureAPDAnchorInstrumentation(p, idx, width, logicalIteration,
+				nearestReliable[idx], PM_APD_ANCHOR_PIXEL_NOT_UNRELIABLE, 0u, quality,
+				-1.f, 0u, instrumentSectorCandidates, pixelAnchors,
+				instrumentAnchorResiduals, fittedPlanes, fittedPlaneValid,
+				instrumentCounters, instrumentStates,
+				instrumentTraces, instrumentTraceMap, instrumentParams);
+		}
+		#endif
+		return;
+	}
+	if (!(planes[idx].w() > 0.f)) {
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT) {
+			const APDModelQuality quality;
+			CaptureAPDAnchorInstrumentation(p, idx, width, logicalIteration,
+				nearestReliable[idx], PM_APD_ANCHOR_INVALID_CENTER_DEPTH, 0u, quality,
+				-1.f, 0u, instrumentSectorCandidates, pixelAnchors,
+				instrumentAnchorResiduals, fittedPlanes, fittedPlaneValid,
+				instrumentCounters, instrumentStates,
+				instrumentTraces, instrumentTraceMap, instrumentParams);
+		}
+		#endif
+		return;
+	}
+	uint32_t candidates[APD_SECTOR_COUNT];
+	APDPoint2 candidatePixels[APD_SECTOR_COUNT];
+	APDPoint3 candidatePoints[APD_SECTOR_COUNT];
+	APDPoint3 candidateCameraPoints[APD_SECTOR_COUNT];
+	unsigned candidateCount(0u);
+	const int maximumRadius(max(width, height)*2);
+	for (unsigned sector=0; sector<APD_SECTOR_COUNT; ++sector) {
+		uint32_t selected(~uint32_t(0));
+		for (int radius=2; radius<=maximumRadius && selected == ~uint32_t(0);
+			radius=min(radius*2, radius+25))
+		{
+			for (unsigned attempt=0; attempt<APD_SPOKE_ATTEMPTS_PER_RADIUS; ++attempt) {
+				const uint32_t randomBits(APDHash(
+					static_cast<uint32_t>(idx) ^ APDHash(stageSeed) ^
+					APDHash(sector*131u+attempt*17u+static_cast<unsigned>(radius))));
+				const float unitOffset(static_cast<float>(randomBits&0x00FFFFFFu)/16777216.f);
+				const APDSectorDirection direction(MakeAPDSectorDirection(
+					sector, APD_SECTOR_COUNT, unitOffset));
+				const int queryX(__float2int_rn(static_cast<float>(p.x())+direction.x*radius));
+				const int queryY(__float2int_rn(static_cast<float>(p.y())+direction.y*radius));
+				if (queryX < 0 || queryY < 0 || queryX >= width || queryY >= height)
+					continue;
+				const uint32_t candidate(nearestReliable[Point2Idx(Point2i(queryX, queryY), width)]);
+				if (candidate == ~uint32_t(0) || candidate >= static_cast<uint32_t>(width*height) ||
+					reliability[candidate] != static_cast<uint8_t>(APDReliabilityClass::RELIABLE) ||
+					!(planes[candidate].w() > 0.f))
+					continue;
+				const Point2i candidatePixel(
+					static_cast<int>(candidate%static_cast<uint32_t>(width)),
+					static_cast<int>(candidate/static_cast<uint32_t>(width)));
+				if (APDSectorForDirection(
+					static_cast<float>(candidatePixel.x()-p.x()),
+					static_cast<float>(candidatePixel.y()-p.y()), APD_SECTOR_COUNT) != sector)
+					continue;
+				bool duplicate(false);
+				for (unsigned existing=0; existing<candidateCount; ++existing)
+					duplicate = duplicate || candidates[existing] == candidate;
+				if (duplicate)
+					continue;
+				selected = candidate;
+				break;
+			}
+		}
+		if (selected == ~uint32_t(0))
+			continue;
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT)
+			instrumentSectorCandidates[sector] = selected;
+		#endif
+		const Point2i candidatePixel(
+			static_cast<int>(selected%static_cast<uint32_t>(width)),
+			static_cast<int>(selected/static_cast<uint32_t>(width)));
+		candidates[candidateCount] = selected;
+		candidatePixels[candidateCount] = APDPoint2{
+			static_cast<float>(candidatePixel.x()), static_cast<float>(candidatePixel.y())};
+		candidatePoints[candidateCount] = APDCameraPoint(candidatePixel, planes[selected].w());
+		const Point3 cameraPoint(g_cameras[0].model.TransformPointI2C(
+			candidatePixel.cast<float>(), planes[selected].w()));
+		candidateCameraPoints[candidateCount] = APDPoint3{
+			cameraPoint.x(), cameraPoint.y(), cameraPoint.z()};
+		++candidateCount;
+	}
+	if (candidateCount < APD_MIN_INLIERS) {
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT) {
+			const APDModelQuality quality;
+			CaptureAPDAnchorInstrumentation(p, idx, width, logicalIteration,
+				nearestReliable[idx], PM_APD_ANCHOR_INSUFFICIENT_SECTOR_CANDIDATES,
+				candidateCount, quality, -1.f, 0u, instrumentSectorCandidates,
+				pixelAnchors, instrumentAnchorResiduals, fittedPlanes, fittedPlaneValid,
+				instrumentCounters,
+				instrumentStates, instrumentTraces, instrumentTraceMap, instrumentParams);
+		}
+		#endif
+		return;
+	}
+	const APDPoint2 centerPixel{static_cast<float>(p.x()), static_cast<float>(p.y())};
+	const APDPoint3 centerPoint(APDCameraPoint(p, planes[idx].w()));
+	const float depthRange(g_params.fDepthMax-g_params.fDepthMin);
+	const float threshold(ransacThreshold);
+	APDModelQuality bestQuality;
+	APDPlane bestModel;
+	for (unsigned trial=0; trial<APD_RANSAC_TRIALS; ++trial) {
+		const APDRansacTriplet sample(MakeAPDRansacTriplet(
+			static_cast<uint32_t>(idx), stageSeed, trial, candidateCount));
+		if (!sample.valid || !APDTriangleContainsPoint(
+			candidatePixels[sample.first], candidatePixels[sample.second],
+			candidatePixels[sample.third], centerPixel))
+			continue;
+		APDPlane model;
+		if (!FitAPDPlane(candidatePoints[sample.first], candidatePoints[sample.second],
+			candidatePoints[sample.third], model))
+			continue;
+		unsigned inlierCount(0u);
+		float residualSum(0.f);
+		for (unsigned candidate=0; candidate<candidateCount; ++candidate) {
+			const float residual(APDNormalizedPlaneResidual(
+				model, candidatePoints[candidate], depthRange));
+			if (residual < threshold) {
+				++inlierCount;
+				residualSum += residual;
+			}
+		}
+		const float centerResidual(APDNormalizedPlaneResidual(model, centerPoint, depthRange));
+		const APDModelQuality quality(MakeAPDModelQuality(
+			candidateCount, inlierCount, true, centerResidual,
+			inlierCount > 0u ? residualSum/static_cast<float>(inlierCount) : FLT_MAX, sample));
+		if (PreferAPDModel(quality, bestQuality)) {
+			bestQuality = quality;
+			bestModel = model;
+		}
+	}
+	if (!bestQuality.valid) {
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT)
+			CaptureAPDAnchorInstrumentation(p, idx, width, logicalIteration,
+				nearestReliable[idx], PM_APD_ANCHOR_NO_VALID_RANSAC_MODEL,
+				candidateCount, bestQuality, threshold, 0u, instrumentSectorCandidates,
+				pixelAnchors, instrumentAnchorResiduals, fittedPlanes, fittedPlaneValid,
+				instrumentCounters,
+				instrumentStates, instrumentTraces, instrumentTraceMap, instrumentParams);
+		#endif
+		return;
+	}
+	bool chosen[APD_SECTOR_COUNT] = {};
+	unsigned outputCount(0u);
+	for (unsigned slot=0; slot<APD_MAX_ANCHORS; ++slot) {
+		APDAnchorRank bestRank;
+		unsigned bestCandidate(APD_SECTOR_COUNT);
+		for (unsigned candidate=0; candidate<candidateCount; ++candidate) {
+			if (chosen[candidate])
+				continue;
+			const float residual(APDNormalizedPlaneResidual(
+				bestModel, candidatePoints[candidate], depthRange));
+			const APDAnchorRank rank{residual < threshold, residual, candidate};
+			if (PreferAPDAnchor(rank, bestRank)) {
+				bestRank = rank;
+				bestCandidate = candidate;
+			}
+		}
+		if (bestCandidate >= candidateCount || !bestRank.inlier)
+			break;
+		chosen[bestCandidate] = true;
+		pixelAnchors[outputCount++] = candidates[bestCandidate];
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT)
+			instrumentAnchorResiduals[outputCount-1u] = bestRank.normalizedPlaneResidual;
+		#endif
+	}
+	anchorCounts[idx] = static_cast<uint8_t>(outputCount);
+	if (outputCount >= APD_MIN_INLIERS && fittedPlanes && fittedPlaneValid) {
+		APDPlane cameraModel;
+		const APDRansacTriplet& sample(bestQuality.sample);
+		if (FitAPDPlane(candidateCameraPoints[sample.first],
+				candidateCameraPoints[sample.second], candidateCameraPoints[sample.third],
+				cameraModel))
+		{
+			Point3 normal(cameraModel.x, cameraModel.y, cameraModel.z);
+			if (normal.dot(g_cameras[0].model.ViewDirection(p)) >= 0.f) {
+				normal = -normal;
+				cameraModel.x = -cameraModel.x;
+				cameraModel.y = -cameraModel.y;
+				cameraModel.z = -cameraModel.z;
+				cameraModel.w = -cameraModel.w;
+			}
+			const Point3 ray(g_cameras[0].model.TransformPointI2C(p.cast<float>(), 1.f));
+			float fittedDepth(0.f);
+			if (APDPlaneDepthAtRay(cameraModel,
+					APDPoint3{ray.x(), ray.y(), ray.z()}, g_params.fDepthMin,
+					g_params.fDepthMax, fittedDepth))
+			{
+				fittedPlanes[idx].topLeftCorner<3,1>() = normal;
+				fittedPlanes[idx].w() = fittedDepth;
+				fittedPlaneValid[idx] = 1u;
+			}
+		}
+	}
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (INSTRUMENT)
+		CaptureAPDAnchorInstrumentation(p, idx, width, logicalIteration,
+			nearestReliable[idx], outputCount >= APD_MIN_INLIERS ?
+				PM_APD_ANCHOR_READY : PM_APD_ANCHOR_INSUFFICIENT_MODEL_INLIERS,
+			candidateCount, bestQuality, threshold, outputCount, instrumentSectorCandidates,
+			pixelAnchors, instrumentAnchorResiduals, fittedPlanes, fittedPlaneValid,
+			instrumentCounters,
+			instrumentStates, instrumentTraces, instrumentTraceMap, instrumentParams);
+	#endif
+}
+
+template <bool GEOM, bool INSTRUMENT = false>
+__global__ PATCHMATCHCUDA_LAUNCH_BOUNDS void FinalRefineAPD(
+	const cudaTextureObject_t* textureImages,
+	const cudaTextureObject_t* textureDepths,
+	Point4* planes,
+	const float* lowDepths,
+	float* costs,
+	const unsigned* selectedViews,
+	const uint8_t* apdViewWeights
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	, uint8_t* updateSources,
+	PatchMatchInstrumentCounters* instrumentCounters,
+	const int32_t* instrumentTraceMap,
+	PatchMatchInstrumentKernelParams instrumentParams
+	#endif
+)
+{
+	const Point2i p(GetThreadIndex2());
+	const int width(g_cameras[0].size.x());
+	const int height(g_cameras[0].size.y());
+	if (p.x() >= width || p.y() >= height)
+		return;
+	const int idx(Point2Idx(p, width));
+	Point4 plane(LoadPlaneLDG(&planes[idx]));
+	if (!(plane.w() > 0.f) || !isfinite(plane.w()) || !apdViewWeights)
+		return;
+	const int numViews(g_params.nNumViews);
+	const uint8_t* storedWeights(apdViewWeights+(size_t)idx*MAX_VIEWS);
+	unsigned viewWeights[MAX_VIEWS] = {};
+	unsigned weightSum(0u);
+	float baselineSum(0.f);
+	unsigned baselineCount(0u);
+	for (int view=0; view<numViews; ++view) {
+		viewWeights[view] = storedWeights[view];
+		if (!viewWeights[view] && IsBitSet(selectedViews[idx], view))
+			viewWeights[view] = 1u;
+		weightSum += viewWeights[view];
+		if (viewWeights[view]) {
+			const Point3 delta(g_cameras[0].pose.C-g_cameras[view+1].pose.C);
+			baselineSum += delta.norm();
+			++baselineCount;
+		}
+	}
+	if (weightSum == 0u || baselineCount == 0u)
+		return;
+	const float averageBaseline(baselineSum/static_cast<float>(baselineCount));
+	const float focalLength(g_cameras[0].model.f.x());
+	const float disparity(focalLength*averageBaseline/plane.w());
+	if (!(averageBaseline > 0.f) || !(focalLength > 0.f) || !(disparity > 0.f) ||
+		!isfinite(disparity))
+		return;
+	float lowDepth(0.f);
+	if (g_params.bLowResProcessed)
+		lowDepth = lowDepths[idx];
+	RefPatchCache refCache;
+	ComputeRefPatchCache((ImagePixels)textureImages[0], p, refCache);
+	float incumbentViewCosts[MAX_VIEWS];
+	MultiViewScorePlane<GEOM>(refCache,
+		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+		p, plane, lowDepth, incumbentViewCosts);
+	const float incumbentCost(AggregateAPDViewScores(
+		viewWeights, incumbentViewCosts, numViews));
+	float bestCost(incumbentCost);
+	float bestDepth(plane.w());
+	int bestOffset(0);
+	unsigned tested(0u);
+	unsigned finite(0u);
+	for (int offset=-APD_FINAL_REFINEMENT_RADIUS;
+		offset<=APD_FINAL_REFINEMENT_RADIUS; ++offset)
+	{
+		const float candidateDisparity(disparity+static_cast<float>(offset));
+		if (!(candidateDisparity > 0.f))
+			continue;
+		const float candidateDepth(focalLength*averageBaseline/candidateDisparity);
+		if (!(candidateDepth >= g_params.fDepthMin && candidateDepth <= g_params.fDepthMax) ||
+			!isfinite(candidateDepth))
+			continue;
+		++tested;
+		Point4 candidate(plane);
+		candidate.w() = candidateDepth;
+		float candidateViewCosts[MAX_VIEWS];
+		MultiViewScorePlane<GEOM>(refCache,
+			(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
+			p, candidate, lowDepth, candidateViewCosts);
+		const float candidateCost(AggregateAPDViewScores(
+			viewWeights, candidateViewCosts, numViews));
+		const bool candidateFinite(
+			candidateCost >= 0.f && candidateCost <= APD_MAX_NCC_COST && isfinite(candidateCost));
+		if (candidateFinite)
+			++finite;
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		if constexpr (INSTRUMENT)
+			InstrumentCandidate(instrumentCounters, instrumentParams,
+				PM_CANDIDATE_APD_FINAL_REFINEMENT, candidateCost, false);
+		#endif
+		if (candidateFinite && candidateCost < bestCost) {
+			bestCost = candidateCost;
+			bestDepth = candidateDepth;
+			bestOffset = offset;
+		}
+	}
+	const APDFinalRefinementDecision decision(ResolveAPDFinalRefinement(
+		plane.w(), incumbentCost, bestDepth, bestCost, bestOffset));
+	if (decision.accepted) {
+		plane.w() = decision.depth;
+		planes[idx] = plane;
+		costs[idx] = decision.cost;
+	}
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	if constexpr (INSTRUMENT) {
+		PatchMatchAPDInstrumentUpdate* updateRecord(nullptr);
+		if (decision.accepted && instrumentCounters && instrumentParams.passIndex >= 0)
+			atomicAdd(&instrumentCounters[instrumentParams.passIndex].candidateAccepted[
+				PM_CANDIDATE_APD_FINAL_REFINEMENT], 1u);
+		const int logicalIteration(max(g_params.nEstimationIters-1, 0));
+		if (instrumentParams.apdUpdates && instrumentParams.area > 0) {
+			PatchMatchAPDInstrumentUpdate& update(
+				instrumentParams.apdUpdates[(size_t)logicalIteration*instrumentParams.area+idx]);
+			updateRecord = &update;
+			update.finalRefinementIncumbentCost = incumbentCost;
+			update.finalRefinementBestCost = decision.valid ? decision.cost : -1.f;
+			update.finalRefinementImprovement = decision.valid ? decision.improvement : -1.f;
+			update.finalRefinementDepth = decision.valid ? decision.depth : -1.f;
+			update.finalRefinementOffset = static_cast<int8_t>(decision.offset);
+			update.finalRefinementTested = static_cast<uint8_t>(min(tested, 255u));
+			update.finalRefinementFinite = static_cast<uint8_t>(min(finite, 255u));
+			update.finalRefinementAccepted = decision.accepted ? 1u : 0u;
+		}
+		if (instrumentParams.apdCounters && logicalIteration < instrumentParams.numLogicalStates-1) {
+			PatchMatchAPDInstrumentCounters& counter(
+				instrumentParams.apdCounters[logicalIteration]);
+			atomicAdd(&counter.finalRefinementPixels, 1u);
+			atomicAdd(&counter.finalRefinementCandidatesTested, tested);
+			atomicAdd(&counter.finalRefinementCandidatesFinite, finite);
+			if (decision.accepted)
+				atomicAdd(&counter.finalRefinementAccepted, 1u);
+		}
+		if (decision.accepted) {
+			if (updateSources)
+				updateSources[idx] = PM_SOURCE_APD_FINAL_REFINEMENT;
+		}
+		if (updateRecord && instrumentParams.apdTraces && instrumentTraceMap &&
+			instrumentParams.numTracePixels > 0)
+		{
+			const int traceIndex(instrumentTraceMap[idx]);
+			if (traceIndex >= 0 && traceIndex < instrumentParams.numTracePixels)
+				instrumentParams.apdTraces[
+					(size_t)logicalIteration*instrumentParams.numTracePixels+traceIndex].update =
+					*updateRecord;
+		}
+	}
+	#endif
 }
 
 #ifdef _USE_DMAP_INSTRUMENTATION
@@ -1784,9 +3442,10 @@ __global__ PATCHMATCHCUDA_INSTRUMENT_LAUNCH_BOUNDS void InitializeScoreInstrumen
 	PatchMatchInstrumentKernelParams instrumentParams)
 {
 	const Point2i p = GetThreadIndex2();
-	InitializePixelScore<GEOM, true>(
+	InitializePixelScore<GEOM, true, false>(
 		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
 		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		nullptr,
 		updateSources, instrumentCounters, instrumentTraceRecords, instrumentTraceMap, instrumentParams, p);
 }
 
@@ -1803,9 +3462,11 @@ __global__ PATCHMATCHCUDA_INSTRUMENT_LAUNCH_BOUNDS void BlackPixelProcessInstrum
 {
 	Point2i p = GetThreadIndex2();
 	p.y() = p.y() * 2 + (threadIdx.x % 2 == 0 ? 0 : 1);
-	ProcessPixel<GEOM, true>(
+	ProcessPixel<GEOM, true, false>(
 		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
 		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+		APDUpdateStage::ALL,
 		updateSources, instrumentCounters, instrumentTraceRecords, instrumentTraceMap, instrumentParams, p, iter);
 }
 
@@ -1822,9 +3483,11 @@ __global__ PATCHMATCHCUDA_INSTRUMENT_LAUNCH_BOUNDS void RedPixelProcessInstrumen
 {
 	Point2i p = GetThreadIndex2();
 	p.y() = p.y() * 2 + (threadIdx.x % 2 == 0 ? 1 : 0);
-	ProcessPixel<GEOM, true>(
+	ProcessPixel<GEOM, true, false>(
 		(const ImagePixels*)textureImages, (const ImagePixels*)textureDepths,
 		planes, lowDepths, costs, (RandState*)randStates, selectedViews,
+		nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+		APDUpdateStage::ALL,
 		updateSources, instrumentCounters, instrumentTraceRecords, instrumentTraceMap, instrumentParams, p, iter);
 }
 
@@ -1865,13 +3528,18 @@ __global__ PATCHMATCHCUDA_INSTRUMENT_LAUNCH_BOUNDS void InstrumentPassState(
 	if (p.x() >= width || p.y() >= height)
 		return;
 	const int idx = Point2Idx(p, width);
-	const Point4 before = planesBefore[idx];
 	const Point4 after = planes[idx];
+	Point4 before(after);
+	float costBefore(costs[idx]);
+	unsigned viewsBefore(0u);
+	if (instrumentParams.passIndex > 0) {
+		before = planesBefore[idx];
+		costBefore = costsBefore[idx];
+		viewsBefore = selectedViewsBefore[idx];
+	}
 	const float depthBefore = instrumentParams.passIndex == 0 ? after.w() : before.w();
 	const float depthAfter = after.w();
-	const float costBefore = instrumentParams.passIndex == 0 ? costs[idx] : costsBefore[idx];
 	const float costAfter = costs[idx];
-	const unsigned viewsBefore = instrumentParams.passIndex == 0 ? 0u : selectedViewsBefore[idx];
 	const unsigned viewsAfter = selectedViews[idx];
 	const float depthAbsChange = instrumentParams.passIndex > 0 && depthBefore > 0.f && depthAfter > 0.f ? fabsf(depthAfter-depthBefore) : 0.f;
 	const float depthRelChange = depthBefore > 0.f ? depthAbsChange / max(depthBefore, FLT_EPSILON) : 0.f;
@@ -2036,14 +3704,83 @@ __host__ void PatchMatch::UploadParams()
 	CUDA_CHECK(cudaMemcpyToSymbolAsync(g_params, &params, sizeof(Params), 0, cudaMemcpyHostToDevice, cudaStream));
 }
 
+struct APDDeviceBuffers {
+	uint8_t* reliability = nullptr;
+	uint8_t* transferredReliability = nullptr;
+	uint8_t* viewWeights = nullptr;
+	uint32_t* anchors = nullptr;
+	uint8_t* anchorCounts = nullptr;
+	Point4* planesSnapshot = nullptr;
+	uint32_t* selectedViewsSnapshot = nullptr;
+	Point4* fittedPlanes = nullptr;
+	uint8_t* fittedPlaneValid = nullptr;
+	float* rowSquaredDistances = nullptr;
+	int* rowNearestX = nullptr;
+	uint32_t* nearestReliable = nullptr;
+};
+
+__host__ inline void AllocateAPDDeviceBuffers(
+	APDDeviceBuffers& buffers,
+	const size_t area,
+	cudaStream_t stream)
+{
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.reliability, sizeof(uint8_t)*area, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.transferredReliability, sizeof(uint8_t)*area, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.viewWeights, sizeof(uint8_t)*area*MAX_VIEWS, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.anchors, sizeof(uint32_t)*area*APD_MAX_ANCHORS, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.anchorCounts, sizeof(uint8_t)*area, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.planesSnapshot, sizeof(Point4)*area, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.selectedViewsSnapshot, sizeof(uint32_t)*area, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.fittedPlanes, sizeof(Point4)*area, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.fittedPlaneValid, sizeof(uint8_t)*area, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.rowSquaredDistances, sizeof(float)*area, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.rowNearestX, sizeof(int)*area, stream));
+	CUDA_CHECK(cudaMallocAsync((void**)&buffers.nearestReliable, sizeof(uint32_t)*area, stream));
+}
+
+__host__ inline void ReleaseAPDDeviceBuffers(
+	APDDeviceBuffers& buffers,
+	cudaStream_t stream)
+{
+	CUDA_CHECK(cudaFreeAsync(buffers.reliability, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.transferredReliability, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.viewWeights, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.anchors, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.anchorCounts, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.planesSnapshot, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.selectedViewsSnapshot, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.fittedPlanes, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.fittedPlaneValid, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.rowSquaredDistances, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.rowNearestX, stream));
+	CUDA_CHECK(cudaFreeAsync(buffers.nearestReliable, stream));
+	buffers = APDDeviceBuffers{};
+}
+
 #ifdef _USE_DMAP_INSTRUMENTATION
-__host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint8_t* ptrUpdateSources, PatchMatchInstrumentDeviceContext* instrument)
+__host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap,
+	uint8_t* ptrUpdateSources, PatchMatchInstrumentDeviceContext* instrument,
+	const PatchMatchAPDMultiscaleIO* apdMultiscaleIO)
 {
 	const unsigned width = cameras[0].size.x();
 	const unsigned height = cameras[0].size.y();
+	const bool apdRequested(params.nAPDMode == static_cast<unsigned>(APDMode::DEFORMABLE_COST));
+	ASSERT(params.nAPDMode <= static_cast<unsigned>(APDMode::DEFORMABLE_COST));
+	APDStageClock apdClock;
+	apdClock.levelIndex = params.nAPDLevelIndex;
+	apdClock.levelCount = params.nAPDLevelCount;
+	apdClock.stageIndex = params.nAPDStageIndex;
+	apdClock.hasTransferredState = params.bAPDTransferredState;
+	apdClock.geometricConsistency = params.bGeomConsistency;
+	const APDStageSchedule apdSchedule(ResolveAPDStageSchedule(apdClock));
+	ASSERT(!apdRequested || apdSchedule.valid);
+	const bool apdEnabled(apdRequested && !apdSchedule.conventional);
+	ASSERT(!apdEnabled || (apdMultiscaleIO && apdMultiscaleIO->transferredReliability));
 	const int numPasses = 1 + params.nEstimationIters * 2;
 	const bool instrumentEnabled = instrument && instrument->counters;
-	const bool exactEnabled = instrumentEnabled && instrument->exact;
+	const bool exactEnabled = instrumentEnabled && instrument->exact && !apdRequested;
+	const bool apdInstrumentEnabled = apdEnabled && instrumentEnabled && instrument->apdCounters;
+	const bool exactHotKernelCounters = exactEnabled || apdInstrumentEnabled;
 	const bool sampledEnabled = instrumentEnabled && instrument->sampled && instrument->traceRecords && instrument->traceMap && instrument->numTracePixels > 0;
 	const bool timingEnabled = instrumentEnabled && instrument->kernelTimingsMs;
 	size_t previousStackSize = 0;
@@ -2060,12 +3797,22 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint
 	}
 	std::vector<cudaEvent_t> timingStart;
 	std::vector<cudaEvent_t> timingStop;
+	std::vector<cudaEvent_t> apdLateTimingStart;
+	std::vector<cudaEvent_t> apdLateTimingStop;
 	if (timingEnabled) {
 		timingStart.resize((size_t)numPasses, nullptr);
 		timingStop.resize((size_t)numPasses, nullptr);
+		if (apdEnabled) {
+			apdLateTimingStart.resize((size_t)numPasses, nullptr);
+			apdLateTimingStop.resize((size_t)numPasses, nullptr);
+		}
 		for (int pass = 0; pass < numPasses; ++pass) {
 			CUDA_CHECK(cudaEventCreate(&timingStart[(size_t)pass]));
 			CUDA_CHECK(cudaEventCreate(&timingStop[(size_t)pass]));
+			if (apdEnabled && pass > 0) {
+				CUDA_CHECK(cudaEventCreate(&apdLateTimingStart[(size_t)pass]));
+				CUDA_CHECK(cudaEventCreate(&apdLateTimingStop[(size_t)pass]));
+			}
 		}
 	}
 
@@ -2076,6 +3823,19 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint
 	const dim3 blockSize(BLOCK_W, BLOCK_H, 1);
 	const dim3 gridSizeFull((width + BLOCK_W - 1) / BLOCK_W, (height + BLOCK_H - 1) / BLOCK_H, 1);
 	const dim3 gridSizeCheckerboard((width + BLOCK_W - 1) / BLOCK_W, ((height / 2) + BLOCK_H - 1) / BLOCK_H, 1);
+	APDDeviceBuffers apdBuffers;
+	if (apdRequested) {
+		AllocateAPDDeviceBuffers(apdBuffers, static_cast<size_t>(width)*height, cudaStream);
+		if (apdMultiscaleIO && apdMultiscaleIO->transferredReliability) {
+			CUDA_CHECK(cudaMemcpyAsync(apdBuffers.transferredReliability,
+				apdMultiscaleIO->transferredReliability, sizeof(uint8_t)*width*height,
+				cudaMemcpyHostToDevice, cudaStream));
+		} else {
+			CUDA_CHECK(cudaMemsetAsync(apdBuffers.transferredReliability,
+				static_cast<int>(APDReliabilityClass::UNKNOWN),
+				sizeof(uint8_t)*width*height, cudaStream));
+		}
+	}
 
 	// refresh constant-memory params for this pyramid level
 	UploadParams();
@@ -2104,7 +3864,7 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint
 			(exactEnabled && !(PROXY_ONLY)) ? ((PASS) == 0 ? 0 : (ITER) + 1) : -1, \
 			instrument && instrument->numLogicalStates > 0 ? instrument->numLogicalStates : params.nEstimationIters + 1, \
 			instrument && instrument->viewStride > 0 ? instrument->viewStride : params.nNumViews, \
-			((PROXY_ONLY) && exactEnabled) ? 1 : 0, \
+			((PROXY_ONLY) && exactHotKernelCounters) ? 1 : 0, \
 			instrument ? instrument->improvementMaps : nullptr, \
 			instrument ? instrument->passUpdateSources : nullptr, \
 			instrument ? instrument->passDepthDeltas : nullptr, \
@@ -2125,12 +3885,19 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint
 			instrument ? instrument->finalSelectedViews : nullptr, \
 			instrument ? instrument->acceptedUpdateCount : nullptr, \
 			instrument ? instrument->exactPixels : nullptr, \
-			instrument ? instrument->exactViews : nullptr \
+			instrument ? instrument->exactViews : nullptr, \
+			instrument ? instrument->apdCounters : nullptr, \
+			instrument ? instrument->apdUpdates : nullptr, \
+			instrument ? instrument->apdTraces : nullptr \
 		}
 	#define TIMING_START(PASS) \
 		if (timingEnabled) CUDA_CHECK(cudaEventRecord(timingStart[(size_t)(PASS)], cudaStream))
 	#define TIMING_STOP(PASS) \
 		if (timingEnabled) CUDA_CHECK(cudaEventRecord(timingStop[(size_t)(PASS)], cudaStream))
+	#define APD_LATE_TIMING_START(PASS) \
+		if (timingEnabled) CUDA_CHECK(cudaEventRecord(apdLateTimingStart[(size_t)(PASS)], cudaStream))
+	#define APD_LATE_TIMING_STOP(PASS) \
+		if (timingEnabled) CUDA_CHECK(cudaEventRecord(apdLateTimingStop[(size_t)(PASS)], cudaStream))
 	#define SNAPSHOT_STATE() { \
 			if (instrumentEnabled) { \
 				CUDA_CHECK(cudaMemcpyAsync(instrument->planesBeforePass, cudaDepthNormalEstimates, sizeof(Point4) * width * height, cudaMemcpyDeviceToDevice, cudaStream)); \
@@ -2149,9 +3916,20 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint
 
 	// Pure queueing path: stream ordering on cudaStream already chains kernels;
 	// caller (EstimateDepthMap) syncs the stream once before reading results.
-	SNAPSHOT_STATE();
+	// Initialization has no prior cost/view state. Snapshotting those buffers
+	// here would read them before InitializeScore defines them.
 	TIMING_START(0);
-	if (exactEnabled) {
+	if (apdInstrumentEnabled) {
+		LAUNCH_INSTRUMENT_GEOM(InitializeScoreAPDInstrumented, gridSizeFull,
+			cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+			cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, apdBuffers.viewWeights,
+			instrument->updateSources, instrument->counters, instrument->traceRecords,
+			instrument->traceMap, INSTRUMENT_PARAMS(0, 0, -1, 0));
+	} else if (apdEnabled) {
+		LAUNCH_PRODUCTION_GEOM(InitializeScoreAPD, gridSizeFull,
+			cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+			cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, apdBuffers.viewWeights);
+	} else if (exactEnabled) {
 		LAUNCH_INSTRUMENT_GEOM(InitializeScoreInstrumented, gridSizeFull, cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
 			instrument->updateSources, instrument->counters, instrument->traceRecords,
 			instrument->traceMap, INSTRUMENT_PARAMS(0, 0, -1, 0));
@@ -2165,6 +3943,162 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint
 	for (int iter = 0; iter < params.nEstimationIters; ++iter) {
 		const int blackPass = 1 + iter * 2;
 		const int redPass = blackPass + 1;
+		if (apdEnabled) {
+			if (apdInstrumentEnabled) {
+				if (params.bGeomConsistency)
+					ClassifyAPDProfiles<true, true><<<gridSizeFull, blockSize, 0, cudaStream>>>(
+						cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+						apdBuffers.viewWeights, apdBuffers.reliability, instrument->apdCounters,
+						instrument->apdStates, instrument->apdTraces, instrument->traceMap,
+						INSTRUMENT_PARAMS(blackPass, 0, iter, 0), apdSchedule.reliabilityEta,
+						static_cast<unsigned>(iter));
+				else
+					ClassifyAPDProfiles<false, true><<<gridSizeFull, blockSize, 0, cudaStream>>>(
+						cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+						apdBuffers.viewWeights, apdBuffers.reliability, instrument->apdCounters,
+						instrument->apdStates, instrument->apdTraces, instrument->traceMap,
+						INSTRUMENT_PARAMS(blackPass, 0, iter, 0), apdSchedule.reliabilityEta,
+						static_cast<unsigned>(iter));
+			} else {
+				LAUNCH_PRODUCTION_GEOM(ClassifyAPDProfiles, gridSizeFull,
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+					apdBuffers.viewWeights, apdBuffers.reliability,
+					nullptr, nullptr, nullptr, nullptr, PatchMatchInstrumentKernelParams{},
+					apdSchedule.reliabilityEta, static_cast<unsigned>(iter));
+			}
+			const uint8_t* effectiveReliability(
+				iter == 0 ? apdBuffers.transferredReliability : apdBuffers.reliability);
+			APDStageClock apdIterationClock(apdClock);
+			apdIterationClock.logicalIteration = static_cast<unsigned>(iter);
+			const uint32_t apdStageSeed(APDStageSeed(apdIterationClock));
+			// Reliable pixels update first. The later non-reliable stage consumes
+			// anchors fitted from this updated state, matching the paper schedule.
+			SNAPSHOT_STATE();
+			TIMING_START(blackPass);
+			if (apdInstrumentEnabled) {
+				LAUNCH_INSTRUMENT_GEOM(BlackPixelProcessAPDInstrumented, gridSizeCheckerboard,
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+					cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+					effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+					apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+					apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+					APDUpdateStage::RELIABLE, instrument->updateSources, instrument->counters,
+					instrument->traceRecords, instrument->traceMap,
+					INSTRUMENT_PARAMS(blackPass, 1, iter, 0), iter);
+			} else {
+				LAUNCH_PRODUCTION_GEOM(BlackPixelProcessAPD, gridSizeCheckerboard,
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+					cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+					effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+					apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+					apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+					APDUpdateStage::RELIABLE, iter);
+			}
+			TIMING_STOP(blackPass);
+
+			TIMING_START(redPass);
+			if (apdInstrumentEnabled) {
+				LAUNCH_INSTRUMENT_GEOM(RedPixelProcessAPDInstrumented, gridSizeCheckerboard,
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+					cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+					effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+					apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+					apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+					APDUpdateStage::RELIABLE, instrument->updateSources, instrument->counters,
+					instrument->traceRecords, instrument->traceMap,
+					INSTRUMENT_PARAMS(redPass, 2, iter, 0), iter);
+			} else {
+				LAUNCH_PRODUCTION_GEOM(RedPixelProcessAPD, gridSizeCheckerboard,
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+					cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+					effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+					apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+					apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+					APDUpdateStage::RELIABLE, iter);
+			}
+			TIMING_STOP(redPass);
+
+			FindAPDNearestReliableRows<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+				effectiveReliability, apdBuffers.rowSquaredDistances, apdBuffers.rowNearestX,
+				static_cast<int>(width), static_cast<int>(height));
+			FindAPDNearestReliableColumns<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+				apdBuffers.rowSquaredDistances, apdBuffers.rowNearestX, apdBuffers.nearestReliable,
+				static_cast<int>(width), static_cast<int>(height));
+			if (apdInstrumentEnabled)
+				BuildAPDAnchors<true><<<gridSizeFull, blockSize, 0, cudaStream>>>(
+					cudaDepthNormalEstimates, effectiveReliability, apdBuffers.nearestReliable,
+					apdBuffers.anchors, apdBuffers.anchorCounts, apdBuffers.fittedPlanes,
+					apdBuffers.fittedPlaneValid, instrument->apdCounters,
+					instrument->apdStates, instrument->apdTraces, instrument->traceMap,
+					INSTRUMENT_PARAMS(blackPass, 0, iter, 0),
+					apdSchedule.ransacNormalizedThreshold, apdStageSeed,
+					static_cast<unsigned>(iter));
+			else
+				BuildAPDAnchors<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+					cudaDepthNormalEstimates, effectiveReliability, apdBuffers.nearestReliable,
+					apdBuffers.anchors, apdBuffers.anchorCounts, apdBuffers.fittedPlanes,
+					apdBuffers.fittedPlaneValid,
+					nullptr, nullptr, nullptr, nullptr, PatchMatchInstrumentKernelParams{},
+					apdSchedule.ransacNormalizedThreshold, apdStageSeed,
+					static_cast<unsigned>(iter));
+			CUDA_CHECK(cudaMemcpyAsync(apdBuffers.planesSnapshot, cudaDepthNormalEstimates,
+				sizeof(Point4)*width*height, cudaMemcpyDeviceToDevice, cudaStream));
+			CUDA_CHECK(cudaMemcpyAsync(apdBuffers.selectedViewsSnapshot, cudaSelectedViews,
+				sizeof(uint32_t)*width*height, cudaMemcpyDeviceToDevice, cudaStream));
+
+			APD_LATE_TIMING_START(blackPass);
+			if (apdInstrumentEnabled) {
+				LAUNCH_INSTRUMENT_GEOM(BlackPixelProcessAPDInstrumented, gridSizeCheckerboard,
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+					cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+					effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+					apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+					apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+					APDUpdateStage::NON_RELIABLE, instrument->updateSources,
+					instrument->counters, instrument->traceRecords, instrument->traceMap,
+					INSTRUMENT_PARAMS(blackPass, 1, iter, 0), iter);
+			} else {
+				LAUNCH_PRODUCTION_GEOM(BlackPixelProcessAPD, gridSizeCheckerboard,
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+					cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+					effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+					apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+					apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+					APDUpdateStage::NON_RELIABLE, iter);
+			}
+			APD_LATE_TIMING_STOP(blackPass);
+			// The lightweight Process<false> proxy compares the immutable
+			// pre-iteration snapshot with the complete logical-iteration state.
+			// Capturing here and again after the red stage would count reliable
+			// and black-stage changes twice. Exact APD kernels already attribute
+			// their own checkerboard decisions; checkerboard exposure otherwise
+			// remains timing-only by contract.
+
+			APD_LATE_TIMING_START(redPass);
+			if (apdInstrumentEnabled) {
+				LAUNCH_INSTRUMENT_GEOM(RedPixelProcessAPDInstrumented, gridSizeCheckerboard,
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+					cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+					effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+					apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+					apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+					APDUpdateStage::NON_RELIABLE, instrument->updateSources,
+					instrument->counters, instrument->traceRecords, instrument->traceMap,
+					INSTRUMENT_PARAMS(redPass, 2, iter, 0), iter);
+			} else {
+				LAUNCH_PRODUCTION_GEOM(RedPixelProcessAPD, gridSizeCheckerboard,
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+					cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+					effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+					apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+					apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+					APDUpdateStage::NON_RELIABLE, iter);
+			}
+			APD_LATE_TIMING_STOP(redPass);
+			INSTRUMENT_STATE(redPass, 2, iter);
+			continue;
+		}
+
 		SNAPSHOT_STATE();
 		TIMING_START(blackPass);
 		if (exactEnabled) {
@@ -2190,9 +4124,37 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint
 		TIMING_STOP(redPass);
 		INSTRUMENT_STATE(redPass, 2, iter);
 	}
+	if (apdEnabled && params.nEstimationIters > 0) {
+		const int finalIteration(params.nEstimationIters-1);
+		const int finalPass(params.nEstimationIters*2);
+		if (apdInstrumentEnabled) {
+			const PatchMatchInstrumentKernelParams finalParams(
+				INSTRUMENT_PARAMS(finalPass, 2, finalIteration, 0));
+			if (params.bGeomConsistency)
+				FinalRefineAPD<true, true><<<gridSizeFull, blockSize, 0, cudaStream>>>(
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates,
+					cudaLowDepths, cudaDepthNormalCosts, cudaSelectedViews,
+					apdBuffers.viewWeights, instrument->updateSources,
+					instrument->counters, instrument->traceMap, finalParams);
+			else
+				FinalRefineAPD<false, true><<<gridSizeFull, blockSize, 0, cudaStream>>>(
+					cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates,
+					cudaLowDepths, cudaDepthNormalCosts, cudaSelectedViews,
+					apdBuffers.viewWeights, instrument->updateSources,
+					instrument->counters, instrument->traceMap, finalParams);
+		} else {
+			LAUNCH_PRODUCTION_GEOM(FinalRefineAPD, gridSizeFull,
+				cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates,
+				cudaLowDepths, cudaDepthNormalCosts, cudaSelectedViews,
+				apdBuffers.viewWeights, nullptr, nullptr, nullptr,
+				PatchMatchInstrumentKernelParams{});
+		}
+	}
 
 	#undef TIMING_START
 	#undef TIMING_STOP
+	#undef APD_LATE_TIMING_START
+	#undef APD_LATE_TIMING_STOP
 	#undef SNAPSHOT_STATE
 	#undef INSTRUMENT_STATE
 	#undef LAUNCH_PRODUCTION_GEOM
@@ -2220,11 +4182,70 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint
 			cudaSelectedViews,
 			width,
 			height);
+	if (apdRequested) {
+		ASSERT(apdMultiscaleIO && apdMultiscaleIO->outputReliability &&
+			apdMultiscaleIO->outputAnchorCounts &&
+			apdMultiscaleIO->outputDeformableEligible);
+		APDStageClock apdOutputClock(apdClock);
+		apdOutputClock.logicalIteration = static_cast<unsigned>(params.nEstimationIters);
+		const uint32_t apdOutputSeed(APDStageSeed(apdOutputClock));
+		if (!apdEnabled)
+			SeedAPDViewWeightsFromSelectedViews<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+				cudaSelectedViews, apdBuffers.viewWeights);
+		if (params.bGeomConsistency)
+			ClassifyAPDProfiles<true><<<gridSizeFull, blockSize, 0, cudaStream>>>(
+				cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+				apdBuffers.viewWeights, apdBuffers.reliability,
+				nullptr, nullptr, nullptr, nullptr, PatchMatchInstrumentKernelParams{},
+				apdSchedule.reliabilityEta,
+				static_cast<unsigned>(params.nEstimationIters));
+		else
+			ClassifyAPDProfiles<false><<<gridSizeFull, blockSize, 0, cudaStream>>>(
+				cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+				apdBuffers.viewWeights, apdBuffers.reliability,
+				nullptr, nullptr, nullptr, nullptr, PatchMatchInstrumentKernelParams{},
+				apdSchedule.reliabilityEta,
+				static_cast<unsigned>(params.nEstimationIters));
+		FindAPDNearestReliableRows<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+			apdBuffers.reliability, apdBuffers.rowSquaredDistances, apdBuffers.rowNearestX,
+			static_cast<int>(width), static_cast<int>(height));
+		FindAPDNearestReliableColumns<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+			apdBuffers.rowSquaredDistances, apdBuffers.rowNearestX,
+			apdBuffers.nearestReliable, static_cast<int>(width), static_cast<int>(height));
+		BuildAPDAnchors<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+			cudaDepthNormalEstimates, apdBuffers.reliability, apdBuffers.nearestReliable,
+			apdBuffers.anchors, apdBuffers.anchorCounts, apdBuffers.fittedPlanes,
+			apdBuffers.fittedPlaneValid,
+			nullptr, nullptr, nullptr, nullptr, PatchMatchInstrumentKernelParams{},
+			apdSchedule.ransacNormalizedThreshold, apdOutputSeed,
+			static_cast<unsigned>(params.nEstimationIters));
+		CUDA_CHECK(cudaMemcpyAsync(apdMultiscaleIO->outputReliability,
+			apdBuffers.reliability, sizeof(uint8_t)*width*height,
+			cudaMemcpyDeviceToHost, cudaStream));
+		CUDA_CHECK(cudaMemcpyAsync(apdMultiscaleIO->outputAnchorCounts,
+			apdBuffers.anchorCounts, sizeof(uint8_t)*width*height,
+			cudaMemcpyDeviceToHost, cudaStream));
+		CUDA_CHECK(cudaMemcpyAsync(apdMultiscaleIO->outputDeformableEligible,
+			apdBuffers.fittedPlaneValid, sizeof(uint8_t)*width*height,
+			cudaMemcpyDeviceToHost, cudaStream));
+		ReleaseAPDDeviceBuffers(apdBuffers, cudaStream);
+	}
 
 	if (timingEnabled) {
-		CUDA_CHECK(cudaEventSynchronize(timingStop.back()));
+		if (apdEnabled && numPasses > 1)
+			CUDA_CHECK(cudaEventSynchronize(apdLateTimingStop.back()));
+		else
+			CUDA_CHECK(cudaEventSynchronize(timingStop.back()));
 		for (int pass = 0; pass < numPasses; ++pass) {
 			CUDA_CHECK(cudaEventElapsedTime(&instrument->kernelTimingsMs[pass], timingStart[(size_t)pass], timingStop[(size_t)pass]));
+			if (apdEnabled && pass > 0) {
+				float lateMilliseconds(0.f);
+				CUDA_CHECK(cudaEventElapsedTime(&lateMilliseconds,
+					apdLateTimingStart[(size_t)pass], apdLateTimingStop[(size_t)pass]));
+				instrument->kernelTimingsMs[pass] += lateMilliseconds;
+				CUDA_CHECK(cudaEventDestroy(apdLateTimingStart[(size_t)pass]));
+				CUDA_CHECK(cudaEventDestroy(apdLateTimingStop[(size_t)pass]));
+			}
 			CUDA_CHECK(cudaEventDestroy(timingStart[(size_t)pass]));
 			CUDA_CHECK(cudaEventDestroy(timingStop[(size_t)pass]));
 		}
@@ -2243,10 +4264,23 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap, uint
 		cudaMemcpyAsync(ptrUpdateSources, instrument->updateSources, sizeof(uint8_t) * width * height, cudaMemcpyDeviceToHost, cudaStream);
 }
 #else
-__host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap)
+__host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap,
+	const PatchMatchAPDMultiscaleIO* apdMultiscaleIO)
 {
 	const unsigned width = cameras[0].size.x();
 	const unsigned height = cameras[0].size.y();
+	const bool apdRequested(params.nAPDMode == static_cast<unsigned>(APDMode::DEFORMABLE_COST));
+	ASSERT(params.nAPDMode <= static_cast<unsigned>(APDMode::DEFORMABLE_COST));
+	APDStageClock apdClock;
+	apdClock.levelIndex = params.nAPDLevelIndex;
+	apdClock.levelCount = params.nAPDLevelCount;
+	apdClock.stageIndex = params.nAPDStageIndex;
+	apdClock.hasTransferredState = params.bAPDTransferredState;
+	apdClock.geometricConsistency = params.bGeomConsistency;
+	const APDStageSchedule apdSchedule(ResolveAPDStageSchedule(apdClock));
+	ASSERT(!apdRequested || apdSchedule.valid);
+	const bool apdEnabled(apdRequested && !apdSchedule.conventional);
+	ASSERT(!apdEnabled || (apdMultiscaleIO && apdMultiscaleIO->transferredReliability));
 
 	constexpr unsigned BLOCK_W = 32;
 	// BLOCK_H is selected by PATCHMATCHCUDA_LB_256_2 (build-time toggle)
@@ -2255,6 +4289,19 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap)
 	const dim3 blockSize(BLOCK_W, BLOCK_H, 1);
 	const dim3 gridSizeFull((width + BLOCK_W - 1) / BLOCK_W, (height + BLOCK_H - 1) / BLOCK_H, 1);
 	const dim3 gridSizeCheckerboard((width + BLOCK_W - 1) / BLOCK_W, ((height / 2) + BLOCK_H - 1) / BLOCK_H, 1);
+	APDDeviceBuffers apdBuffers;
+	if (apdRequested) {
+		AllocateAPDDeviceBuffers(apdBuffers, static_cast<size_t>(width)*height, cudaStream);
+		if (apdMultiscaleIO && apdMultiscaleIO->transferredReliability) {
+			CUDA_CHECK(cudaMemcpyAsync(apdBuffers.transferredReliability,
+				apdMultiscaleIO->transferredReliability, sizeof(uint8_t)*width*height,
+				cudaMemcpyHostToDevice, cudaStream));
+		} else {
+			CUDA_CHECK(cudaMemsetAsync(apdBuffers.transferredReliability,
+				static_cast<int>(APDReliabilityClass::UNKNOWN),
+				sizeof(uint8_t)*width*height, cudaStream));
+		}
+	}
 
 	// refresh constant-memory params for this pyramid level
 	UploadParams();
@@ -2269,17 +4316,119 @@ __host__ void PatchMatch::RunCUDA(float* ptrCostMap, uint32_t* ptrViewsMap)
 
 	// Pure queueing path: stream ordering on cudaStream already chains kernels;
 	// caller (EstimateDepthMap) syncs the stream once before reading results.
-	LAUNCH_GEOM(InitializeScore, gridSizeFull, cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews);
-
-	for (int iter = 0; iter < params.nEstimationIters; ++iter) {
-		LAUNCH_GEOM(BlackPixelProcess, gridSizeCheckerboard, cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, iter);
-		LAUNCH_GEOM(RedPixelProcess, gridSizeCheckerboard, cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, iter);
+	if (apdEnabled) {
+		LAUNCH_GEOM(InitializeScoreAPD, gridSizeFull,
+			cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+			cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, apdBuffers.viewWeights);
+	} else {
+		LAUNCH_GEOM(InitializeScore, gridSizeFull, cudaTextureImages, cudaTextureDepths,
+			cudaDepthNormalEstimates, cudaLowDepths, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews);
 	}
 
-	#undef LAUNCH_GEOM
+	for (int iter = 0; iter < params.nEstimationIters; ++iter) {
+		if (apdEnabled) {
+			LAUNCH_GEOM(ClassifyAPDProfiles, gridSizeFull,
+				cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+				apdBuffers.viewWeights, apdBuffers.reliability,
+				apdSchedule.reliabilityEta, static_cast<unsigned>(iter));
+			const uint8_t* effectiveReliability(
+				iter == 0 ? apdBuffers.transferredReliability : apdBuffers.reliability);
+			APDStageClock apdIterationClock(apdClock);
+			apdIterationClock.logicalIteration = static_cast<unsigned>(iter);
+			const uint32_t apdStageSeed(APDStageSeed(apdIterationClock));
+			LAUNCH_GEOM(BlackPixelProcessAPD, gridSizeCheckerboard,
+				cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+				cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+				effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+				apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+				apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+				APDUpdateStage::RELIABLE, iter);
+			LAUNCH_GEOM(RedPixelProcessAPD, gridSizeCheckerboard,
+				cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+				cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+				effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+				apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+				apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+				APDUpdateStage::RELIABLE, iter);
+			FindAPDNearestReliableRows<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+				effectiveReliability, apdBuffers.rowSquaredDistances, apdBuffers.rowNearestX,
+				static_cast<int>(width), static_cast<int>(height));
+			FindAPDNearestReliableColumns<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+				apdBuffers.rowSquaredDistances, apdBuffers.rowNearestX, apdBuffers.nearestReliable,
+				static_cast<int>(width), static_cast<int>(height));
+			BuildAPDAnchors<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+				cudaDepthNormalEstimates, effectiveReliability, apdBuffers.nearestReliable,
+				apdBuffers.anchors, apdBuffers.anchorCounts, apdBuffers.fittedPlanes,
+				apdBuffers.fittedPlaneValid, apdSchedule.ransacNormalizedThreshold,
+				apdStageSeed, static_cast<unsigned>(iter));
+			CUDA_CHECK(cudaMemcpyAsync(apdBuffers.planesSnapshot, cudaDepthNormalEstimates,
+				sizeof(Point4)*width*height, cudaMemcpyDeviceToDevice, cudaStream));
+			CUDA_CHECK(cudaMemcpyAsync(apdBuffers.selectedViewsSnapshot, cudaSelectedViews,
+				sizeof(uint32_t)*width*height, cudaMemcpyDeviceToDevice, cudaStream));
+			LAUNCH_GEOM(BlackPixelProcessAPD, gridSizeCheckerboard,
+				cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+				cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+				effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+				apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+				apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+				APDUpdateStage::NON_RELIABLE, iter);
+			LAUNCH_GEOM(RedPixelProcessAPD, gridSizeCheckerboard,
+				cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+				cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews,
+				effectiveReliability, apdBuffers.anchors, apdBuffers.anchorCounts,
+				apdBuffers.planesSnapshot, apdBuffers.selectedViewsSnapshot,
+				apdBuffers.fittedPlanes, apdBuffers.fittedPlaneValid, apdBuffers.viewWeights,
+				APDUpdateStage::NON_RELIABLE, iter);
+		} else {
+			LAUNCH_GEOM(BlackPixelProcess, gridSizeCheckerboard, cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, iter);
+			LAUNCH_GEOM(RedPixelProcess, gridSizeCheckerboard, cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths, cudaDepthNormalCosts, cudaRandStates, cudaSelectedViews, iter);
+		}
+	}
+	if (apdEnabled && params.nEstimationIters > 0)
+		LAUNCH_GEOM(FinalRefineAPD, gridSizeFull,
+			cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates,
+			cudaLowDepths, cudaDepthNormalCosts, cudaSelectedViews, apdBuffers.viewWeights);
 
 	if (params.fThresholdKeepCost > 0)
 		FilterPlanes<<<gridSizeFull, blockSize, 0, cudaStream>>>(cudaDepthNormalEstimates, cudaDepthNormalCosts, cudaSelectedViews, width, height);
+	if (apdRequested) {
+		ASSERT(apdMultiscaleIO && apdMultiscaleIO->outputReliability &&
+			apdMultiscaleIO->outputAnchorCounts &&
+			apdMultiscaleIO->outputDeformableEligible);
+		APDStageClock apdOutputClock(apdClock);
+		apdOutputClock.logicalIteration = static_cast<unsigned>(params.nEstimationIters);
+		const uint32_t apdOutputSeed(APDStageSeed(apdOutputClock));
+		if (!apdEnabled)
+			SeedAPDViewWeightsFromSelectedViews<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+				cudaSelectedViews, apdBuffers.viewWeights);
+		LAUNCH_GEOM(ClassifyAPDProfiles, gridSizeFull,
+			cudaTextureImages, cudaTextureDepths, cudaDepthNormalEstimates, cudaLowDepths,
+			apdBuffers.viewWeights, apdBuffers.reliability,
+			apdSchedule.reliabilityEta, static_cast<unsigned>(params.nEstimationIters));
+		FindAPDNearestReliableRows<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+			apdBuffers.reliability, apdBuffers.rowSquaredDistances, apdBuffers.rowNearestX,
+			static_cast<int>(width), static_cast<int>(height));
+		FindAPDNearestReliableColumns<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+			apdBuffers.rowSquaredDistances, apdBuffers.rowNearestX,
+			apdBuffers.nearestReliable, static_cast<int>(width), static_cast<int>(height));
+		BuildAPDAnchors<<<gridSizeFull, blockSize, 0, cudaStream>>>(
+			cudaDepthNormalEstimates, apdBuffers.reliability, apdBuffers.nearestReliable,
+			apdBuffers.anchors, apdBuffers.anchorCounts, apdBuffers.fittedPlanes,
+			apdBuffers.fittedPlaneValid, apdSchedule.ransacNormalizedThreshold,
+			apdOutputSeed, static_cast<unsigned>(params.nEstimationIters));
+		CUDA_CHECK(cudaMemcpyAsync(apdMultiscaleIO->outputReliability,
+			apdBuffers.reliability, sizeof(uint8_t)*width*height,
+			cudaMemcpyDeviceToHost, cudaStream));
+		CUDA_CHECK(cudaMemcpyAsync(apdMultiscaleIO->outputAnchorCounts,
+			apdBuffers.anchorCounts, sizeof(uint8_t)*width*height,
+			cudaMemcpyDeviceToHost, cudaStream));
+		CUDA_CHECK(cudaMemcpyAsync(apdMultiscaleIO->outputDeformableEligible,
+			apdBuffers.fittedPlaneValid, sizeof(uint8_t)*width*height,
+			cudaMemcpyDeviceToHost, cudaStream));
+		ReleaseAPDDeviceBuffers(apdBuffers, cudaStream);
+	}
+
+	#undef LAUNCH_GEOM
 
 	cudaMemcpyAsync(depthNormalEstimates, cudaDepthNormalEstimates, sizeof(Point4) * width * height, cudaMemcpyDeviceToHost, cudaStream);
 	if (ptrCostMap)

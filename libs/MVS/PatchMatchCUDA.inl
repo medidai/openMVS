@@ -62,14 +62,21 @@ namespace CUDA {
 #ifdef _USE_DMAP_INSTRUMENTATION
 static constexpr int PM_INSTRUMENT_MAX_VIEWS = 32;
 static constexpr int PM_INSTRUMENT_NUM_NEIGHBORS = 8;
-static constexpr int PM_INSTRUMENT_NUM_SOURCES = 9;
+static constexpr int PM_INSTRUMENT_NUM_SOURCES = 12;
+static constexpr unsigned PM_APD_INSTRUMENT_SCHEMA_VERSION = 3u;
 static constexpr int PM_INSTRUMENT_NUM_BAD_REASONS = 6;
 static constexpr int PM_INSTRUMENT_NUM_UPDATE_BINS = 8;
-static constexpr int PM_INSTRUMENT_NUM_CANDIDATE_TYPES = 4;
+static constexpr int PM_INSTRUMENT_NUM_CANDIDATE_TYPES = 6;
 static constexpr int PM_INSTRUMENT_MAP_VIEWS = 4;
-static constexpr int PM_INSTRUMENT_EXACT_NUM_CANDIDATES = 13;
+static constexpr int PM_INSTRUMENT_EXACT_NUM_CANDIDATES = 22;
 static constexpr uint8_t PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE = 255;
 static constexpr size_t PM_INSTRUMENT_EXACT_STACK_BYTES = 4096;
+static constexpr int PM_APD_INSTRUMENT_PROFILE_SAMPLES = 61;
+static constexpr int PM_APD_INSTRUMENT_SECTORS = 32;
+static constexpr int PM_APD_INSTRUMENT_ANCHORS = 8;
+static constexpr int PM_APD_INSTRUMENT_PROFILE_REASONS = 9;
+static constexpr int PM_APD_INSTRUMENT_ANCHOR_REASONS = 7;
+static constexpr int PM_APD_INSTRUMENT_VIEW_SELECTION_MODES = 5;
 
 enum PatchMatchInstrumentExactCandidateSlot : uint8_t {
 	PM_EXACT_CANDIDATE_CURRENT = 0,
@@ -79,6 +86,9 @@ enum PatchMatchInstrumentExactCandidateSlot : uint8_t {
 	PM_EXACT_CANDIDATE_REFINE_NORMAL = 10,
 	PM_EXACT_CANDIDATE_REFINE_RANDOM_NORMAL = 11,
 	PM_EXACT_CANDIDATE_REFINE_SURFACE_NORMAL = 12,
+	PM_EXACT_CANDIDATE_APD_ANCHOR_0 = 13,
+	PM_EXACT_CANDIDATE_APD_ANCHOR_7 = 20,
+	PM_EXACT_CANDIDATE_APD_FITTED_PLANE = 21,
 };
 
 enum PatchMatchInstrumentExactViewDecision : uint8_t {
@@ -113,6 +123,8 @@ enum PatchMatchInstrumentCandidateType : uint8_t {
 	PM_CANDIDATE_PROPAGATION = 1,
 	PM_CANDIDATE_RANDOM_PERTURBATION = 2,
 	PM_CANDIDATE_REFINEMENT = 3,
+	PM_CANDIDATE_APD_FITTED_PLANE = 4,
+	PM_CANDIDATE_APD_FINAL_REFINEMENT = 5,
 };
 
 enum PatchMatchInstrumentSource : uint8_t {
@@ -125,6 +137,9 @@ enum PatchMatchInstrumentSource : uint8_t {
 	PM_SOURCE_REFINE_SURFACE_NORMAL = 6,
 	PM_SOURCE_FILTERED = 7,
 	PM_SOURCE_CHANGED_UNKNOWN = 8,
+	PM_SOURCE_APD_ANCHOR_PROPAGATE = 9,
+	PM_SOURCE_APD_FITTED_PLANE = 10,
+	PM_SOURCE_APD_FINAL_REFINEMENT = 11,
 };
 
 enum PatchMatchInstrumentBadReason : uint8_t {
@@ -134,6 +149,178 @@ enum PatchMatchInstrumentBadReason : uint8_t {
 	PM_BAD_LOW_REF_VARIANCE = 3,
 	PM_BAD_LOW_TARGET_VARIANCE = 4,
 	PM_BAD_GEOMETRIC_MISMATCH = 5,
+};
+
+enum PatchMatchAPDInstrumentAnchorReason : uint8_t {
+	PM_APD_ANCHOR_UNKNOWN = 0,
+	PM_APD_ANCHOR_PIXEL_NOT_UNRELIABLE = 1,
+	PM_APD_ANCHOR_INVALID_CENTER_DEPTH = 2,
+	PM_APD_ANCHOR_INSUFFICIENT_SECTOR_CANDIDATES = 3,
+	PM_APD_ANCHOR_NO_VALID_RANSAC_MODEL = 4,
+	PM_APD_ANCHOR_INSUFFICIENT_MODEL_INLIERS = 5,
+	PM_APD_ANCHOR_READY = 6,
+};
+
+// One exact APD mechanics record per pixel and complete logical iteration.
+// The initialization state has no APD classification or anchors and is
+// intentionally absent from this array.
+struct PatchMatchAPDInstrumentState {
+	float averageBaseline = 0.f;
+	float currentDisparity = 0.f;
+	float globalMinimumCost = -1.f;
+	float separation = -1.f;
+	float nearestReliableDistance = -1.f;
+	float ransacThreshold = -1.f;
+	float ransacCenterResidual = -1.f;
+	float ransacMeanInlierResidual = -1.f;
+	float fittedPlaneDepth = -1.f;
+	uint32_t nearestReliable = ~uint32_t(0);
+	uint32_t ransacSamplePacked = ~uint32_t(0);
+	int16_t globalMinimumOffset = 0;
+	uint8_t reliability = 0;
+	uint8_t profileReason = 0;
+	uint8_t eta = 0;
+	uint8_t finiteCount = 0;
+	uint8_t localMinimumCount = 0;
+	uint8_t globalMinimumPlateauStart = 0;
+	uint8_t globalMinimumPlateauEnd = 0;
+	uint8_t candidateCount = 0;
+	uint8_t inlierCount = 0;
+	uint8_t outlierCount = 0;
+	uint8_t anchorCount = 0;
+	uint8_t anchorReason = PM_APD_ANCHOR_UNKNOWN;
+	uint8_t ransacValid = 0;
+	uint8_t deformableEligible = 0;
+	uint8_t fittedPlaneValid = 0;
+};
+static_assert(sizeof(PatchMatchAPDInstrumentState) == 64, "APD state record schema changed");
+
+// Exact candidate-ranking and final-score decomposition for one APD pixel
+// update. Working costs rank candidates; nativePersistentCost is the value
+// actually retained by production after conventional winner rescoring.
+struct PatchMatchAPDInstrumentUpdate {
+	float workingWinnerCost = -1.f;
+	float nativePersistentCost = -1.f;
+	float runnerUpWorkingCost = -1.f;
+	float winnerRunnerUpGap = -1.f;
+	float centerCost = -1.f;
+	float anchorMeanCost = -1.f;
+	float deformablePhotometricCost = -1.f;
+	float geometricCost = -1.f;
+	float nativeMinusWorkingCost = -1.f;
+	float nativeStoredCostBefore = -1.f;
+	float incumbentWorkingCost = -1.f;
+	float bestAnchorWorkingCost = -1.f;
+	float acceptedAnchorNativeCost = -1.f;
+	float fittedPlaneWorkingCost = -1.f;
+	float fittedPlaneNativeCost = -1.f;
+	float finalRefinementIncumbentCost = -1.f;
+	float finalRefinementBestCost = -1.f;
+	float finalRefinementImprovement = -1.f;
+	float finalRefinementDepth = -1.f;
+	uint32_t candidateTestedMask = 0;
+	uint32_t candidateFiniteMask = 0;
+	uint32_t candidateAcceptedMask = 0;
+	uint32_t acceptedAnchorIndex = ~uint32_t(0);
+	uint32_t workingSelectedViews = 0;
+	uint8_t source = PM_SOURCE_NONE;
+	uint8_t winnerSlot = PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE;
+	uint8_t runnerUpSlot = PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE;
+	uint8_t testedCount = 0;
+	uint8_t finiteCount = 0;
+	uint8_t acceptedCount = 0;
+	uint8_t selectedViewCount = 0;
+	uint8_t deformableActive = 0;
+	uint8_t viewSelectionMode = 0;
+	uint8_t anchorEvidenceCount = 0;
+	uint8_t anchorProposalCount = 0;
+	uint8_t anchorFiniteCount = 0;
+	uint8_t anchorAcceptedSlot = PM_INSTRUMENT_EXACT_SLOT_UNAVAILABLE;
+	uint8_t immutableAnchorState = 0;
+	uint8_t selectedViewWeightSum = 0;
+	int8_t finalRefinementOffset = 0;
+	uint8_t updateStage = 0;
+	uint8_t fittedPlaneAvailable = 0;
+	uint8_t fittedPlaneTested = 0;
+	uint8_t fittedPlaneAccepted = 0;
+	uint8_t finalRefinementTested = 0;
+	uint8_t finalRefinementFinite = 0;
+	uint8_t finalRefinementAccepted = 0;
+};
+static_assert(sizeof(PatchMatchAPDInstrumentUpdate) == 120, "APD update record schema changed");
+
+struct PatchMatchAPDInstrumentCounters {
+	uint32_t classified = 0;
+	uint32_t reliability[3] = {};
+	uint32_t profileReason[PM_APD_INSTRUMENT_PROFILE_REASONS] = {};
+	uint32_t anchorReason[PM_APD_INSTRUMENT_ANCHOR_REASONS] = {};
+	uint32_t anchorCountBins[PM_APD_INSTRUMENT_ANCHORS + 1] = {};
+	uint32_t ransacValid = 0;
+	uint32_t deformableEligible = 0;
+	uint32_t deformableUpdates = 0;
+	uint32_t globalMinimumCostSamples = 0;
+	uint32_t separationSamples = 0;
+	uint32_t workingGapSamples = 0;
+	uint32_t updateSource[PM_INSTRUMENT_NUM_SOURCES] = {};
+	uint32_t anchorViewSelectionMode[PM_APD_INSTRUMENT_VIEW_SELECTION_MODES] = {};
+	uint32_t anchorViewSelectionAttempted = 0;
+	uint32_t anchorViewSelectionUsed = 0;
+	uint32_t anchorProposalsTested = 0;
+	uint32_t anchorProposalsFinite = 0;
+	uint32_t anchorProposalsAccepted = 0;
+	uint32_t anchorPropagationFinalWinners = 0;
+	uint32_t immutableAnchorStateUpdates = 0;
+	uint32_t bestAnchorWorkingCostSamples = 0;
+	uint32_t acceptedAnchorNativeCostSamples = 0;
+	uint32_t stageUpdates[3] = {};
+	uint32_t fittedPlaneAvailable = 0;
+	uint32_t fittedPlaneTested = 0;
+	uint32_t fittedPlaneFinite = 0;
+	uint32_t fittedPlaneAccepted = 0;
+	uint32_t fittedPlaneFinalWinners = 0;
+	uint32_t finalRefinementPixels = 0;
+	uint32_t finalRefinementCandidatesTested = 0;
+	uint32_t finalRefinementCandidatesFinite = 0;
+	uint32_t finalRefinementAccepted = 0;
+	float globalMinimumCostSum = 0.f;
+	float separationSum = 0.f;
+	float anchorCountSum = 0.f;
+	float centerCostSum = 0.f;
+	float anchorMeanCostSum = 0.f;
+	float workingCostSum = 0.f;
+	float nativePersistentCostSum = 0.f;
+	float workingGapSum = 0.f;
+	float bestAnchorWorkingCostSum = 0.f;
+	float acceptedAnchorNativeCostSum = 0.f;
+};
+
+// Targeted deep trace. Full profiles and per-sector/per-view mechanics are
+// bounded by the existing trace-pixel selection and are never allocated for
+// summary-only captures.
+struct PatchMatchAPDInstrumentTrace {
+	int32_t valid = 0;
+	int32_t imageID = -1;
+	int32_t scaleNumber = -1;
+	int32_t logicalIteration = -1;
+	int32_t x = -1;
+	int32_t y = -1;
+	PatchMatchAPDInstrumentState state;
+	PatchMatchAPDInstrumentUpdate update;
+	float profile[PM_APD_INSTRUMENT_PROFILE_SAMPLES] = {};
+	uint8_t viewWeights[PM_INSTRUMENT_MAX_VIEWS] = {};
+	uint32_t sectorCandidates[PM_APD_INSTRUMENT_SECTORS] = {};
+	uint32_t anchors[PM_APD_INSTRUMENT_ANCHORS] = {};
+	float anchorResiduals[PM_APD_INSTRUMENT_ANCHORS] = {};
+	float viewCenterCosts[PM_INSTRUMENT_MAX_VIEWS] = {};
+	float viewAnchorMeanCosts[PM_INSTRUMENT_MAX_VIEWS] = {};
+	float viewWorkingCosts[PM_INSTRUMENT_MAX_VIEWS] = {};
+	float viewSelectionPriors[PM_INSTRUMENT_MAX_VIEWS] = {};
+	float viewSamplingScores[PM_INSTRUMENT_MAX_VIEWS] = {};
+	float viewSamplingProbabilities[PM_INSTRUMENT_MAX_VIEWS] = {};
+	float anchorCandidateWorkingCosts[PM_APD_INSTRUMENT_ANCHORS] = {};
+	float anchorCandidateNativeCosts[PM_APD_INSTRUMENT_ANCHORS] = {};
+	uint32_t anchorSelectedViews[PM_APD_INSTRUMENT_ANCHORS] = {};
+	uint8_t anchorCandidateValid[PM_APD_INSTRUMENT_ANCHORS] = {};
 };
 
 struct PatchMatchInstrumentCounters {
@@ -313,6 +500,9 @@ struct PatchMatchInstrumentKernelParams {
 	uint8_t* acceptedUpdateCount = nullptr;
 	PatchMatchInstrumentExactPixel* exactPixels = nullptr;
 	PatchMatchInstrumentExactView* exactViews = nullptr;
+	PatchMatchAPDInstrumentCounters* apdCounters = nullptr;
+	PatchMatchAPDInstrumentUpdate* apdUpdates = nullptr;
+	PatchMatchAPDInstrumentTrace* apdTraces = nullptr;
 };
 
 struct PatchMatchInstrumentDeviceContext {
@@ -343,6 +533,10 @@ struct PatchMatchInstrumentDeviceContext {
 	uint8_t* acceptedUpdateCount = nullptr;
 	PatchMatchInstrumentExactPixel* exactPixels = nullptr;
 	PatchMatchInstrumentExactView* exactViews = nullptr;
+	PatchMatchAPDInstrumentCounters* apdCounters = nullptr;
+	PatchMatchAPDInstrumentState* apdStates = nullptr;
+	PatchMatchAPDInstrumentUpdate* apdUpdates = nullptr;
+	PatchMatchAPDInstrumentTrace* apdTraces = nullptr;
 	Point4* planesBeforeFilter = nullptr;
 	float* costsBeforeFilter = nullptr;
 	Point4* planesBeforePass = nullptr;
@@ -353,6 +547,7 @@ struct PatchMatchInstrumentDeviceContext {
 	int32_t imageID = -1;
 	int32_t scaleNumber = -1;
 	int32_t numLogicalStates = 0;
+	int32_t numAPDIterations = 0;
 	int32_t viewStride = 0;
 	bool sampled = false;
 	bool exact = false;
@@ -360,6 +555,16 @@ struct PatchMatchInstrumentDeviceContext {
 #endif
 
 struct ConfAdjustRequest; // ConfidenceCUDA.h (fused confidence recalibration)
+
+// Host pointers are valid for one pyramid-level RunCUDA call. Input contains
+// the version-checked nearest-neighbor transfer; outputs describe the exact
+// post-filter state that can seed the next level/stage.
+struct PatchMatchAPDMultiscaleIO {
+	const uint8_t* transferredReliability = nullptr;
+	uint8_t* outputReliability = nullptr;
+	uint8_t* outputAnchorCounts = nullptr;
+	uint8_t* outputDeformableEligible = nullptr;
+};
 
 class PatchMatch {
 public:
@@ -372,6 +577,12 @@ public:
 		bool bGeomConsistency = false;
 		bool bLowResProcessed = false;
 		float fThresholdKeepCost = 0;
+		unsigned nAPDMode = 0;
+		unsigned nAPDLevelIndex = 0;
+		unsigned nAPDLevelCount = 1;
+		unsigned nAPDStageIndex = 0;
+		unsigned nAPDTransferStatus = 0;
+		bool bAPDTransferredState = false;
 	};
 
 public:
@@ -384,11 +595,7 @@ public:
 	// pConfRequest (optional): on the last geometric-consistency iteration, run the fused GPU
 	// confidence recalibration right after the estimation kernels, reusing the device-resident
 	// reference buffers (see ConfidenceCUDA.h ConfAdjustRequest); its done/computeNS report back
-#ifdef _USE_DMAP_INSTRUMENTATION
 	void EstimateDepthMap(DepthData&, int geometricIteration=-1, ConfAdjustRequest* pConfRequest=NULL);
-#else
-	void EstimateDepthMap(DepthData&, ConfAdjustRequest* pConfRequest = NULL);
-#endif
 
 	float4 GetPlaneHypothesis(const int index);
 	float GetCost(const int index);
@@ -398,9 +605,12 @@ private:
 	void AllocatePatchMatchCUDA(const cv::Mat1f& image);
 	void AllocateImageCUDA(size_t i, const cv::Mat1f& image, bool bInitImage, bool bInitDepthMap);
 #ifdef _USE_DMAP_INSTRUMENTATION
-	void RunCUDA(float* ptrCostMap=NULL, uint32_t* ptrViewsMap=NULL, uint8_t* ptrUpdateSources=NULL, PatchMatchInstrumentDeviceContext* instrument=NULL);
+	void RunCUDA(float* ptrCostMap=NULL, uint32_t* ptrViewsMap=NULL, uint8_t* ptrUpdateSources=NULL,
+		PatchMatchInstrumentDeviceContext* instrument=NULL,
+		const PatchMatchAPDMultiscaleIO* apdMultiscaleIO=NULL);
 #else
-	void RunCUDA(float* ptrCostMap=NULL, uint32_t* ptrViewsMap=NULL);
+	void RunCUDA(float* ptrCostMap=NULL, uint32_t* ptrViewsMap=NULL,
+		const PatchMatchAPDMultiscaleIO* apdMultiscaleIO=NULL);
 #endif
 	void UploadCameras(); // upload host cameras into __constant__ g_cameras
 	void UploadParams();  // upload host params into __constant__ g_params

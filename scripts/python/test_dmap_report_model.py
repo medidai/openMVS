@@ -876,6 +876,371 @@ class DMapReportModelTests(unittest.TestCase):
             )
             self.assertFalse(check["passed"])
 
+    def test_apd_observability_loader_preserves_contract_iterations_and_traces(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "report"
+            instrumentation = root / "capture"
+            sidecars = instrumentation / "instrumentation"
+            output.mkdir()
+            sidecars.mkdir(parents=True)
+            contract = {
+                "mode": 1,
+                "mode_name": "deformable_cost",
+                "enabled": True,
+                "implementation_label": "paper_partial",
+                "implemented_through": "APD14-C2",
+                "target_label": "paper_mechanics_complete_openmvs",
+                "exact_author_code_equivalence_claimed": False,
+                "required_mechanics_not_yet_implemented": ["reliable-first scheduling"],
+            }
+            (instrumentation / "run_metadata.json").write_text(json.dumps({
+                "schema_name": "openmvs.dmap.run",
+                "schema_version": 4,
+                "cuda_patchmatch_parameters": {
+                    "adaptive_patch_deformation": contract,
+                },
+            }), encoding="utf-8")
+            (sidecars / "apd_iteration.csv").write_text(
+                "image_id,scale_number,logical_iteration,classified,reliability_reliable,"
+                "deformable_eligible,working_gap_mean,anchor_view_selection_attempted,"
+                "anchor_view_selection_used,anchor_proposals_tested,anchor_proposals_accepted\n"
+                "7,0,0,100,20,40,0.0125,40,38,320,12\n",
+                encoding="utf-8",
+            )
+            trace = {
+                "schema_name": "openmvs.dmap.apd_trace",
+                "schema_version": 2,
+                "image_id": 7,
+                "scale_number": 0,
+                "logical_iteration": 0,
+                "trace_index": 0,
+                "label": "center",
+                "x": 11,
+                "y": 13,
+                "paper_profile": {"costs": [0.5] * 61},
+                "anchor_model": {"anchor_count": 8},
+                "update": {
+                    "working_winner_cost": 0.2,
+                    "view_selection_mode": "anchor_evidence",
+                    "accepted_anchor_index": 42,
+                },
+            }
+            (sidecars / "apd_traces.jsonl").write_text(
+                json.dumps(trace) + "\n", encoding="utf-8"
+            )
+            run_scene = SimpleNamespace(
+                label="candidate [deep]", repeat=0, scene_id="scene-a",
+                estimation_stage="photometric", geometric_iteration=None,
+                capture_profile="trace", instrumentation_dir=instrumentation,
+            )
+
+            iterations, traces, sources, contracts = (
+                dmap_report_model.apd_observability_records([run_scene], output)
+            )
+
+            self.assertEqual(len(iterations), 1)
+            self.assertEqual(iterations[0]["pyramid_level"], 0)
+            self.assertEqual(iterations[0]["logical_iteration"], 0)
+            self.assertEqual(iterations[0]["anchor_view_selection_used"], 38)
+            self.assertEqual(len(traces), 1)
+            self.assertEqual(traces[0]["paper_profile"]["costs"], [0.5] * 61)
+            self.assertEqual(traces[0]["update"]["accepted_anchor_index"], 42)
+            self.assertEqual(len(contracts), 1)
+            self.assertEqual(contracts[0]["implementation_label"], "paper_partial")
+            self.assertEqual(contracts[0]["implemented_through"], "APD14-C2")
+            trace_source = next(
+                row for row in sources if row["kind"] == "targeted_trace"
+            )
+            self.assertTrue(trace_source["available"])
+            self.assertFalse(trace_source["truncated"])
+            self.assertEqual(trace_source["rows_included"], 1)
+
+    def test_apd_multiscale_loader_validates_stage_clock_and_transfer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "report"
+            instrumentation = root / "capture"
+            sidecars = instrumentation / "instrumentation"
+            output.mkdir()
+            sidecars.mkdir(parents=True)
+
+            def reliability(unknown: int, unreliable: int, reliable: int) -> dict:
+                total = unknown + unreliable + reliable
+                return {
+                    "available": total > 0,
+                    "width": 2 if total else 0,
+                    "height": 2 if total else 0,
+                    "num_pixels": total,
+                    "unknown": unknown,
+                    "unreliable": unreliable,
+                    "reliable": reliable,
+                    "invalid_code": 0,
+                    "reliable_ratio": reliable / total if total else None,
+                }
+
+            def byte_stats(nonzero: int, *, available: bool = True) -> dict:
+                return {
+                    "available": available,
+                    "width": 2 if available else 0,
+                    "height": 2 if available else 0,
+                    "num_pixels": 4 if available else 0,
+                    "nonzero": nonzero if available else 0,
+                    "nonzero_ratio": nonzero / 4 if available else None,
+                    "mean": nonzero / 4 if available else None,
+                    "maximum": 1 if nonzero else 0,
+                }
+
+            def record(*, pyramid: int, level: int, stage: int, transferred: bool) -> dict:
+                input_reliability = (
+                    reliability(1, 1, 2) if transferred else reliability(0, 0, 0)
+                )
+                input_stats = byte_stats(2) if transferred else byte_stats(0, available=False)
+                return {
+                    "schema_name": "openmvs.dmap.apd_multiscale_stage_record",
+                    "schema_version": 1,
+                    "state_schema_version": 1,
+                    "image_id": 7,
+                    "pyramid_level": pyramid,
+                    "width": 2,
+                    "height": 2,
+                    "clock": {
+                        "level_index": level,
+                        "level_count": 2,
+                        "stage_index": stage,
+                        "geometric_consistency": False,
+                        "status": "valid",
+                    },
+                    "transfer": {
+                        "status": "valid" if transferred else "unavailable_no_source",
+                        "available": transferred,
+                    },
+                    "schedule": {
+                        "valid": True,
+                        "policy": (
+                            "adaptive_patch_deformation"
+                            if transferred else "conventional_native"
+                        ),
+                        "consumes_transferred_reliability_at_iteration_zero": transferred,
+                        "reliability_eta": 4 if transferred else 6,
+                        "ransac_normalized_threshold": 0.00875,
+                    },
+                    "source_state": {
+                        "available": transferred,
+                        "version": 1 if transferred else None,
+                        "width": 1 if transferred else None,
+                        "height": 1 if transferred else None,
+                        "level_index": level - 1 if transferred else None,
+                        "stage_index": stage - 1 if transferred else None,
+                    },
+                    "input_state": {
+                        "available": transferred,
+                        "reliability": input_reliability,
+                        "anchor_count_provenance": input_stats,
+                        "deformable_eligible_provenance": input_stats,
+                    },
+                    "output_state": {
+                        "available": True,
+                        "reliability": reliability(1, 1, 2),
+                        "anchor_count_provenance": byte_stats(2),
+                        "deformable_eligible_provenance": byte_stats(1),
+                        "classifier_view_weight_source": (
+                            "final_apd_iteration_weights" if transferred
+                            else "uniform_expansion_of_native_selected_view_mask"
+                        ),
+                        "classifier_view_weight_quality": (
+                            "exact_runtime_state" if transferred
+                            else "compatibility_derived"
+                        ),
+                    },
+                }
+
+            records = [
+                record(pyramid=1, level=0, stage=0, transferred=False),
+                record(pyramid=0, level=1, stage=1, transferred=True),
+            ]
+            (sidecars / "apd_multiscale_stages.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in records),
+                encoding="utf-8",
+            )
+            run_scene = SimpleNamespace(
+                label="candidate [deep]", repeat=0, scene_id="scene-a",
+                estimation_stage="photometric", geometric_iteration=None,
+                capture_profile="deep", instrumentation_dir=instrumentation,
+            )
+
+            stages = dmap_report_model.apd_multiscale_records([run_scene], output)
+
+            self.assertEqual(len(stages), 2)
+            self.assertEqual([row["level_index"] for row in stages], [0, 1])
+            self.assertTrue(all(row["valid"] for row in stages), stages)
+            self.assertFalse(stages[0]["transfer_available"])
+            self.assertEqual(stages[0]["schedule_policy"], "conventional_native")
+            self.assertEqual(
+                stages[0]["classifier_view_weight_quality"],
+                "compatibility_derived",
+            )
+            self.assertTrue(stages[1]["transfer_available"])
+            self.assertEqual(stages[1]["output_reliable_ratio"], 0.5)
+            self.assertEqual(stages[1]["source_level_index"], 0)
+
+    def test_apd_schema_v3_loader_preserves_schedule_fitted_and_final_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "report"
+            instrumentation = root / "capture"
+            sidecars = instrumentation / "instrumentation"
+            output.mkdir()
+            sidecars.mkdir(parents=True)
+            contract = {
+                "mode": 1,
+                "enabled": True,
+                "implementation_label": "paper_partial",
+                "implemented_through": "APD14-C3",
+                "required_mechanics_not_yet_implemented": [
+                    "explicit multiscale APD state transfer and stage clocks"
+                ],
+            }
+            (instrumentation / "run_metadata.json").write_text(json.dumps({
+                "schema_name": "openmvs.dmap.run",
+                "schema_version": 4,
+                "cuda_patchmatch_parameters": {
+                    "adaptive_patch_deformation": contract,
+                },
+            }), encoding="utf-8")
+            (sidecars / "apd_iteration.csv").write_text(
+                "image_id,scale_number,logical_iteration,classified,"
+                "stage_reliable_first,stage_non_reliable_second,"
+                "fitted_plane_available,fitted_plane_tested,fitted_plane_finite,"
+                "fitted_plane_accepted,final_refinement_pixels,"
+                "final_refinement_candidates_tested,"
+                "final_refinement_candidates_finite,final_refinement_accepted\n"
+                "7,0,0,100,20,80,50,50,48,12,100,1100,1080,7\n",
+                encoding="utf-8",
+            )
+            trace = {
+                "schema_name": "openmvs.dmap.apd_trace",
+                "schema_version": 3,
+                "image_id": 7,
+                "scale_number": 0,
+                "logical_iteration": 0,
+                "trace_index": 0,
+                "label": "center",
+                "x": 11,
+                "y": 13,
+                "anchor_model": {
+                    "fitted_plane_valid": True,
+                    "fitted_plane_depth": 1.25,
+                },
+                "update": {
+                    "update_stage": 2,
+                    "fitted_plane_available": True,
+                    "fitted_plane_tested": True,
+                    "fitted_plane_accepted": True,
+                    "fitted_plane_working_cost": 0.2,
+                    "fitted_plane_native_cost": 0.25,
+                    "final_refinement": {
+                        "incumbent_cost": 0.4,
+                        "best_cost": 0.25,
+                        "improvement": 0.15,
+                        "offset": -1,
+                        "accepted": True,
+                    },
+                },
+            }
+            (sidecars / "apd_traces.jsonl").write_text(
+                json.dumps(trace) + "\n", encoding="utf-8"
+            )
+            run_scene = SimpleNamespace(
+                label="candidate [deep]", repeat=0, scene_id="scene-a",
+                estimation_stage="photometric", geometric_iteration=None,
+                capture_profile="trace", instrumentation_dir=instrumentation,
+            )
+
+            iterations, traces, _sources, contracts = (
+                dmap_report_model.apd_observability_records([run_scene], output)
+            )
+
+            self.assertEqual(iterations[0]["stage_reliable_first"], 20)
+            self.assertEqual(iterations[0]["fitted_plane_accepted"], 12)
+            self.assertEqual(iterations[0]["final_refinement_accepted"], 7)
+            self.assertEqual(traces[0]["update"]["update_stage"], 2)
+            self.assertTrue(traces[0]["update"]["fitted_plane_accepted"])
+            self.assertTrue(traces[0]["update"]["final_refinement"]["accepted"])
+            self.assertEqual(contracts[0]["implemented_through"], "APD14-C3")
+
+    def test_apd_observability_loader_admits_verified_automatic_trace_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "reports" / "01_master_report"
+            run_dir = (
+                root / "trace_reruns" / "candidate" / "scene-a"
+            )
+            instrumentation = run_dir / "dmap_instrumentation"
+            sidecars = instrumentation / "instrumentation"
+            output.mkdir(parents=True)
+            sidecars.mkdir(parents=True)
+            (instrumentation / "run_metadata.json").write_text(json.dumps({
+                "schema_name": "openmvs.dmap.run",
+                "schema_version": 4,
+                "cuda_patchmatch_parameters": {
+                    "adaptive_patch_deformation": {
+                        "mode": 1,
+                        "enabled": True,
+                    },
+                },
+            }), encoding="utf-8")
+            trace = {
+                "schema_name": "openmvs.dmap.apd_trace",
+                "schema_version": 2,
+                "image_id": 7,
+                "scale_number": 0,
+                "logical_iteration": 0,
+                "trace_index": 0,
+                "label": "automatic",
+                "x": 11,
+                "y": 13,
+            }
+            (sidecars / "apd_traces.jsonl").write_text(
+                json.dumps(trace) + "\n", encoding="utf-8"
+            )
+            dmap_report_model.integrity.write_capture_artifact_closure(
+                run_dir, "trace"
+            )
+            (root / "trace_reruns" / "executions.json").write_text(json.dumps({
+                "schema_name": "openmvs.dmap.trace_rerun_executions",
+                "schema_version": 1,
+                "trace_manifest": str(root / "reports" / "trace_rerun.yaml"),
+                "trace_manifest_sha256": "a" * 64,
+                "executions": [{
+                    "run": "candidate",
+                    "scene_id": "scene-a",
+                    "return_code": 0,
+                    "dry_run": False,
+                    "runtime_boundary_receipt": {"valid": True},
+                    "validation": [{"image_id": 7, "validation": "valid"}],
+                }],
+            }), encoding="utf-8")
+
+            iterations, traces, sources, contracts = (
+                dmap_report_model.apd_observability_records(
+                    [], output, experiment_root=root
+                )
+            )
+
+            self.assertEqual(iterations, [])
+            self.assertEqual(contracts, [])
+            self.assertEqual(len(traces), 1)
+            self.assertEqual(traces[0]["capture_profile"], "trace")
+            self.assertEqual(traces[0]["configured_run"], "candidate")
+            self.assertEqual(traces[0]["label"], "automatic")
+            trace_source = next(
+                row for row in sources if row["kind"] == "targeted_trace"
+            )
+            self.assertTrue(trace_source["available"])
+            self.assertEqual(trace_source["configured_run"], "candidate")
+            self.assertEqual(trace_source["rows_included"], 1)
+
     def test_patch_grid_extent_rejects_unauthorized_resource_plan_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

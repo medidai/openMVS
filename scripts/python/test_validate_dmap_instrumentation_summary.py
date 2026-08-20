@@ -619,6 +619,36 @@ class SummaryOnlyValidationTests(unittest.TestCase):
             self.assertTrue(result["instrumented_dmap_checked"])
             self.assertEqual(result["manifest_map_count"], 0)
 
+    def test_valid_apd_summary_accepts_exact_hot_kernel_aggregates_without_maps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            frame = Path(directory) / "frame"
+            summary, _dmap = make_summary_fixture(frame)
+            summary["candidate_accounting_mode"] = (
+                "exact_apd_working_objective_aggregate"
+            )
+            summary["confidence_gap_mode"] = (
+                "exact_apd_working_winner_runner_up_aggregate"
+            )
+            summary["unavailable_signals"] = [
+                "apd_exact_full_frame_pixel_mechanics"
+            ]
+            summary["resource_plan"].update({
+                "apd_requested": True,
+                "apd_summary_available": True,
+                "apd_maps_available": False,
+            })
+            summary["apd_observability"] = {"enabled": True}
+            write_json(frame / "summary.json", summary)
+
+            result = validator.validate(validator.Arguments(frame_dir=frame))
+
+            self.assertTrue(result["valid"], result)
+            check = next(
+                row for row in result["checks"]
+                if row["name"] == "summary_exact_maps_unavailable"
+            )
+            self.assertTrue(check["detail"]["apd_aggregate_available"])
+
     def test_summary_requires_atomic_completion_marker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             frame = Path(directory) / "frame"

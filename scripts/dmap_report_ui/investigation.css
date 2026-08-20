@@ -507,6 +507,17 @@ tbody tr:hover { background: var(--blue-soft); }
 .mechanics-block + .mechanics-block { margin-top: 18px; }
 .mechanics-block h3 { margin-bottom: 7px; color: #304147; }
 .mechanics-unavailable { padding: 12px; color: var(--amber); border-left: 3px solid #d8b77d; background: var(--amber-soft); }
+.apd-mechanics-block { border-top: 3px solid var(--teal); padding-top: 12px; }
+.apd-mechanics-block h4 { margin: 18px 0 8px; color: #304147; }
+.apd-trace-card { margin: 8px 0; border: 1px solid var(--line); background: #fbfcfc; }
+.apd-trace-card > summary { padding: 9px 11px; cursor: pointer; color: #304147; font-weight: 700; }
+.apd-trace-card[open] > summary { border-bottom: 1px solid var(--line); background: #f0f6f5; }
+.apd-trace-grid { display: grid; grid-template-columns: minmax(300px, 1.4fr) minmax(220px, .8fr); gap: 14px; padding: 12px; }
+.apd-profile-plot { display: block; width: 100%; max-width: 560px; height: 150px; }
+.apd-trace-facts { display: grid; grid-template-columns: minmax(90px, auto) minmax(0, 1fr); gap: 5px 10px; margin: 0; align-content: start; }
+.apd-trace-facts dt { color: var(--muted); font-size: 11px; font-weight: 700; }
+.apd-trace-facts dd { margin: 0; overflow-wrap: anywhere; }
+.apd-trace-tables { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0 12px 12px; }
 
 footer { max-width: 1540px; margin: 0 auto; padding: 22px 24px 40px; color: var(--muted); }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -562,6 +573,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .annotation-threshold-row > .annotation-threshold-value, .annotation-threshold-row > .annotation-delta { grid-column: 2; }
   .annotation-assets { grid-template-columns: minmax(0, 1fr); }
   .patch-inspector-grid { grid-template-columns: minmax(0, 1fr); }
+  .apd-trace-grid, .apd-trace-tables { grid-template-columns: minmax(0, 1fr); }
   .completed-trace > summary { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 520px) {

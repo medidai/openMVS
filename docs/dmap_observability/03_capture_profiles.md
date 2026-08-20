@@ -7,7 +7,7 @@ frames or pixels.
 | Profile | Executable | CUDA path | Retained evidence | Quality authority |
 |---|---|---|---|---|
 | `endpoint` | production | `Process<false>` | terminal production DMAP and run metadata | yes |
-| `summary` | observer | `Process<false>` | counters, availability, metadata, logical summaries, timings | after endpoint parity |
+| `summary` | observer | `Process<false>` normally; APD exact aggregates use `Process<true>` | counters, availability, metadata, logical summaries, timings | non-APD only after endpoint parity; APD summary is diagnostic-only |
 | `prefilter` | observer | `Process<false>` | summary plus bounded production-path state before filtering | after endpoint parity |
 | `deep` | observer | `Process<true>` | full-frame mechanics maps for initialization and logical iterations | no |
 | `trace` | observer | `Process<true>` | selected-pixel or bounded-ROI trajectories plus full selected-frame deep maps | no |
@@ -22,7 +22,12 @@ arguments are removed from its command line.
 
 Use across scenes and repeats. It provides storage-light frame, iteration,
 availability, and timing evidence without full-frame diagnostic maps. Pair it
-with the endpoint and require parity before using it for quality gates.
+with the endpoint and require parity before using an ordinary non-APD summary
+for quality gates. When APD exact aggregate mechanics are requested, summary
+uses `Process<true>` so the hot kernel can emit exact APD counters. The report
+marks that cohort diagnostic-only; its DMAP must not be substituted for the
+production endpoint.
+
 The observer `Process<false>` specialization is not assumed to have the same
 stack usage or occupancy as the separate production binary; parity establishes
 output equivalence, while timing and kernel-resource comparisons remain

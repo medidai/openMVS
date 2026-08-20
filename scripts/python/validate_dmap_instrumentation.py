@@ -150,6 +150,185 @@ V4_LOW_TEXTURE_UPDATE_COUNTER_FIELDS = (
 V4_LOW_TEXTURE_PROPAGATION_ACCEPTED_MASK = 0x01FE
 V4_LOW_TEXTURE_REFINEMENT_ACCEPTED_MASK = 0x1E00
 
+APD_SCHEMA_NAME = "openmvs.dmap.apd_pixel_mechanics"
+APD_SCHEMA_VERSION = 3
+APD_SUMMARY_SCHEMA_NAME = "openmvs.dmap.apd_observability"
+APD_SUMMARY_SCHEMA_VERSION = 3
+APD_SUPPORTED_SCHEMA_VERSIONS = (1, 2, 3)
+APD_RECORD_CONTRACTS = {
+    1: {"state": 56, "update": 64, "trace": 996, "candidate_slots": 13},
+    2: {"state": 56, "update": 88, "trace": 1508, "candidate_slots": 21},
+    3: {"state": 64, "update": 120, "trace": 1548, "candidate_slots": 22},
+}
+APD_STATE_FLOAT_SIGNALS_V2 = {
+    "apd_average_baseline",
+    "apd_current_disparity",
+    "apd_global_minimum_offset",
+    "apd_global_minimum_cost",
+    "apd_profile_separation",
+    "apd_nearest_reliable_distance",
+    "apd_ransac_threshold",
+    "apd_ransac_center_residual",
+    "apd_ransac_mean_inlier_residual",
+}
+APD_STATE_BYTE_SIGNALS_V2 = {
+    "apd_reliability_class",
+    "apd_profile_reason",
+    "apd_profile_eta",
+    "apd_profile_finite_count",
+    "apd_profile_local_minimum_count",
+    "apd_profile_plateau_start",
+    "apd_profile_plateau_end",
+    "apd_sector_candidate_count",
+    "apd_ransac_inlier_count",
+    "apd_ransac_outlier_count",
+    "apd_anchor_count",
+    "apd_anchor_reason",
+    "apd_ransac_valid",
+    "apd_deformable_eligible",
+}
+APD_STATE_FLOAT_SIGNALS = APD_STATE_FLOAT_SIGNALS_V2 | {
+    "apd_fitted_plane_depth",
+}
+APD_STATE_BYTE_SIGNALS = APD_STATE_BYTE_SIGNALS_V2 | {
+    "apd_fitted_plane_valid",
+}
+APD_UPDATE_FLOAT_SIGNALS_V1 = {
+    "apd_working_winner_cost",
+    "apd_native_persistent_cost",
+    "apd_runner_up_working_cost",
+    "apd_winner_runner_up_gap",
+    "apd_center_cost",
+    "apd_anchor_mean_cost",
+    "apd_deformable_photometric_cost",
+    "apd_geometric_cost",
+    "apd_native_minus_working_cost",
+    "apd_native_stored_cost_before",
+    "apd_incumbent_working_cost",
+    "apd_candidate_tested_mask",
+    "apd_candidate_finite_mask",
+    "apd_candidate_accepted_mask",
+}
+APD_UPDATE_BYTE_SIGNALS_V1 = {
+    "apd_update_source",
+    "apd_winner_slot",
+    "apd_runner_up_slot",
+    "apd_candidate_tested_count",
+    "apd_candidate_finite_count",
+    "apd_candidate_accepted_count",
+    "apd_selected_view_count",
+    "apd_deformable_active",
+}
+APD_UPDATE_FLOAT_SIGNALS_V2 = APD_UPDATE_FLOAT_SIGNALS_V1 | {
+    "apd_best_anchor_working_cost",
+    "apd_accepted_anchor_native_cost",
+    "apd_accepted_anchor_index",
+}
+APD_UPDATE_BYTE_SIGNALS_V2 = APD_UPDATE_BYTE_SIGNALS_V1 | {
+    "apd_view_selection_mode",
+    "apd_anchor_evidence_count",
+    "apd_anchor_proposal_count",
+    "apd_anchor_finite_count",
+    "apd_anchor_accepted_slot",
+    "apd_immutable_anchor_state",
+    "apd_selected_view_weight_sum",
+}
+APD_UPDATE_FLOAT_SIGNALS = APD_UPDATE_FLOAT_SIGNALS_V2 | {
+    "apd_fitted_plane_working_cost",
+    "apd_fitted_plane_native_cost",
+    "apd_final_refinement_incumbent_cost",
+    "apd_final_refinement_best_cost",
+    "apd_final_refinement_improvement",
+    "apd_final_refinement_depth",
+}
+APD_UPDATE_BYTE_SIGNALS = APD_UPDATE_BYTE_SIGNALS_V2 | {
+    "apd_update_stage",
+    "apd_fitted_plane_available",
+    "apd_fitted_plane_tested",
+    "apd_fitted_plane_accepted",
+    "apd_final_refinement_offset",
+    "apd_final_refinement_tested_count",
+    "apd_final_refinement_finite_count",
+    "apd_final_refinement_accepted",
+}
+APD_UPDATE_RGBA_SIGNALS = {
+    "apd_working_selected_views_mask",
+}
+APD_REQUIRED_SIGNALS_V1 = (
+    APD_STATE_FLOAT_SIGNALS_V2
+    | APD_STATE_BYTE_SIGNALS_V2
+    | APD_UPDATE_FLOAT_SIGNALS_V1
+    | APD_UPDATE_BYTE_SIGNALS_V1
+)
+APD_REQUIRED_SIGNALS_V2 = (
+    APD_STATE_FLOAT_SIGNALS_V2
+    | APD_STATE_BYTE_SIGNALS_V2
+    | APD_UPDATE_FLOAT_SIGNALS_V2
+    | APD_UPDATE_BYTE_SIGNALS_V2
+    | APD_UPDATE_RGBA_SIGNALS
+)
+APD_REQUIRED_SIGNALS = (
+    APD_STATE_FLOAT_SIGNALS
+    | APD_STATE_BYTE_SIGNALS
+    | APD_UPDATE_FLOAT_SIGNALS
+    | APD_UPDATE_BYTE_SIGNALS
+    | APD_UPDATE_RGBA_SIGNALS
+)
+APD_MULTISCALE_INPUT_SIGNALS = {
+    "apd_transferred_reliability",
+    "apd_transferred_anchor_count",
+    "apd_transferred_deformable_eligible",
+}
+APD_MULTISCALE_OUTPUT_SIGNALS = {
+    "apd_output_reliability",
+    "apd_output_anchor_count",
+    "apd_output_deformable_eligible",
+}
+APD_MULTISCALE_SIGNALS = APD_MULTISCALE_INPUT_SIGNALS | APD_MULTISCALE_OUTPUT_SIGNALS
+APD_PROFILE_REASON_NAMES = (
+    "unknown_invalid_input",
+    "unknown_nonfinite_cost",
+    "unreliable_no_local_minimum",
+    "unreliable_global_minimum_outside_eta",
+    "unreliable_global_minimum_cost_too_high",
+    "unreliable_single_minimum_cost_not_strictly_below_t2",
+    "unreliable_multi_minimum_separation_not_above_t3",
+    "reliable_single_minimum",
+    "reliable_separated_minima",
+)
+APD_ANCHOR_REASON_NAMES = (
+    "unknown",
+    "pixel_not_unreliable",
+    "invalid_center_depth",
+    "insufficient_sector_candidates",
+    "no_valid_ransac_model",
+    "insufficient_model_inliers",
+    "ready",
+)
+APD_UPDATE_SOURCE_NAMES = (
+    "none",
+    "init",
+    "propagate",
+    "refine_depth",
+    "refine_normal",
+    "refine_random_normal",
+    "refine_surface_normal",
+    "filtered",
+    "changed_unknown",
+    "apd_anchor_propagate",
+    "apd_fitted_plane",
+    "apd_final_refinement",
+)
+APD_VIEW_SELECTION_MODE_NAMES = (
+    "native",
+    "anchor_evidence",
+    "previous_weights_fallback",
+    "selected_mask_fallback",
+    "first_view_fallback",
+)
+APD_COMPONENT_CLOSURE_TOLERANCE = 2.0e-6
+APD_SUMMARY_MEAN_TOLERANCE = 5.0e-4
+
 # Component maps are written independently as float32 values. Reconstructing a
 # total from those files can differ by a few ULPs even when the CUDA-side
 # arithmetic is correct. Keep output-parity and direct-definition checks on the
@@ -758,6 +937,16 @@ def validate_summary_only(arguments: Arguments, frame_dir: Path) -> dict[str, An
     unavailable = {
         str(value) for value in summary.get("unavailable_signals") or []
     }
+    apd_observability = (
+        summary.get("apd_observability")
+        if isinstance(summary.get("apd_observability"), dict) else {}
+    )
+    apd_aggregate_available = (
+        apd_observability.get("enabled") is True
+        and resource_plan.get("apd_requested") is True
+        and resource_plan.get("apd_summary_available") is True
+        and resource_plan.get("apd_maps_available") is False
+    )
     exact_trace_detail: dict[str, Any] = {}
     if exact_trace_available:
         exact_modes_valid = (
@@ -777,14 +966,25 @@ def validate_summary_only(arguments: Arguments, frame_dir: Path) -> dict[str, An
             "trace": exact_trace_detail,
         })
     else:
-        exact_unavailable = (
+        generic_exact_unavailable = (
             summary.get("candidate_accounting_mode") == "unavailable_post_pass_snapshot"
             and summary.get("confidence_gap_mode") == "post_pass_current_plus_eight_neighbors"
             and SUMMARY_UNAVAILABLE_EXACT_SIGNALS <= unavailable
         )
-        check("summary_exact_maps_unavailable", exact_unavailable, {
+        apd_exact_aggregate = (
+            apd_aggregate_available
+            and summary.get("candidate_accounting_mode")
+            == "exact_apd_working_objective_aggregate"
+            and summary.get("confidence_gap_mode")
+            == "exact_apd_working_winner_runner_up_aggregate"
+            and "apd_exact_full_frame_pixel_mechanics" in unavailable
+        )
+        check("summary_exact_maps_unavailable", (
+            generic_exact_unavailable or apd_exact_aggregate
+        ), {
             "candidate_accounting_mode": summary.get("candidate_accounting_mode"),
             "confidence_gap_mode": summary.get("confidence_gap_mode"),
+            "apd_aggregate_available": apd_aggregate_available,
             "unavailable_signals": sorted(unavailable),
         })
 
@@ -3815,6 +4015,1692 @@ def validate_v4_exact(
     }
 
 
+def validate_apd_maps(
+    *,
+    manifest: dict[str, Any],
+    summary: dict[str, Any],
+    entries: list[dict[str, Any]],
+    logical_maps: dict[tuple[str, int], tuple[dict[str, Any], Path, np.ndarray]],
+    width: int,
+    height: int,
+    tolerance: float,
+    expect_geometric_zero: bool,
+    check: Any,
+    multiscale_maps: dict[tuple[str, int | None], np.ndarray] | None = None,
+) -> dict[str, Any]:
+    """Validate the versioned APD per-pixel mechanics contract."""
+
+    capture_value = manifest.get("apd_capture")
+    capture = capture_value if isinstance(capture_value, dict) else {}
+    capture_version = strict_int(capture.get("schema_version"))
+    observability_value = summary.get("apd_observability")
+    observability = (
+        observability_value if isinstance(observability_value, dict) else {}
+    )
+    observability_version = strict_int(observability.get("schema_version"))
+    version_supported = capture_version in APD_SUPPORTED_SCHEMA_VERSIONS
+    version_matches = observability_version == capture_version
+    contract = APD_RECORD_CONTRACTS.get(
+        capture_version, APD_RECORD_CONTRACTS[APD_SCHEMA_VERSION]
+    )
+    required_signals = (
+        APD_REQUIRED_SIGNALS_V1
+        if capture_version == 1 else
+        APD_REQUIRED_SIGNALS_V2
+        if capture_version == 2 else
+        APD_REQUIRED_SIGNALS
+    )
+    state_float_signals = (
+        APD_STATE_FLOAT_SIGNALS_V2
+        if capture_version in {1, 2} else APD_STATE_FLOAT_SIGNALS
+    )
+    state_byte_signals = (
+        APD_STATE_BYTE_SIGNALS_V2
+        if capture_version in {1, 2} else APD_STATE_BYTE_SIGNALS
+    )
+    update_float_signals = (
+        APD_UPDATE_FLOAT_SIGNALS_V1
+        if capture_version == 1 else
+        APD_UPDATE_FLOAT_SIGNALS_V2
+        if capture_version == 2 else
+        APD_UPDATE_FLOAT_SIGNALS
+    )
+    update_byte_signals = (
+        APD_UPDATE_BYTE_SIGNALS_V1
+        if capture_version == 1 else
+        APD_UPDATE_BYTE_SIGNALS_V2
+        if capture_version == 2 else
+        APD_UPDATE_BYTE_SIGNALS
+    )
+    update_rgba_signals = set() if capture_version == 1 else APD_UPDATE_RGBA_SIGNALS
+    candidate_slots = int(contract["candidate_slots"])
+    source_names = (
+        APD_UPDATE_SOURCE_NAMES[:9]
+        if capture_version == 1 else
+        APD_UPDATE_SOURCE_NAMES[:10]
+        if capture_version == 2 else
+        APD_UPDATE_SOURCE_NAMES
+    )
+    apd_entries = [
+        entry for entry in entries
+        if (
+            isinstance(entry, dict)
+            and str(entry.get("signal", "")).startswith("apd_")
+            and str(entry.get("signal", "")) not in APD_MULTISCALE_SIGNALS
+        )
+    ]
+    if not capture and not apd_entries:
+        return {
+            "requested": False,
+            "available": False,
+            "unavailable_reason": "APD mechanics capture was not requested",
+        }
+
+    if capture.get("requested") is False and not apd_entries:
+        num_iterations = strict_int(manifest.get("num_iterations"))
+        disabled_capture_expected = {
+            "schema_name": APD_SCHEMA_NAME,
+            "requested": False,
+            "maps_available": False,
+            "summary_available": False,
+            "num_iterations": num_iterations,
+            "state_record_bytes": contract["state"],
+            "update_record_bytes": contract["update"],
+            "working_score_persisted": False,
+            "persistent_winner_conventionally_rescored": True,
+        }
+        disabled_summary_expected = {
+            "schema_name": APD_SUMMARY_SCHEMA_NAME,
+            "requested": False,
+            "enabled": False,
+            "maps_available": False,
+            "summary_available": False,
+            "mode": 0,
+            "mode_name": "disabled",
+            "implementation_label": "disabled",
+            "implemented_through": "none",
+            "exact_author_code_equivalence_claimed": False,
+            "target_label": "paper_mechanics_complete_openmvs",
+            "state_record_bytes": contract["state"],
+            "update_record_bytes": contract["update"],
+            "trace_record_bytes": contract["trace"],
+            "targeted_trace_available": False,
+            "iterations": [],
+            "required_mechanics_not_yet_implemented": [],
+        }
+        capture_errors = [
+            f"{field}: expected {expected!r}, got {capture.get(field)!r}"
+            for field, expected in disabled_capture_expected.items()
+            if capture.get(field) != expected
+        ]
+        summary_errors = [
+            f"{field}: expected {expected!r}, got {observability.get(field)!r}"
+            for field, expected in disabled_summary_expected.items()
+            if observability.get(field) != expected
+        ]
+        if not version_supported:
+            capture_errors.append(
+                f"schema_version {capture_version!r} is not supported; "
+                f"expected one of {list(APD_SUPPORTED_SCHEMA_VERSIONS)}"
+            )
+        if not version_matches:
+            summary_errors.append(
+                "APD capture and observability schema versions must match"
+            )
+        if capture_version == 2:
+            if capture.get("anchor_state") != "immutable_per_logical_iteration":
+                capture_errors.append("schema v2 requires immutable anchor_state")
+            if capture.get("anchor_candidate_slots") != [13, 20]:
+                capture_errors.append("schema v2 requires anchor candidate slots [13,20]")
+        elif capture_version == 3:
+            if capture.get("anchor_state") != (
+                "immutable_for_non_reliable_stage_after_reliable_first_updates"
+            ):
+                capture_errors.append("schema v3 requires reliable-first anchor_state")
+            if capture.get("anchor_candidate_slots") != [13, 20]:
+                capture_errors.append("schema v3 requires anchor candidate slots [13,20]")
+            if capture.get("fitted_plane_candidate_slot") != 21:
+                capture_errors.append("schema v3 requires fitted-plane candidate slot 21")
+            if capture.get("final_refinement_candidate_accounting") != (
+                "separate_native_domain_fields_not_working_candidate_masks"
+            ):
+                capture_errors.append(
+                    "schema v3 requires separate native final-refinement accounting"
+                )
+        pins = observability.get("pins")
+        required_pins = {
+            "paper",
+            "official_repository_commit",
+            "colleague_donor_commit",
+        }
+        if not isinstance(pins, dict) or any(
+            not nonempty_text(pins.get(field)) for field in required_pins
+        ):
+            summary_errors.append(
+                "paper, official repository, and donor pins are required"
+            )
+        check("apd_disabled_capture_contract", not capture_errors, capture_errors)
+        check("apd_disabled_summary_contract", not summary_errors, summary_errors)
+        return {
+            "requested": False,
+            "available": False,
+            "unavailable_reason": "APD mode is disabled for this capture",
+            "implementation_label": observability.get("implementation_label"),
+        }
+
+    stage_active = (
+        capture.get("stage_active") is True
+        if "stage_active" in capture
+        else bool(capture.get("summary_available") or apd_entries)
+    )
+    if capture.get("requested") is True and not stage_active and not apd_entries:
+        inactive_errors: list[str] = []
+        for field, expected in {
+            "schema_name": APD_SCHEMA_NAME,
+            "state_record_bytes": contract["state"],
+            "update_record_bytes": contract["update"],
+        }.items():
+            if capture.get(field) != expected:
+                inactive_errors.append(
+                    f"capture.{field}: expected {expected!r}, got {capture.get(field)!r}"
+                )
+        if not version_supported:
+            inactive_errors.append(
+                f"capture.schema_version {capture_version!r} is unsupported"
+            )
+        if not version_matches:
+            inactive_errors.append("capture and observability schema versions differ")
+        if observability.get("schema_name") != APD_SUMMARY_SCHEMA_NAME:
+            inactive_errors.append("observability schema_name is invalid")
+        for field, expected in {
+            "maps_available": False,
+            "summary_available": False,
+        }.items():
+            if capture.get(field) != expected:
+                inactive_errors.append(
+                    f"capture.{field}: expected {expected!r}, got {capture.get(field)!r}"
+                )
+            if observability.get(field) != expected:
+                inactive_errors.append(
+                    f"observability.{field}: expected {expected!r}, got {observability.get(field)!r}"
+                )
+        if "stage_active" in capture and capture.get("stage_active") is not False:
+            inactive_errors.append("capture.stage_active must be false")
+        if (
+            ("stage_active" in capture or "stage_active" in observability)
+            and observability.get("stage_active") is not False
+        ):
+            inactive_errors.append("observability.stage_active must be false")
+        if observability.get("requested") is not True:
+            inactive_errors.append("observability.requested must be true")
+        if observability.get("enabled") is not True:
+            inactive_errors.append("observability.enabled must be true")
+        pins = observability.get("pins")
+        if not isinstance(pins, dict) or any(
+            not nonempty_text(pins.get(field))
+            for field in {
+                "paper", "official_repository_commit", "colleague_donor_commit"
+            }
+        ):
+            inactive_errors.append("observability paper and source pins are required")
+        check("apd_inactive_stage_contract", not inactive_errors, inactive_errors)
+        return {
+            "requested": True,
+            "stage_active": False,
+            "available": False,
+            "unavailable_reason": (
+                "this stage intentionally executes the native OpenMVS schedule"
+            ),
+            "implementation_label": observability.get("implementation_label"),
+        }
+
+    requested = capture.get("requested") is True
+    available = capture.get("maps_available") is True
+    num_iterations = strict_int(manifest.get("num_iterations"))
+    expected_iterations = (
+        set(range(num_iterations))
+        if num_iterations is not None and num_iterations >= 0 else set()
+    )
+    contract_errors: list[str] = []
+    expected_contract = {
+        "schema_name": APD_SCHEMA_NAME,
+        "state_record_bytes": contract["state"],
+        "update_record_bytes": contract["update"],
+        "working_score_persisted": False,
+        "persistent_winner_conventionally_rescored": True,
+        "summary_available": True,
+    }
+    for field, expected in expected_contract.items():
+        if capture.get(field) != expected:
+            contract_errors.append(
+                f"{field}: expected {expected!r}, got {capture.get(field)!r}"
+            )
+    if not version_supported:
+        contract_errors.append(
+            f"schema_version {capture_version!r} is not supported; "
+            f"expected one of {list(APD_SUPPORTED_SCHEMA_VERSIONS)}"
+        )
+    if not version_matches:
+        contract_errors.append(
+            "APD capture and observability schema versions must match"
+        )
+    if capture_version == 2:
+        if capture.get("anchor_state") != "immutable_per_logical_iteration":
+            contract_errors.append("schema v2 requires immutable anchor_state")
+        if capture.get("anchor_candidate_slots") != [13, 20]:
+            contract_errors.append("schema v2 requires anchor candidate slots [13,20]")
+    elif capture_version == 3:
+        if capture.get("anchor_state") != (
+            "immutable_for_non_reliable_stage_after_reliable_first_updates"
+        ):
+            contract_errors.append("schema v3 requires reliable-first anchor_state")
+        if capture.get("anchor_candidate_slots") != [13, 20]:
+            contract_errors.append("schema v3 requires anchor candidate slots [13,20]")
+        if capture.get("fitted_plane_candidate_slot") != 21:
+            contract_errors.append("schema v3 requires fitted-plane candidate slot 21")
+        if capture.get("final_refinement_candidate_accounting") != (
+            "separate_native_domain_fields_not_working_candidate_masks"
+        ):
+            contract_errors.append(
+                "schema v3 requires separate native final-refinement accounting"
+            )
+    if not requested:
+        contract_errors.append("requested must be true when APD maps are present")
+    if "stage_active" in capture and capture.get("stage_active") is not True:
+        contract_errors.append("stage_active must be true when APD iteration maps are present")
+    if not available:
+        contract_errors.append("maps_available must be true when APD maps are present")
+    if capture.get("num_iterations") != num_iterations:
+        contract_errors.append(
+            "apd_capture.num_iterations must match map_manifest.num_iterations"
+        )
+    check("apd_capture_contract", not contract_errors, {
+        "capture": capture,
+        "errors": contract_errors,
+    })
+
+    summary_errors: list[str] = []
+    expected_summary_contract = {
+        "schema_name": APD_SUMMARY_SCHEMA_NAME,
+        "requested": True,
+        "enabled": True,
+        "maps_available": True,
+        "summary_available": True,
+        "exact_author_code_equivalence_claimed": False,
+        "target_label": "paper_mechanics_complete_openmvs",
+        "state_record_bytes": contract["state"],
+        "update_record_bytes": contract["update"],
+        "trace_record_bytes": contract["trace"],
+    }
+    for field, expected in expected_summary_contract.items():
+        if observability.get(field) != expected:
+            summary_errors.append(
+                f"{field}: expected {expected!r}, got {observability.get(field)!r}"
+            )
+    if "stage_active" in observability and observability.get("stage_active") is not True:
+        summary_errors.append(
+            "stage_active must be true when APD iteration mechanics are available"
+        )
+    implementation_label = observability.get("implementation_label")
+    if implementation_label not in {
+        "paper_partial",
+        "paper_mechanics_complete_openmvs",
+    }:
+        summary_errors.append(
+            f"unsupported implementation_label {implementation_label!r}"
+        )
+    missing_mechanics = observability.get("required_mechanics_not_yet_implemented")
+    if not isinstance(missing_mechanics, list):
+        summary_errors.append(
+            "required_mechanics_not_yet_implemented must be a list"
+        )
+    elif implementation_label == "paper_partial" and not missing_mechanics:
+        summary_errors.append("paper_partial requires at least one missing mechanism")
+    elif implementation_label == "paper_mechanics_complete_openmvs" and missing_mechanics:
+        summary_errors.append(
+            "paper_mechanics_complete_openmvs cannot list missing mechanisms"
+        )
+    profile = observability.get("profile")
+    if not isinstance(profile, dict) or profile.get("separation_convention") != (
+        "sqrt(sum_squared_minimum_cost_differences)/(number_of_minima-1)"
+    ):
+        summary_errors.append("profile separation convention is missing or incorrect")
+    pins = observability.get("pins")
+    required_pins = {"paper", "official_repository_commit", "colleague_donor_commit"}
+    if not isinstance(pins, dict) or any(
+        not nonempty_text(pins.get(field)) for field in required_pins
+    ):
+        summary_errors.append("paper, official repository, and donor pins are required")
+    if capture_version == 3:
+        implemented_through = observability.get("implemented_through")
+        if implemented_through not in {"APD14-C3", "APD14-C4"}:
+            summary_errors.append(
+                "schema v3 must be implemented through APD14-C3 or APD14-C4"
+            )
+        schedule = observability.get("schedule")
+        if not isinstance(schedule, dict) or schedule.get("ordered_stages") != [
+            "reliable_black",
+            "reliable_red",
+            "anchor_and_fitted_plane_generation",
+            "non_reliable_black",
+            "non_reliable_red",
+        ]:
+            summary_errors.append("schema v3 reliable-first schedule is missing or invalid")
+        fitted_plane = observability.get("fitted_plane")
+        if not isinstance(fitted_plane, dict) or fitted_plane.get(
+            "candidate_position"
+        ) != "before random depth and normal refinement in each non-reliable pixel update":
+            summary_errors.append("schema v3 fitted-plane contract is missing or invalid")
+        final_refinement = observability.get("final_refinement")
+        minimum_improvement = finite_number(
+            final_refinement.get("minimum_strict_improvement")
+        ) if isinstance(final_refinement, dict) else None
+        if not isinstance(final_refinement, dict) or (
+            final_refinement.get("disparity_radius") != 5
+            or minimum_improvement is None
+            or abs(minimum_improvement - 0.1) > 1.0e-6
+        ):
+            summary_errors.append("schema v3 final-refinement contract is missing or invalid")
+        if implemented_through == "APD14-C4":
+            multiscale = observability.get("multiscale")
+            if not isinstance(multiscale, dict) or (
+                multiscale.get("state_schema_version") != 1
+                or multiscale.get("coarsest_schedule") != "conventional_native"
+                or multiscale.get("iteration_zero_consumes")
+                != "transferred_reliability"
+                or multiscale.get("checkerboard_exposure") != "timings_only"
+            ):
+                summary_errors.append(
+                    "APD14-C4 multiscale contract is missing or invalid"
+                )
+            compatibility = observability.get("compatibility_behavior")
+            if not isinstance(compatibility, dict) or not nonempty_text(
+                compatibility.get("coarsest_reliability_view_weights")
+            ):
+                summary_errors.append(
+                    "APD14-C4 coarsest compatibility behavior is missing"
+                )
+    check("apd_summary_contract", not summary_errors, {
+        "implementation_label": implementation_label,
+        "errors": summary_errors,
+    })
+
+    expected_keys = {
+        (signal, iteration)
+        for signal in required_signals
+        for iteration in expected_iterations
+    }
+    present_keys = {
+        key for key in logical_maps if key[0] in required_signals
+    }
+    unexpected_signals = sorted({
+        str(entry.get("signal", "")) for entry in apd_entries
+    } - required_signals)
+    check("apd_map_coverage", expected_keys == present_keys and not unexpected_signals, {
+        "expected_signals_per_iteration": len(required_signals),
+        "expected_iterations": sorted(expected_iterations),
+        "missing": [list(key) for key in sorted(expected_keys - present_keys)],
+        "unexpected": [list(key) for key in sorted(present_keys - expected_keys)],
+        "unexpected_signals": unexpected_signals,
+    })
+
+    metadata_errors: list[str] = []
+    for entry in apd_entries:
+        signal = str(entry.get("signal", ""))
+        iteration = strict_int(entry.get("logical_iteration"))
+        if signal not in required_signals or iteration is None:
+            continue
+        state_signal = signal in state_float_signals | state_byte_signals
+        float_signal = signal in state_float_signals | update_float_signals
+        rgba_signal = signal in update_rgba_signals
+        expected_role = (
+            "apd_logical_iteration_state"
+            if state_signal else "apd_logical_iteration_update"
+        )
+        expected_basis = (
+            "apd_same_stream_mechanics_record"
+            if state_signal else "apd_process_pixel_candidate_record"
+        )
+        expected_dtype = (
+            "float32" if float_signal else "uint8x4" if rgba_signal else "uint8"
+        )
+        extension = ".pfm" if float_signal else ".png"
+        expected_path = (
+            f"apd_states/iteration{iteration + 1:02d}/"
+            f"{signal.removeprefix('apd_')}{extension}"
+        )
+        label = f"{signal}:{iteration}"
+        expected_fields = {
+            "apd_schema_name": APD_SCHEMA_NAME,
+            "apd_schema_version": capture_version,
+            "measurement_quality": "exact",
+            "measurement_basis": expected_basis,
+            "role": expected_role,
+            "dtype": expected_dtype,
+            "stage": "iteration",
+            "stage_index": iteration + 1,
+            "path": expected_path,
+        }
+        for field, expected in expected_fields.items():
+            if entry.get(field) != expected:
+                metadata_errors.append(
+                    f"{label} {field}: expected {expected!r}, got {entry.get(field)!r}"
+                )
+        if not nonempty_text(entry.get("semantics")):
+            metadata_errors.append(f"{label} semantics must be non-empty")
+        phase_fields = [key for key in entry if "phase" in str(key).lower()]
+        if phase_fields:
+            metadata_errors.append(f"{label} exposes phase fields {phase_fields}")
+    check("apd_map_metadata", not metadata_errors, metadata_errors)
+
+    if not available:
+        return {
+            "requested": requested,
+            "available": False,
+            "unavailable_reason": capture.get("unavailable_reason"),
+        }
+
+    def logical(signal: str, iteration: int) -> np.ndarray | None:
+        record = logical_maps.get((signal, iteration))
+        return record[2] if record is not None else None
+
+    def logical_uint32_rgba(signal: str, iteration: int) -> np.ndarray | None:
+        values = logical(signal, iteration)
+        if values is None or values.shape != (height, width, 4):
+            return None
+        channels = values.astype(np.uint32)
+        return (
+            channels[:, :, 0]
+            | np.left_shift(channels[:, :, 1], np.uint32(8))
+            | np.left_shift(channels[:, :, 2], np.uint32(16))
+            | np.left_shift(channels[:, :, 3], np.uint32(24))
+        )
+
+    domain_errors: list[str] = []
+    relationship_errors: list[str] = []
+    closure: dict[str, dict[str, float]] = {}
+    candidate_stats: dict[str, Any] = {}
+    dispatch_stats: dict[str, Any] = {}
+    summary_stats: dict[str, Any] = {}
+    summary_rows_value = observability.get("iterations")
+    summary_rows = summary_rows_value if isinstance(summary_rows_value, list) else []
+    rows_by_iteration = {
+        iteration: row
+        for row in summary_rows
+        if isinstance(row, dict)
+        and (iteration := strict_int(row.get("logical_iteration"))) is not None
+    }
+    if set(rows_by_iteration) != expected_iterations or len(summary_rows) != len(rows_by_iteration):
+        summary_errors.append("APD iteration summaries must be unique and complete")
+
+    categorical_ranges = {
+        "apd_reliability_class": (0, 2),
+        "apd_profile_reason": (0, 8),
+        "apd_profile_finite_count": (0, 61),
+        "apd_profile_local_minimum_count": (0, 61),
+        "apd_profile_plateau_start": (0, 60),
+        "apd_profile_plateau_end": (0, 60),
+        "apd_sector_candidate_count": (0, 32),
+        "apd_ransac_inlier_count": (0, 32),
+        "apd_ransac_outlier_count": (0, 32),
+        "apd_anchor_count": (0, 8),
+        "apd_anchor_reason": (0, 6),
+        "apd_ransac_valid": (0, 1),
+        "apd_deformable_eligible": (0, 1),
+        "apd_update_source": (0, len(source_names) - 1),
+        "apd_candidate_tested_count": (0, candidate_slots),
+        "apd_candidate_finite_count": (0, candidate_slots),
+        "apd_candidate_accepted_count": (0, candidate_slots),
+        "apd_selected_view_count": (0, 32),
+        "apd_deformable_active": (0, 1),
+    }
+    if capture_version is not None and capture_version >= 2:
+        categorical_ranges.update({
+            "apd_view_selection_mode": (0, 4),
+            "apd_anchor_evidence_count": (0, 8),
+            "apd_anchor_proposal_count": (0, 8),
+            "apd_anchor_finite_count": (0, 8),
+            "apd_immutable_anchor_state": (0, 1),
+            "apd_selected_view_weight_sum": (0, 32),
+        })
+    if capture_version == 3:
+        categorical_ranges.update({
+            "apd_fitted_plane_valid": (0, 1),
+            "apd_update_stage": (1, 2),
+            "apd_fitted_plane_available": (0, 1),
+            "apd_fitted_plane_tested": (0, 1),
+            "apd_fitted_plane_accepted": (0, 1),
+            "apd_final_refinement_offset": (0, 10),
+            "apd_final_refinement_tested_count": (0, 11),
+            "apd_final_refinement_finite_count": (0, 11),
+            "apd_final_refinement_accepted": (0, 1),
+        })
+    sentinel_nonnegative_signals = {
+        "apd_global_minimum_cost",
+        "apd_profile_separation",
+        "apd_nearest_reliable_distance",
+        "apd_ransac_threshold",
+        "apd_ransac_center_residual",
+        "apd_ransac_mean_inlier_residual",
+        "apd_runner_up_working_cost",
+        "apd_winner_runner_up_gap",
+        "apd_center_cost",
+        "apd_anchor_mean_cost",
+        "apd_deformable_photometric_cost",
+        "apd_geometric_cost",
+        "apd_best_anchor_working_cost",
+        "apd_accepted_anchor_native_cost",
+        "apd_accepted_anchor_index",
+        "apd_fitted_plane_depth",
+        "apd_fitted_plane_working_cost",
+        "apd_fitted_plane_native_cost",
+        "apd_final_refinement_incumbent_cost",
+        "apd_final_refinement_best_cost",
+        "apd_final_refinement_improvement",
+        "apd_final_refinement_depth",
+    }
+    nonnegative_signals = {
+        "apd_average_baseline",
+        "apd_current_disparity",
+        "apd_working_winner_cost",
+        "apd_native_persistent_cost",
+        "apd_native_stored_cost_before",
+        "apd_incumbent_working_cost",
+    }
+    mask_signals = {
+        "apd_candidate_tested_mask",
+        "apd_candidate_finite_mask",
+        "apd_candidate_accepted_mask",
+    }
+
+    for iteration in sorted(expected_iterations):
+        for signal in state_float_signals | update_float_signals:
+            values = logical(signal, iteration)
+            if values is None:
+                continue
+            if not bool(np.all(np.isfinite(values))):
+                domain_errors.append(f"iteration {iteration}: {signal} is non-finite")
+                continue
+            if signal in sentinel_nonnegative_signals:
+                invalid = (values < 0.0) & (values != -1.0)
+                if np.any(invalid):
+                    domain_errors.append(
+                        f"iteration {iteration}: {signal} violates -1/nonnegative domain"
+                    )
+            elif signal in nonnegative_signals and np.any(values < 0.0):
+                domain_errors.append(
+                    f"iteration {iteration}: {signal} must be nonnegative"
+                )
+            elif signal in mask_signals:
+                invalid = (
+                    (values < 0.0)
+                    | (values > float((1 << candidate_slots) - 1))
+                    | (values != np.rint(values))
+                )
+                if np.any(invalid):
+                    domain_errors.append(
+                        f"iteration {iteration}: {signal} is not an exact "
+                        f"{candidate_slots}-bit mask"
+                    )
+
+        offset = logical("apd_global_minimum_offset", iteration)
+        if offset is not None and np.any(
+            (offset < -30.0) | (offset > 30.0) | (offset != np.rint(offset))
+        ):
+            domain_errors.append(
+                f"iteration {iteration}: global minimum offset is not an integer in [-30,30]"
+            )
+        eta = logical("apd_profile_eta", iteration)
+        if eta is not None and np.any(~np.isin(eta, (2, 4, 6))):
+            domain_errors.append(f"iteration {iteration}: profile eta is not 2, 4, or 6")
+        winner_slot = logical("apd_winner_slot", iteration)
+        runner_slot = logical("apd_runner_up_slot", iteration)
+        if winner_slot is not None and np.any(winner_slot >= candidate_slots):
+            domain_errors.append(f"iteration {iteration}: invalid winner slot")
+        if runner_slot is not None and np.any(
+            (runner_slot >= candidate_slots) & (runner_slot != 255)
+        ):
+            domain_errors.append(f"iteration {iteration}: invalid runner-up slot")
+        if capture_version is not None and capture_version >= 2:
+            accepted_slot = logical("apd_anchor_accepted_slot", iteration)
+            if accepted_slot is not None and np.any(
+                (accepted_slot > 7) & (accepted_slot != 255)
+            ):
+                domain_errors.append(
+                    f"iteration {iteration}: invalid accepted anchor slot"
+                )
+        threshold = logical("apd_ransac_threshold", iteration)
+        if threshold is not None:
+            valid_threshold = threshold >= 0.0
+            if np.any(
+                valid_threshold
+                & ((threshold < 0.005 - 1.0e-7) | (threshold > 0.01 + 1.0e-7))
+            ):
+                domain_errors.append(f"iteration {iteration}: invalid RANSAC threshold")
+        for signal, (minimum, maximum) in categorical_ranges.items():
+            values = logical(signal, iteration)
+            if values is not None and np.any((values < minimum) | (values > maximum)):
+                domain_errors.append(
+                    f"iteration {iteration}: {signal} outside [{minimum},{maximum}]"
+                )
+
+        reliability = logical("apd_reliability_class", iteration)
+        profile_reason = logical("apd_profile_reason", iteration)
+        plateau_start = logical("apd_profile_plateau_start", iteration)
+        plateau_end = logical("apd_profile_plateau_end", iteration)
+        anchor_reason = logical("apd_anchor_reason", iteration)
+        ransac_valid = logical("apd_ransac_valid", iteration)
+        eligible = logical("apd_deformable_eligible", iteration)
+        sector_count = logical("apd_sector_candidate_count", iteration)
+        inlier_count = logical("apd_ransac_inlier_count", iteration)
+        outlier_count = logical("apd_ransac_outlier_count", iteration)
+        anchor_count = logical("apd_anchor_count", iteration)
+        active = logical("apd_deformable_active", iteration)
+        if reliability is not None and profile_reason is not None:
+            expected_reliability = np.where(
+                np.isin(profile_reason, (7, 8)),
+                2,
+                np.where(np.isin(profile_reason, (2, 3, 4, 5, 6)), 1, 0),
+            )
+            if np.any(reliability != expected_reliability):
+                relationship_errors.append(
+                    f"iteration {iteration}: reliability/reason mismatch"
+                )
+        if plateau_start is not None and plateau_end is not None and np.any(
+            plateau_start > plateau_end
+        ):
+            relationship_errors.append(
+                f"iteration {iteration}: profile plateau start exceeds end"
+            )
+        anchor_arrays = (
+            anchor_reason,
+            ransac_valid,
+            eligible,
+            sector_count,
+            inlier_count,
+            outlier_count,
+            anchor_count,
+        )
+        if all(value is not None for value in anchor_arrays):
+            ready = anchor_reason == 6
+            valid_model = ransac_valid == 1
+            if np.any(ready != valid_model) or np.any(valid_model != (eligible == 1)):
+                relationship_errors.append(
+                    f"iteration {iteration}: ready/RANSAC/eligibility mismatch"
+                )
+            if np.any(valid_model & (inlier_count + outlier_count != sector_count)):
+                relationship_errors.append(
+                    f"iteration {iteration}: RANSAC inlier/outlier decomposition mismatch"
+                )
+            if np.any(valid_model & (anchor_count != np.minimum(inlier_count, 8))):
+                relationship_errors.append(
+                    f"iteration {iteration}: retained anchor count mismatch"
+                )
+            if np.any(
+                ~valid_model
+                & ((inlier_count != 0) | (outlier_count != 0) | (anchor_count != 0))
+            ):
+                relationship_errors.append(
+                    f"iteration {iteration}: invalid RANSAC model retained counts"
+                )
+        if active is not None and eligible is not None and np.any(active != eligible):
+            relationship_errors.append(
+                f"iteration {iteration}: deformable active/eligible mismatch"
+            )
+        if capture_version is not None and capture_version >= 2:
+            working_view_mask = logical_uint32_rgba(
+                "apd_working_selected_views_mask", iteration
+            )
+            selected_view_count = logical("apd_selected_view_count", iteration)
+            selected_view_weight_sum = logical(
+                "apd_selected_view_weight_sum", iteration
+            )
+            view_selection_mode = logical("apd_view_selection_mode", iteration)
+            anchor_evidence_count = logical("apd_anchor_evidence_count", iteration)
+            anchor_proposal_count = logical("apd_anchor_proposal_count", iteration)
+            anchor_finite_count = logical("apd_anchor_finite_count", iteration)
+            anchor_accepted_slot = logical("apd_anchor_accepted_slot", iteration)
+            immutable_anchor_state = logical("apd_immutable_anchor_state", iteration)
+            best_anchor_cost = logical("apd_best_anchor_working_cost", iteration)
+            accepted_anchor_cost = logical(
+                "apd_accepted_anchor_native_cost", iteration
+            )
+            accepted_anchor_index = logical("apd_accepted_anchor_index", iteration)
+            source = logical("apd_update_source", iteration)
+            c2_arrays = (
+                working_view_mask,
+                selected_view_count,
+                selected_view_weight_sum,
+                view_selection_mode,
+                anchor_evidence_count,
+                anchor_proposal_count,
+                anchor_finite_count,
+                anchor_accepted_slot,
+                immutable_anchor_state,
+                best_anchor_cost,
+                accepted_anchor_cost,
+                accepted_anchor_index,
+                source,
+                active,
+                anchor_count,
+            )
+            if all(value is not None for value in c2_arrays):
+                active_mask = active == 1
+                inactive_mask = ~active_mask
+                mask_count = uint32_popcount(working_view_mask, 32)
+                if np.any(mask_count != selected_view_count):
+                    relationship_errors.append(
+                        f"iteration {iteration}: working-view mask/count mismatch"
+                    )
+                if np.any(selected_view_weight_sum < selected_view_count):
+                    relationship_errors.append(
+                        f"iteration {iteration}: view-weight sum is below selected count"
+                    )
+                if np.any(active_mask & (view_selection_mode == 0)) or np.any(
+                    inactive_mask & (view_selection_mode != 0)
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: APD activity/view-selection mode mismatch"
+                    )
+                if np.any(immutable_anchor_state != active):
+                    relationship_errors.append(
+                        f"iteration {iteration}: immutable anchor state/activity mismatch"
+                    )
+                if np.any(anchor_evidence_count != anchor_proposal_count):
+                    relationship_errors.append(
+                        f"iteration {iteration}: anchor evidence/proposal mismatch"
+                    )
+                if np.any(anchor_evidence_count > anchor_count) or np.any(
+                    anchor_finite_count > anchor_proposal_count
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: anchor C2 count ordering mismatch"
+                    )
+                accepted = anchor_accepted_slot != 255
+                if np.any(accepted != (accepted_anchor_index >= 0.0)) or np.any(
+                    accepted != (accepted_anchor_cost >= 0.0)
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: accepted-anchor availability mismatch"
+                    )
+                if np.any(
+                    accepted
+                    & (accepted_anchor_index >= float(width * height))
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: accepted anchor index is outside the frame"
+                    )
+                if np.any((anchor_finite_count > 0) != (best_anchor_cost >= 0.0)):
+                    relationship_errors.append(
+                        f"iteration {iteration}: best-anchor cost availability mismatch"
+                    )
+                if np.any((source == 9) & ~accepted):
+                    relationship_errors.append(
+                        f"iteration {iteration}: final anchor winner lacks accepted anchor"
+                    )
+
+        if capture_version == 3:
+            fitted_plane_depth = logical("apd_fitted_plane_depth", iteration)
+            fitted_plane_valid = logical("apd_fitted_plane_valid", iteration)
+            update_stage = logical("apd_update_stage", iteration)
+            fitted_available = logical("apd_fitted_plane_available", iteration)
+            fitted_tested = logical("apd_fitted_plane_tested", iteration)
+            fitted_accepted = logical("apd_fitted_plane_accepted", iteration)
+            fitted_working = logical("apd_fitted_plane_working_cost", iteration)
+            fitted_native = logical("apd_fitted_plane_native_cost", iteration)
+            final_incumbent = logical(
+                "apd_final_refinement_incumbent_cost", iteration
+            )
+            final_best = logical("apd_final_refinement_best_cost", iteration)
+            final_improvement = logical(
+                "apd_final_refinement_improvement", iteration
+            )
+            final_depth = logical("apd_final_refinement_depth", iteration)
+            final_offset = logical("apd_final_refinement_offset", iteration)
+            final_tested = logical(
+                "apd_final_refinement_tested_count", iteration
+            )
+            final_finite = logical(
+                "apd_final_refinement_finite_count", iteration
+            )
+            final_accepted = logical("apd_final_refinement_accepted", iteration)
+            c3_arrays = (
+                reliability,
+                eligible,
+                source,
+                fitted_plane_depth,
+                fitted_plane_valid,
+                update_stage,
+                fitted_available,
+                fitted_tested,
+                fitted_accepted,
+                fitted_working,
+                fitted_native,
+                final_incumbent,
+                final_best,
+                final_improvement,
+                final_depth,
+                final_offset,
+                final_tested,
+                final_finite,
+                final_accepted,
+            )
+            if all(value is not None for value in c3_arrays):
+                dispatch_reliability = reliability
+                dispatch_basis = "apd_reliability_class"
+                multiscale_value = manifest.get("apd_multiscale")
+                multiscale = (
+                    multiscale_value if isinstance(multiscale_value, dict) else {}
+                )
+                transfer_value = multiscale.get("transfer")
+                transfer = transfer_value if isinstance(transfer_value, dict) else {}
+                if iteration == 0 and transfer.get("available") is True:
+                    transferred = (
+                        multiscale_maps.get(("apd_transferred_reliability", None))
+                        if multiscale_maps is not None else None
+                    )
+                    if transferred is None or transferred.shape != reliability.shape:
+                        relationship_errors.append(
+                            "iteration 0: transferred reliability dispatch map is unavailable"
+                        )
+                        dispatch_reliability = None
+                    else:
+                        dispatch_reliability = transferred
+                        dispatch_basis = "apd_transferred_reliability"
+                mismatch_pixels = None
+                if dispatch_reliability is not None:
+                    expected_stage = np.where(dispatch_reliability == 2, 1, 2)
+                    mismatch_pixels = int(np.count_nonzero(
+                        update_stage != expected_stage
+                    ))
+                dispatch_stats[str(iteration)] = {
+                    "basis": dispatch_basis,
+                    "mismatch_pixels": mismatch_pixels,
+                    "transferred_iteration_zero": (
+                        iteration == 0 and transfer.get("available") is True
+                    ),
+                }
+                if mismatch_pixels:
+                    relationship_errors.append(
+                        f"iteration {iteration}: {dispatch_basis}/update-stage mismatch"
+                    )
+                fitted_valid_mask = fitted_plane_valid == 1
+                fitted_available_mask = fitted_available == 1
+                fitted_tested_mask = fitted_tested == 1
+                fitted_accepted_mask = fitted_accepted == 1
+                if np.any(fitted_valid_mask & (fitted_plane_depth <= 0.0)) or np.any(
+                    ~fitted_valid_mask & (fitted_plane_depth != -1.0)
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: fitted-plane state availability mismatch"
+                    )
+                if np.any(fitted_valid_mask & (eligible != 1)):
+                    relationship_errors.append(
+                        f"iteration {iteration}: fitted plane exists outside APD eligibility"
+                    )
+                if np.any(fitted_available_mask & ~fitted_valid_mask) or np.any(
+                    fitted_tested_mask != fitted_available_mask
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: fitted-plane dispatch mismatch"
+                    )
+                fitted_finite_mask = fitted_working >= 0.0
+                if np.any(fitted_finite_mask & ~fitted_tested_mask) or np.any(
+                    fitted_accepted_mask & ~fitted_finite_mask
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: fitted-plane score availability mismatch"
+                    )
+                if np.any((source == 10) & ~fitted_accepted_mask):
+                    relationship_errors.append(
+                        f"iteration {iteration}: fitted-plane winner lacks acceptance"
+                    )
+                if np.any((fitted_native >= 0.0) & ~fitted_tested_mask):
+                    relationship_errors.append(
+                        f"iteration {iteration}: fitted-plane native rescore without test"
+                    )
+
+                is_final_iteration = iteration == max(expected_iterations, default=-1)
+                if np.any(final_finite > final_tested):
+                    relationship_errors.append(
+                        f"iteration {iteration}: final-refinement finite/tested ordering failed"
+                    )
+                accepted_final_mask = final_accepted == 1
+                final_available = final_incumbent >= 0.0
+                if np.any(accepted_final_mask & (
+                    (final_best < 0.0)
+                    | (final_depth <= 0.0)
+                    | (final_improvement <= 0.1)
+                    | (final_finite == 0)
+                )):
+                    relationship_errors.append(
+                        f"iteration {iteration}: accepted final refinement is invalid"
+                    )
+                if np.any(final_available & (
+                    np.abs((final_incumbent - final_best) - final_improvement)
+                    > APD_COMPONENT_CLOSURE_TOLERANCE
+                )):
+                    relationship_errors.append(
+                        f"iteration {iteration}: final-refinement improvement closure failed"
+                    )
+                if not is_final_iteration and (
+                    np.any(final_tested != 0)
+                    or np.any(final_finite != 0)
+                    or np.any(final_accepted != 0)
+                    or np.any(final_incumbent != -1.0)
+                    or np.any(final_best != -1.0)
+                    or np.any(final_improvement != -1.0)
+                    or np.any(final_depth != -1.0)
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: final refinement appeared before the terminal iteration"
+                    )
+
+        tested_mask = logical("apd_candidate_tested_mask", iteration)
+        finite_mask = logical("apd_candidate_finite_mask", iteration)
+        accepted_mask = logical("apd_candidate_accepted_mask", iteration)
+        tested_count = logical("apd_candidate_tested_count", iteration)
+        finite_count = logical("apd_candidate_finite_count", iteration)
+        accepted_count = logical("apd_candidate_accepted_count", iteration)
+        if all(value is not None for value in (
+            tested_mask,
+            finite_mask,
+            accepted_mask,
+            tested_count,
+            finite_count,
+            accepted_count,
+        )):
+            tested_uint = np.rint(tested_mask).astype(np.uint32)
+            finite_uint = np.rint(finite_mask).astype(np.uint32)
+            accepted_uint = np.rint(accepted_mask).astype(np.uint32)
+            mismatches = {
+                "tested": int(np.count_nonzero(
+                    tested_count != uint32_popcount(tested_uint, candidate_slots)
+                )),
+                "finite": int(np.count_nonzero(
+                    finite_count != uint32_popcount(finite_uint, candidate_slots)
+                )),
+                "accepted": int(np.count_nonzero(
+                    accepted_count != uint32_popcount(accepted_uint, candidate_slots)
+                )),
+            }
+            finite_outside_tested = int(np.count_nonzero(finite_uint & ~tested_uint))
+            accepted_outside_tested = int(
+                np.count_nonzero(accepted_uint & ~tested_uint)
+            )
+            accepted_non_usable = int(
+                np.sum(uint32_popcount(
+                    accepted_uint & ~finite_uint, candidate_slots
+                ))
+            )
+            candidate_stats[str(iteration)] = {
+                "count_mismatch_pixels": mismatches,
+                "finite_outside_tested_pixels": finite_outside_tested,
+                "accepted_outside_tested_pixels": accepted_outside_tested,
+                "accepted_non_usable_events": accepted_non_usable,
+                "finite_definition": "finite and strictly below fBadCost",
+            }
+            if any(mismatches.values()) or finite_outside_tested or accepted_outside_tested:
+                relationship_errors.append(
+                    f"iteration {iteration}: candidate mask/count integrity failure"
+                )
+            if capture_version is not None and capture_version >= 2:
+                anchor_tested = uint32_popcount(
+                    np.right_shift(tested_uint, np.uint32(13)) & np.uint32(0xFF),
+                    8,
+                )
+                anchor_finite = uint32_popcount(
+                    np.right_shift(finite_uint, np.uint32(13)) & np.uint32(0xFF),
+                    8,
+                )
+                if anchor_proposal_count is not None and np.any(
+                    anchor_tested != anchor_proposal_count
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: anchor proposal/candidate-mask mismatch"
+                    )
+                if anchor_finite_count is not None and np.any(
+                    anchor_finite != anchor_finite_count
+                ):
+                    relationship_errors.append(
+                        f"iteration {iteration}: finite anchor/candidate-mask mismatch"
+                    )
+            if winner_slot is not None:
+                winner_bits = np.left_shift(
+                    np.uint32(1), winner_slot.astype(np.uint32)
+                )
+                if np.any((tested_uint & winner_bits) == 0):
+                    relationship_errors.append(
+                        f"iteration {iteration}: winner slot was not tested"
+                    )
+            if runner_slot is not None:
+                runner_available = runner_slot != 255
+                runner_bits = np.left_shift(
+                    np.uint32(1), np.minimum(runner_slot, 31).astype(np.uint32)
+                )
+                if np.any(runner_available & ((finite_uint & runner_bits) == 0)):
+                    relationship_errors.append(
+                        f"iteration {iteration}: runner-up slot is not usable"
+                    )
+
+        working = logical("apd_working_winner_cost", iteration)
+        native = logical("apd_native_persistent_cost", iteration)
+        runner = logical("apd_runner_up_working_cost", iteration)
+        gap = logical("apd_winner_runner_up_gap", iteration)
+        center = logical("apd_center_cost", iteration)
+        anchor = logical("apd_anchor_mean_cost", iteration)
+        deformable = logical("apd_deformable_photometric_cost", iteration)
+        geometric = logical("apd_geometric_cost", iteration)
+        native_minus_working = logical("apd_native_minus_working_cost", iteration)
+        iteration_closure: dict[str, float] = {}
+        if all(value is not None for value in (native, working, native_minus_working)):
+            iteration_closure["native_minus_working"] = max_abs_difference(
+                native_minus_working, native - working
+            )
+        if all(value is not None for value in (runner, gap, working)):
+            unavailable = runner == -1.0
+            expected_gap = np.where(
+                unavailable, -1.0, np.maximum(runner - working, 0.0)
+            )
+            iteration_closure["winner_runner_up_gap"] = max_abs_difference(
+                gap, expected_gap
+            )
+        if all(value is not None for value in (
+            active,
+            center,
+            anchor,
+            deformable,
+            geometric,
+            working,
+        )):
+            active_mask = active == 1
+            inactive_component_errors = sum(
+                int(np.count_nonzero(values[~active_mask] != -1.0))
+                for values in (center, anchor, deformable, geometric)
+            )
+            active_component_errors = sum(
+                int(np.count_nonzero(values[active_mask] < 0.0))
+                for values in (center, anchor, deformable, geometric)
+            )
+            if inactive_component_errors or active_component_errors:
+                relationship_errors.append(
+                    f"iteration {iteration}: APD component availability mismatch"
+                )
+            if np.any(active_mask):
+                expected_deformable = 0.25 * center + 0.75 * anchor
+                iteration_closure["deformable_components"] = max_abs_difference(
+                    deformable[active_mask], expected_deformable[active_mask]
+                )
+                iteration_closure["working_components"] = max_abs_difference(
+                    working[active_mask],
+                    (deformable + geometric)[active_mask],
+                )
+                if expect_geometric_zero:
+                    iteration_closure["geometric_disabled"] = float(
+                        np.max(np.abs(geometric[active_mask]))
+                    )
+        closure[str(iteration)] = iteration_closure
+
+        row = rows_by_iteration.get(iteration)
+        if isinstance(row, dict) and all(value is not None for value in (
+            reliability,
+            profile_reason,
+            anchor_reason,
+            ransac_valid,
+            eligible,
+            anchor_count,
+            active,
+            working,
+            native,
+            center,
+            anchor,
+            gap,
+        )):
+            total_pixels = width * height
+            reliability_counts = {
+                "unknown": int(np.count_nonzero(reliability == 0)),
+                "unreliable": int(np.count_nonzero(reliability == 1)),
+                "reliable": int(np.count_nonzero(reliability == 2)),
+            }
+            profile_counts = {
+                name: int(np.count_nonzero(profile_reason == index))
+                for index, name in enumerate(APD_PROFILE_REASON_NAMES)
+            }
+            anchor_reason_counts = {
+                name: int(np.count_nonzero(anchor_reason == index))
+                for index, name in enumerate(APD_ANCHOR_REASON_NAMES)
+            }
+            source = logical("apd_update_source", iteration)
+            source_counts = {
+                name: int(np.count_nonzero(source == index))
+                for index, name in enumerate(source_names)
+            } if source is not None else {}
+            anchor_histogram = {
+                str(index): int(np.count_nonzero(anchor_count == index))
+                for index in range(9)
+            }
+            active_mask = active == 1
+            available_gap = active_mask & (gap >= 0.0)
+            global_minimum = logical("apd_global_minimum_cost", iteration)
+            separation = logical("apd_profile_separation", iteration)
+            separation_available = separation >= 0.0 if separation is not None else None
+            expected_counts = {
+                "classified_pixels": total_pixels,
+                "reliability": reliability_counts,
+                "profile_reason_counts": profile_counts,
+                "anchor_count_histogram": anchor_histogram,
+                "anchor_reason_counts": anchor_reason_counts,
+                "ransac_valid_pixels": int(np.count_nonzero(ransac_valid == 1)),
+                "deformable_eligible_pixels": int(np.count_nonzero(eligible == 1)),
+                "deformable_updates": int(np.count_nonzero(active_mask)),
+                "source_counts": source_counts,
+                "working_gap_samples": int(np.count_nonzero(available_gap)),
+            }
+            actual_counts = {
+                "classified_pixels": row.get("classified_pixels"),
+                "reliability": {
+                    key: (row.get("reliability") or {}).get(key)
+                    for key in reliability_counts
+                },
+                "profile_reason_counts": row.get("profile_reason_counts"),
+                "anchor_count_histogram": (
+                    (row.get("anchor_model") or {}).get("anchor_count_histogram")
+                ),
+                "anchor_reason_counts": (
+                    (row.get("anchor_model") or {}).get("reason_counts")
+                ),
+                "ransac_valid_pixels": (
+                    (row.get("anchor_model") or {}).get("ransac_valid_pixels")
+                ),
+                "deformable_eligible_pixels": (
+                    (row.get("anchor_model") or {}).get("deformable_eligible_pixels")
+                ),
+                "deformable_updates": (
+                    (row.get("updates") or {}).get("deformable_updates")
+                ),
+                "source_counts": (row.get("updates") or {}).get("source_counts"),
+                "working_gap_samples": (
+                    (row.get("updates") or {}).get("working_gap_samples")
+                ),
+            }
+            if capture_version is not None and capture_version >= 2:
+                view_mode_counts = {
+                    name: int(np.count_nonzero(active_mask & (view_selection_mode == index)))
+                    for index, name in enumerate(APD_VIEW_SELECTION_MODE_NAMES)
+                }
+                expected_counts.update({
+                    "immutable_anchor_state_updates": int(
+                        np.sum(immutable_anchor_state, dtype=np.uint64)
+                    ),
+                    "anchor_view_selection_attempted": int(np.count_nonzero(active_mask)),
+                    "anchor_view_selection_used": int(
+                        np.count_nonzero(active_mask & (view_selection_mode == 1))
+                    ),
+                    "anchor_view_selection_mode_counts": view_mode_counts,
+                    "anchor_proposals_tested": int(
+                        np.sum(anchor_proposal_count, dtype=np.uint64)
+                    ),
+                    "anchor_proposals_finite": int(
+                        np.sum(anchor_finite_count, dtype=np.uint64)
+                    ),
+                    "anchor_proposals_accepted": int(
+                        np.count_nonzero(anchor_accepted_slot != 255)
+                    ),
+                    "anchor_propagation_final_winners": int(
+                        np.count_nonzero(source == 9)
+                    ),
+                    "best_anchor_working_cost_samples": int(
+                        np.count_nonzero(active_mask & (best_anchor_cost >= 0.0))
+                    ),
+                    "accepted_anchor_native_cost_samples": int(
+                        np.count_nonzero(active_mask & (accepted_anchor_cost >= 0.0))
+                    ),
+                })
+                actual_counts.update({
+                    "immutable_anchor_state_updates": (
+                        (row.get("updates") or {}).get("immutable_anchor_state_updates")
+                    ),
+                    "anchor_view_selection_attempted": (
+                        (row.get("anchor_view_selection") or {}).get("attempted_pixels")
+                    ),
+                    "anchor_view_selection_used": (
+                        (row.get("anchor_view_selection") or {}).get("anchor_evidence_pixels")
+                    ),
+                    "anchor_view_selection_mode_counts": (
+                        (row.get("anchor_view_selection") or {}).get("mode_counts")
+                    ),
+                    "anchor_proposals_tested": (
+                        (row.get("anchor_propagation") or {}).get("tested_candidates")
+                    ),
+                    "anchor_proposals_finite": (
+                        (row.get("anchor_propagation") or {}).get("finite_candidates")
+                    ),
+                    "anchor_proposals_accepted": (
+                        (row.get("anchor_propagation") or {}).get("accepted_events")
+                    ),
+                    "anchor_propagation_final_winners": (
+                        (row.get("anchor_propagation") or {}).get("final_winner_pixels")
+                    ),
+                    "best_anchor_working_cost_samples": (
+                        (row.get("anchor_propagation") or {}).get("best_working_cost_samples")
+                    ),
+                    "accepted_anchor_native_cost_samples": (
+                        (row.get("anchor_propagation") or {}).get("accepted_native_cost_samples")
+                    ),
+                })
+            if capture_version == 3:
+                expected_counts.update({
+                    "stage_counts": {
+                        "all_compatibility": int(np.count_nonzero(update_stage == 0)),
+                        "reliable_first": int(np.count_nonzero(update_stage == 1)),
+                        "non_reliable_second": int(np.count_nonzero(update_stage == 2)),
+                    },
+                    "fitted_plane_available": int(
+                        np.count_nonzero(fitted_available == 1)
+                    ),
+                    "fitted_plane_tested": int(
+                        np.count_nonzero(fitted_tested == 1)
+                    ),
+                    "fitted_plane_finite": int(
+                        np.count_nonzero(fitted_working >= 0.0)
+                    ),
+                    "fitted_plane_accepted": int(
+                        np.count_nonzero(fitted_accepted == 1)
+                    ),
+                    "fitted_plane_final_winners": int(
+                        np.count_nonzero(source == 10)
+                    ),
+                    "final_refinement_pixels": int(
+                        np.count_nonzero(final_incumbent >= 0.0)
+                    ),
+                    "final_refinement_candidates_tested": int(
+                        np.sum(final_tested, dtype=np.uint64)
+                    ),
+                    "final_refinement_candidates_finite": int(
+                        np.sum(final_finite, dtype=np.uint64)
+                    ),
+                    "final_refinement_accepted": int(
+                        np.count_nonzero(final_accepted == 1)
+                    ),
+                })
+                actual_counts.update({
+                    "stage_counts": (row.get("updates") or {}).get("stage_counts"),
+                    "fitted_plane_available": (
+                        (row.get("fitted_plane") or {}).get("available_pixels")
+                    ),
+                    "fitted_plane_tested": (
+                        (row.get("fitted_plane") or {}).get("tested_pixels")
+                    ),
+                    "fitted_plane_finite": (
+                        (row.get("fitted_plane") or {}).get("finite_pixels")
+                    ),
+                    "fitted_plane_accepted": (
+                        (row.get("fitted_plane") or {}).get("accepted_events")
+                    ),
+                    "fitted_plane_final_winners": (
+                        (row.get("fitted_plane") or {}).get("final_winner_pixels")
+                    ),
+                    "final_refinement_pixels": (
+                        (row.get("final_native_refinement") or {}).get("eligible_pixels")
+                    ),
+                    "final_refinement_candidates_tested": (
+                        (row.get("final_native_refinement") or {}).get("tested_candidates")
+                    ),
+                    "final_refinement_candidates_finite": (
+                        (row.get("final_native_refinement") or {}).get("finite_candidates")
+                    ),
+                    "final_refinement_accepted": (
+                        (row.get("final_native_refinement") or {}).get("accepted_pixels")
+                    ),
+                })
+            count_match = expected_counts == actual_counts
+            if not count_match:
+                summary_errors.append(
+                    f"iteration {iteration}: APD summary count closure failed"
+                )
+
+            expected_means = {
+                "anchor_count_mean": float(np.mean(anchor_count, dtype=np.float64)),
+                "global_minimum_cost_mean": float(
+                    np.mean(global_minimum, dtype=np.float64)
+                ) if global_minimum is not None else None,
+                "profile_separation_mean": float(
+                    np.mean(separation[separation_available], dtype=np.float64)
+                ) if separation_available is not None and np.any(separation_available) else None,
+                "center_cost_mean": float(np.mean(center[active_mask], dtype=np.float64)),
+                "anchor_mean_cost_mean": float(np.mean(anchor[active_mask], dtype=np.float64)),
+                "working_cost_mean": float(np.mean(working[active_mask], dtype=np.float64)),
+                "native_persistent_cost_mean": float(
+                    np.mean(native[active_mask], dtype=np.float64)
+                ),
+                "working_gap_mean": float(
+                    np.mean(gap[available_gap], dtype=np.float64)
+                ) if np.any(available_gap) else None,
+            }
+            actual_means = {
+                "anchor_count_mean": (
+                    (row.get("anchor_model") or {}).get("anchor_count_mean")
+                ),
+                "global_minimum_cost_mean": (
+                    (row.get("global_minimum_cost") or {}).get("mean")
+                ),
+                "profile_separation_mean": (
+                    (row.get("profile_separation") or {}).get("mean")
+                ),
+                "center_cost_mean": (row.get("updates") or {}).get("center_cost_mean"),
+                "anchor_mean_cost_mean": (
+                    (row.get("updates") or {}).get("anchor_mean_cost_mean")
+                ),
+                "working_cost_mean": (
+                    (row.get("updates") or {}).get("working_cost_mean")
+                ),
+                "native_persistent_cost_mean": (
+                    (row.get("updates") or {}).get("native_persistent_cost_mean")
+                ),
+                "working_gap_mean": (
+                    (row.get("updates") or {}).get("working_gap_mean")
+                ),
+            }
+            if capture_version is not None and capture_version >= 2:
+                best_available = active_mask & (best_anchor_cost >= 0.0)
+                accepted_available = active_mask & (accepted_anchor_cost >= 0.0)
+                expected_means.update({
+                    "best_anchor_working_cost_mean": float(
+                        np.mean(best_anchor_cost[best_available], dtype=np.float64)
+                    ) if np.any(best_available) else None,
+                    "accepted_anchor_native_cost_mean": float(
+                        np.mean(accepted_anchor_cost[accepted_available], dtype=np.float64)
+                    ) if np.any(accepted_available) else None,
+                })
+                actual_means.update({
+                    "best_anchor_working_cost_mean": (
+                        (row.get("anchor_propagation") or {}).get("best_working_cost_mean")
+                    ),
+                    "accepted_anchor_native_cost_mean": (
+                        (row.get("anchor_propagation") or {}).get("accepted_native_cost_mean")
+                    ),
+                })
+            mean_errors = {
+                name: abs(float(actual_means[name]) - expected)
+                for name, expected in expected_means.items()
+                if expected is not None and finite_number(actual_means.get(name)) is not None
+            }
+            missing_means = sorted(
+                name for name, expected in expected_means.items()
+                if expected is not None and finite_number(actual_means.get(name)) is None
+            )
+            excessive_mean_errors = {
+                name: error for name, error in mean_errors.items()
+                if error > APD_SUMMARY_MEAN_TOLERANCE
+            }
+            if missing_means or excessive_mean_errors:
+                summary_errors.append(
+                    f"iteration {iteration}: APD summary mean closure failed"
+                )
+            summary_stats[str(iteration)] = {
+                "counts_match": count_match,
+                "expected_counts": expected_counts,
+                "actual_counts": actual_counts,
+                "mean_tolerance": APD_SUMMARY_MEAN_TOLERANCE,
+                "mean_absolute_errors": mean_errors,
+                "missing_means": missing_means,
+            }
+
+    closure_failures = {
+        iteration: values
+        for iteration, values in closure.items()
+        if any(
+            value > max(tolerance, APD_COMPONENT_CLOSURE_TOLERANCE)
+            for value in values.values()
+        )
+    }
+    check("apd_map_domains", not domain_errors, domain_errors)
+    check("apd_map_relationships", not relationship_errors, {
+        "errors": relationship_errors,
+        "candidate": candidate_stats,
+        "dispatch": dispatch_stats,
+    })
+    check("apd_cost_closure", not closure_failures, {
+        "tolerance": max(tolerance, APD_COMPONENT_CLOSURE_TOLERANCE),
+        "per_iteration": closure,
+    })
+    check("apd_summary_map_closure", not summary_errors, {
+        "errors": summary_errors,
+        "per_iteration": summary_stats,
+    })
+    return {
+        "requested": requested,
+        "available": available,
+        "schema_name": capture.get("schema_name"),
+        "schema_version": capture.get("schema_version"),
+        "implementation_label": implementation_label,
+        "iterations": sorted(expected_iterations),
+        "closure": closure,
+        "candidate": candidate_stats,
+        "summary": summary_stats,
+    }
+
+
+def validate_apd_multiscale_maps(
+    *,
+    manifest: dict[str, Any],
+    summary: dict[str, Any],
+    entries: list[dict[str, Any]],
+    maps: dict[tuple[str, int | None], np.ndarray],
+    width: int,
+    height: int,
+    check: Any,
+) -> dict[str, Any]:
+    """Validate the terminal maps and metadata for one APD stage transfer."""
+
+    capture = manifest.get("apd_capture")
+    capture = capture if isinstance(capture, dict) else {}
+    requested = capture.get("requested") is True
+    selected_entries = {
+        str(entry.get("signal")): entry
+        for entry in entries
+        if isinstance(entry, dict) and str(entry.get("signal")) in APD_MULTISCALE_SIGNALS
+    }
+    if not requested and not selected_entries:
+        return {
+            "requested": False,
+            "available": False,
+            "unavailable_reason": "APD mode is disabled for this capture",
+        }
+
+    stage_value = summary.get("apd_multiscale")
+    stage = stage_value if isinstance(stage_value, dict) else {}
+    manifest_stage_value = manifest.get("apd_multiscale")
+    manifest_stage = (
+        manifest_stage_value if isinstance(manifest_stage_value, dict) else {}
+    )
+    if (
+        requested
+        and not selected_entries
+        and stage.get("schema_name") != "openmvs.dmap.apd_multiscale_stage"
+        and manifest_stage.get("schema_name") != "openmvs.dmap.apd_multiscale_stage"
+    ):
+        return {
+            "requested": True,
+            "available": False,
+            "unavailable_reason": "pre-C4 capture does not declare APD multiscale state",
+        }
+    clock = stage.get("clock") if isinstance(stage.get("clock"), dict) else {}
+    transfer = (
+        stage.get("transfer") if isinstance(stage.get("transfer"), dict) else {}
+    )
+    schedule = (
+        stage.get("schedule") if isinstance(stage.get("schedule"), dict) else {}
+    )
+    input_state = (
+        stage.get("input_state")
+        if isinstance(stage.get("input_state"), dict) else {}
+    )
+    output_state = (
+        stage.get("output_state")
+        if isinstance(stage.get("output_state"), dict) else {}
+    )
+    transferred = transfer.get("available") is True
+    conventional = schedule.get("policy") == "conventional_native"
+    contract_errors: list[str] = []
+    if stage.get("schema_name") != "openmvs.dmap.apd_multiscale_stage":
+        contract_errors.append("unsupported or missing APD multiscale stage schema")
+    if strict_int(stage.get("schema_version")) != 1:
+        contract_errors.append("APD multiscale stage schema_version must be 1")
+    if strict_int(stage.get("state_schema_version")) != 1:
+        contract_errors.append("APD multiscale state_schema_version must be 1")
+    if manifest_stage != stage:
+        contract_errors.append("summary and map-manifest APD multiscale metadata differ")
+    if clock.get("status") != "valid":
+        contract_errors.append("APD multiscale stage clock is invalid")
+    if strict_int(clock.get("level_index")) is None:
+        contract_errors.append("APD multiscale level_index is missing or invalid")
+    if strict_int(clock.get("stage_index")) is None:
+        contract_errors.append("APD multiscale stage_index is missing or invalid")
+    if transferred != (transfer.get("status") == "valid"):
+        contract_errors.append("transfer availability and status disagree")
+    if transferred == conventional:
+        contract_errors.append("transfer availability and schedule policy disagree")
+    if input_state.get("available") is not transferred:
+        contract_errors.append("input-state availability and transfer status disagree")
+    if output_state.get("available") is not True:
+        contract_errors.append("output APD multiscale state is unavailable")
+    check("apd_multiscale_contract", not contract_errors, contract_errors)
+
+    expected_signals = set(APD_MULTISCALE_OUTPUT_SIGNALS)
+    if transferred:
+        expected_signals.update(APD_MULTISCALE_INPUT_SIGNALS)
+    present_signals = set(selected_entries)
+    metadata_errors: list[str] = []
+    for signal, entry in selected_entries.items():
+        if entry.get("dtype") != "uint8":
+            metadata_errors.append(f"{signal}: dtype must be uint8")
+        if entry.get("logical_iteration") is not None:
+            metadata_errors.append(f"{signal}: logical_iteration must be absent")
+        if entry.get("lossless") is not True:
+            metadata_errors.append(f"{signal}: lossless must be true")
+        if strict_int(entry.get("state_schema_version")) != 1:
+            metadata_errors.append(f"{signal}: state_schema_version must be 1")
+        is_input = signal in APD_MULTISCALE_INPUT_SIGNALS
+        expected_role = (
+            "multiscale_input"
+            if signal == "apd_transferred_reliability" else
+            "multiscale_input_provenance"
+            if is_input else
+            "multiscale_output"
+            if signal == "apd_output_reliability" else
+            "multiscale_output_provenance"
+        )
+        if entry.get("role") != expected_role:
+            metadata_errors.append(
+                f"{signal}: expected role {expected_role!r}, got {entry.get('role')!r}"
+            )
+        expected_quality = "exact" if is_input or not conventional else "derived_exact"
+        if entry.get("measurement_quality") != expected_quality:
+            metadata_errors.append(
+                f"{signal}: expected measurement_quality {expected_quality!r}"
+            )
+        expected_basis = (
+            "runtime_host_transfer_state"
+            if is_input else
+            "native_selected_view_mask_uniform_compatibility_classifier"
+            if conventional else
+            "apd_runtime_profile_and_anchor_state"
+        )
+        if entry.get("measurement_basis") != expected_basis:
+            metadata_errors.append(
+                f"{signal}: expected measurement_basis {expected_basis!r}"
+            )
+    check("apd_multiscale_map_coverage", present_signals == expected_signals, {
+        "expected": sorted(expected_signals),
+        "present": sorted(present_signals),
+        "missing": sorted(expected_signals - present_signals),
+        "unexpected": sorted(present_signals - expected_signals),
+    })
+    check("apd_multiscale_map_metadata", not metadata_errors, metadata_errors)
+
+    domain_errors: list[str] = []
+    map_stats: dict[str, dict[str, Any]] = {}
+    for signal in sorted(present_signals):
+        data = maps.get((signal, None))
+        if data is None:
+            domain_errors.append(f"{signal}: decoded map is unavailable")
+            continue
+        values = np.asarray(data)
+        if signal.endswith("reliability"):
+            invalid = int(np.count_nonzero((values < 0) | (values > 2)))
+            counts = np.bincount(values.reshape(-1).astype(np.uint8), minlength=3)
+            map_stats[signal] = {
+                "num_pixels": int(values.size),
+                "unknown": int(counts[0]),
+                "unreliable": int(counts[1]),
+                "reliable": int(counts[2]),
+                "reliable_ratio": float(counts[2] / values.size),
+            }
+        else:
+            maximum = int(np.max(values)) if values.size else 0
+            limit = 1 if signal.endswith("deformable_eligible") else 8
+            invalid = int(np.count_nonzero((values < 0) | (values > limit)))
+            nonzero = int(np.count_nonzero(values))
+            map_stats[signal] = {
+                "num_pixels": int(values.size),
+                "nonzero": nonzero,
+                "nonzero_ratio": float(nonzero / values.size),
+                "maximum": maximum,
+            }
+        if invalid:
+            domain_errors.append(f"{signal}: {invalid} values are outside its domain")
+    check("apd_multiscale_map_domains", not domain_errors, domain_errors)
+
+    stats_errors: list[str] = []
+    state_specs = (
+        ("input", input_state, "apd_transferred"),
+        ("output", output_state, "apd_output"),
+    )
+    for state_name, state_metadata, signal_prefix in state_specs:
+        if state_name == "input" and not transferred:
+            continue
+        for suffix, metadata_key in (
+            ("reliability", "reliability"),
+            ("anchor_count", "anchor_count_provenance"),
+            ("deformable_eligible", "deformable_eligible_provenance"),
+        ):
+            signal = f"{signal_prefix}_{suffix}"
+            observed = map_stats.get(signal)
+            expected = state_metadata.get(metadata_key)
+            if not isinstance(observed, dict) or not isinstance(expected, dict):
+                stats_errors.append(f"{signal}: map or metadata statistics unavailable")
+                continue
+            for key, observed_value in observed.items():
+                expected_value = expected.get(key)
+                if isinstance(observed_value, float):
+                    if finite_number(expected_value) is None or abs(
+                        observed_value - float(expected_value)
+                    ) > 1.0e-12:
+                        stats_errors.append(f"{signal}: {key} statistics differ")
+                elif expected_value != observed_value:
+                    stats_errors.append(f"{signal}: {key} statistics differ")
+            if observed.get("num_pixels") != width * height:
+                stats_errors.append(f"{signal}: statistics extent differs from frame")
+    check("apd_multiscale_map_statistics", not stats_errors, stats_errors)
+    return {
+        "requested": requested,
+        "available": (
+            not contract_errors
+            and present_signals == expected_signals
+            and not metadata_errors
+            and not domain_errors
+            and not stats_errors
+        ),
+        "transferred": transferred,
+        "schedule_policy": schedule.get("policy"),
+        "level_index": clock.get("level_index"),
+        "stage_index": clock.get("stage_index"),
+        "signals": sorted(present_signals),
+        "statistics": map_stats,
+    }
+
+
 def validate(arguments: Arguments) -> dict[str, Any]:
     frame_dir = arguments.frame_dir.expanduser().resolve()
     if (frame_dir / "prefilter_manifest.json").is_file():
@@ -3914,12 +5800,23 @@ def validate(arguments: Arguments) -> dict[str, Any]:
         {"actual": manifest.get("measurement_model"), "expected": expected_measurement_model},
     )
     exact_available = bool((manifest.get("exact_capture") or {}).get("available"))
+    apd_capture = manifest.get("apd_capture") or {}
+    apd_available = bool(
+        schema_version == 4
+        and isinstance(apd_capture, dict)
+        and apd_capture.get("requested") is True
+        and apd_capture.get("maps_available") is True
+    )
     expected_candidate_mode = (
-        "exact_production_hot_kernel_full_frame" if schema_version == 4 and exact_available
+        "exact_apd_working_objective_full_frame" if apd_available
+        else "exact_production_hot_kernel_full_frame"
+        if schema_version == 4 and exact_available
         else "unavailable_post_pass_snapshot"
     )
     expected_gap_mode = (
-        "exact_process_pixel_winner_runner_up_full_frame" if schema_version == 4 and exact_available
+        "exact_apd_working_winner_runner_up_full_frame" if apd_available
+        else "exact_process_pixel_winner_runner_up_full_frame"
+        if schema_version == 4 and exact_available
         else "post_pass_current_plus_eight_neighbors"
     )
     check("candidate_accounting_mode", summary.get("candidate_accounting_mode") == expected_candidate_mode, summary.get("candidate_accounting_mode"))
@@ -4121,6 +6018,8 @@ def validate(arguments: Arguments) -> dict[str, Any]:
     v3_logical_state: dict[str, Any] | None = None
     v3_logical_event: dict[str, Any] | None = None
     v4_exact: dict[str, Any] | None = None
+    apd_validation: dict[str, Any] | None = None
+    apd_multiscale_validation: dict[str, Any] | None = None
     if schema_version in {3, 4}:
         v3_logical_state = validate_v3_logical_states(
             manifest=manifest,
@@ -4173,6 +6072,27 @@ def validate(arguments: Arguments) -> dict[str, Any]:
             decay_metadata=decay_metadata,
             view_samples_metadata=view_samples_metadata,
             hysteresis_metadata=hysteresis_metadata,
+            check=check,
+        )
+        apd_validation = validate_apd_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=entries,
+            logical_maps=logical_maps,
+            width=width,
+            height=height,
+            tolerance=arguments.tolerance,
+            expect_geometric_zero=arguments.expect_geometric_zero,
+            check=check,
+            multiscale_maps=maps,
+        )
+        apd_multiscale_validation = validate_apd_multiscale_maps(
+            manifest=manifest,
+            summary=summary,
+            entries=entries,
+            maps=maps,
+            width=width,
+            height=height,
             check=check,
         )
 
@@ -4720,6 +6640,10 @@ def validate(arguments: Arguments) -> dict[str, Any]:
         result["logical_event_validation"] = v3_logical_event
     if v4_exact is not None:
         result["exact_validation"] = v4_exact
+    if apd_validation is not None:
+        result["apd_validation"] = apd_validation
+    if apd_multiscale_validation is not None:
+        result["apd_multiscale_validation"] = apd_multiscale_validation
     result = machine_readable_result(result)
     if arguments.output is not None:
         output = arguments.output.expanduser().resolve()

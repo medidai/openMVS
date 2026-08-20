@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import csv
 import gzip
 import hashlib
 import json
@@ -50,6 +51,39 @@ LOSSLESS_RASTER_PIXEL_SIGNALS = {
     "adaptive_patch_activation",
     "adaptive_patch_fallback_status",
     "hierarchy_update_status",
+    "apd_reliability_class",
+    "apd_profile_reason",
+    "apd_profile_eta",
+    "apd_profile_finite_count",
+    "apd_profile_local_minimum_count",
+    "apd_profile_plateau_start",
+    "apd_profile_plateau_end",
+    "apd_sector_candidate_count",
+    "apd_ransac_inlier_count",
+    "apd_ransac_outlier_count",
+    "apd_anchor_count",
+    "apd_anchor_reason",
+    "apd_ransac_valid",
+    "apd_deformable_eligible",
+    "apd_fitted_plane_valid",
+    "apd_update_source",
+    "apd_winner_slot",
+    "apd_runner_up_slot",
+    "apd_candidate_tested_count",
+    "apd_candidate_finite_count",
+    "apd_candidate_accepted_count",
+    "apd_selected_view_count",
+    "apd_working_selected_views_mask",
+    "apd_selected_view_weight_sum",
+    "apd_deformable_active",
+    "apd_update_stage",
+    "apd_fitted_plane_available",
+    "apd_fitted_plane_tested",
+    "apd_fitted_plane_accepted",
+    "apd_final_refinement_offset",
+    "apd_final_refinement_tested_count",
+    "apd_final_refinement_finite_count",
+    "apd_final_refinement_accepted",
 }
 BUILTIN_CATEGORY_LEGENDS = {
     "view_probability_legacy_last_view_collapse": {"0": "no collapse", "1": "legacy last-view collapse"},
@@ -66,6 +100,57 @@ BUILTIN_CATEGORY_LEGENDS = {
         "4": "normal refinement", "5": "random-normal refinement",
         "6": "surface-normal refinement",
     },
+    "apd_reliability_class": {
+        "0": "unknown", "1": "unreliable", "2": "reliable",
+    },
+    "apd_profile_reason": {
+        "0": "unknown invalid input",
+        "1": "unknown nonfinite cost",
+        "2": "unreliable: no local minimum",
+        "3": "unreliable: global minimum outside eta",
+        "4": "unreliable: global minimum cost above T1",
+        "5": "unreliable: single minimum not below T2",
+        "6": "unreliable: multi-minimum separation not above T3",
+        "7": "reliable: single minimum",
+        "8": "reliable: separated minima",
+    },
+    "apd_anchor_reason": {
+        "0": "unknown",
+        "1": "pixel is not unreliable",
+        "2": "invalid center depth",
+        "3": "insufficient sector candidates",
+        "4": "no valid RANSAC model",
+        "5": "insufficient model inliers",
+        "6": "ready",
+    },
+    "apd_ransac_valid": {"0": "invalid", "1": "valid"},
+    "apd_deformable_eligible": {"0": "not eligible", "1": "eligible"},
+    "apd_deformable_active": {"0": "inactive", "1": "active"},
+    "apd_fitted_plane_valid": {"0": "invalid", "1": "valid"},
+    "apd_fitted_plane_available": {"0": "unavailable", "1": "available"},
+    "apd_fitted_plane_tested": {"0": "not tested", "1": "tested"},
+    "apd_fitted_plane_accepted": {"0": "not accepted", "1": "accepted"},
+    "apd_final_refinement_accepted": {"0": "retained", "1": "accepted"},
+    "apd_update_stage": {
+        "1": "reliable first", "2": "non-reliable second",
+    },
+    "apd_final_refinement_offset": {
+        str(encoded): f"{encoded - 5:+d} disparity"
+        for encoded in range(11)
+    },
+    "apd_immutable_anchor_state": {"0": "not active", "1": "immutable snapshot"},
+    "apd_view_selection_mode": {
+        "0": "native", "1": "anchor evidence",
+        "2": "previous weights fallback", "3": "selected mask fallback",
+        "4": "first view fallback",
+    },
+    "apd_update_source": {
+        "0": "none", "1": "initialization", "2": "propagation",
+        "3": "depth refinement", "4": "normal refinement",
+        "5": "random-normal refinement", "6": "surface-normal refinement",
+        "7": "filtered", "8": "changed unknown", "9": "APD anchor propagation",
+        "10": "APD fitted plane", "11": "APD final refinement",
+    },
 }
 CRITICAL_PIXEL_SIGNALS = {
     "candidate_identity_exact",
@@ -77,6 +162,29 @@ CRITICAL_PIXEL_SIGNALS = {
     "view_cost_components_exact",
     "view_selection_metrics_exact",
     "view_weighted_contribution_exact",
+    "apd_reliability_class",
+    "apd_profile_reason",
+    "apd_anchor_count",
+    "apd_deformable_eligible",
+    "apd_working_winner_cost",
+    "apd_native_persistent_cost",
+    "apd_winner_runner_up_gap",
+    "apd_update_source",
+    "apd_deformable_active",
+    "apd_view_selection_mode",
+    "apd_anchor_evidence_count",
+    "apd_working_selected_views_mask",
+    "apd_selected_view_weight_sum",
+    "apd_best_anchor_working_cost",
+    "apd_anchor_accepted_slot",
+    "apd_immutable_anchor_state",
+    "apd_update_stage",
+    "apd_fitted_plane_valid",
+    "apd_fitted_plane_working_cost",
+    "apd_fitted_plane_accepted",
+    "apd_final_refinement_best_cost",
+    "apd_final_refinement_improvement",
+    "apd_final_refinement_accepted",
     "low_texture_update_eligible_exact",
     "low_texture_update_ambiguity_exact",
     "low_texture_update_required_gain_exact",
@@ -98,6 +206,11 @@ COMPLETED_TRACE_SCHEMA_VERSION = 2
 MAX_COMPLETED_TRACE_ROWS = dmap_drilldown.MAX_TRACE_REPORT_ROWS
 MAX_TRACE_ARRAY_VALUES = 64
 MAX_TRACE_JSONL_LINE_BYTES = 1024 * 1024
+MAX_APD_TRACE_REPORT_ROWS = 4096
+MAX_APD_TRACE_REPORT_BYTES = 128 * 1024 * 1024
+MAX_APD_ITERATION_CSV_BYTES = 64 * 1024 * 1024
+MAX_APD_MULTISCALE_REPORT_ROWS = 16384
+MAX_APD_MULTISCALE_REPORT_BYTES = 64 * 1024 * 1024
 CANDIDATE_ACCOUNTING_UNAVAILABLE_MODE = "unavailable_post_pass_snapshot"
 CANDIDATE_ACCOUNTING_METRICS = (
     "changed_ratio",
@@ -479,6 +592,89 @@ INVESTIGATION_GUIDE = {
             },
         },
         {
+            "key": "apd",
+            "title": "Debug APD reliability, anchor views, propagation, and deformable cost",
+            "summary": (
+                "Follow one APD decision from its disparity profile through reliability, "
+                "reliable-first scheduling, RANSAC anchors, fitted-plane and immutable-anchor proposals, working candidate ordering, native persistent rescore, and terminal native refinement."
+            ),
+            "steps": [
+                "Use Same logical iteration and the APD mechanics preset; begin with reliability class, profile reason, minimum offset, minimum cost, and separation.",
+                "Inspect nearest-reliable distance, sector candidates, RANSAC validity/residuals, anchor count, and deformable eligibility at the same pixels.",
+                "Check view-selection mode, anchor evidence count, per-view priors/sampling probabilities, and fallback frequency before interpreting candidate costs.",
+                "Compare each immutable anchor proposal's working cost and diagnostic native rescore; verify the accepted anchor pixel/slot and whether later refinement displaced it.",
+                "Verify that reliable pixels run in the first stage, then inspect fitted-plane availability, working/native costs, acceptance, and final-winner attribution for non-reliable pixels.",
+                "Compare center, anchor-mean, deformable photometric, geometric, working-winner, runner-up-gap, and native-persistent costs without mixing their score domains.",
+                "On the last logical iteration, inspect the bounded native-refinement incumbent, best cost, strict improvement, disparity offset, acceptance, and resulting depth.",
+                "For multiscale runs, verify each stage clock and transfer status, then compare the transferred reliability map consumed at iteration zero with the output state published to the next stage.",
+                "Use APD selected-pixel traces to inspect all 61 profile samples, anchor coordinates and snapshot view masks, candidate costs, per-view evidence, and final per-view center/anchor/working costs.",
+                "Return to fresh Process<false> quality runs for annotation residuals, repeatability, precision, coverage, and runtime before accepting the mechanism.",
+            ],
+            "look_for": [
+                "Reliability failures dominated by an off-center minimum, a high minimum cost, or insufficient separation rather than unknown/nonfinite input.",
+                "Valid anchors spatially associated with the same surface instead of crossing depth or normal discontinuities.",
+                "Anchor-evidence selection with low fallback rates and probabilities concentrated on views jointly supported by reliable anchors.",
+                "Accepted anchor proposals whose native rescoring and final geometry remain coherent after refinement.",
+                "Fitted-plane wins concentrated in unreliable regions with valid same-surface anchors, followed by stable native rescoring.",
+                "Final native refinements accepted only above the strict 0.10 threshold and reducing noise without moving across surfaces.",
+                "A larger working winner gap accompanied by a sensible native persistent rescore and improved final geometry.",
+                "Source attribution and candidate masks that explain where propagation or refinement produced the final working winner.",
+            ],
+            "cautions": [
+                "APD working costs rank candidates only; OpenMVS persists a conventional native rescore. Native-minus-working is objective drift, not geometric error.",
+                "The native coarsest stage exposes its final selected-view mask but not its historical Monte Carlo weights; the published coarsest reliability seed therefore uses explicitly labeled uniform compatibility weights.",
+                "The full-frame maps record counts and outcomes. Exact sector identities, anchor coordinates, 61-sample profiles, and per-view APD components are targeted-trace evidence.",
+                "Process<true> mechanics output is diagnostic-only; use a same-binary Process<false> control for quality.",
+            ],
+            "action_label": "Set up APD mechanics inspection",
+            "action": {
+                "alignment": "same",
+                "map_preset": "apd",
+                "target": "mechanics-heading",
+                "signals": [
+                    "reference_rgb",
+                    "apd_transferred_reliability",
+                    "apd_output_reliability",
+                    "apd_transferred_anchor_count",
+                    "apd_output_anchor_count",
+                    "apd_transferred_deformable_eligible",
+                    "apd_output_deformable_eligible",
+                    "apd_reliability_class",
+                    "apd_profile_reason",
+                    "apd_global_minimum_offset",
+                    "apd_global_minimum_cost",
+                    "apd_profile_separation",
+                    "apd_nearest_reliable_distance",
+                    "apd_anchor_count",
+                    "apd_deformable_eligible",
+                    "apd_center_cost",
+                    "apd_anchor_mean_cost",
+                    "apd_deformable_photometric_cost",
+                    "apd_working_winner_cost",
+                    "apd_native_persistent_cost",
+                    "apd_native_minus_working_cost",
+                    "apd_winner_runner_up_gap",
+                    "apd_view_selection_mode",
+                    "apd_anchor_evidence_count",
+                    "apd_working_selected_views_mask",
+                    "apd_selected_view_weight_sum",
+                    "apd_best_anchor_working_cost",
+                    "apd_anchor_accepted_slot",
+                    "apd_update_stage",
+                    "apd_fitted_plane_valid",
+                    "apd_fitted_plane_working_cost",
+                    "apd_fitted_plane_native_cost",
+                    "apd_fitted_plane_accepted",
+                    "apd_final_refinement_incumbent_cost",
+                    "apd_final_refinement_best_cost",
+                    "apd_final_refinement_improvement",
+                    "apd_final_refinement_offset",
+                    "apd_final_refinement_accepted",
+                    "apd_update_source",
+                ],
+            },
+        },
+        {
             "key": "multiscale",
             "title": "Debug a multiscale change",
             "summary": "Identify which pyramid level introduces a gain or regression before attributing the final full-resolution result.",
@@ -571,6 +767,7 @@ def investigation_guide_for_registry(
         "texture": {"texture", "cost", "candidate_update"},
         "patch": {"patch", "cost", "view_selection", "candidate_update"},
         "deformable_patch": {"patch", "cost", "view_selection"},
+        "apd": {"texture", "patch", "cost", "candidate_update", "geometry"},
         "multiscale": {"multiscale"},
     }
     descriptors = {
@@ -578,6 +775,10 @@ def investigation_guide_for_registry(
         for row in registry.get("signals") or []
         if isinstance(row, Mapping) and row.get("signal_id")
     }
+    if not any(signal_id.startswith("apd_") for signal_id in descriptors):
+        guide["recipes"] = [
+            recipe for recipe in guide["recipes"] if recipe.get("key") != "apd"
+        ]
     for recipe in guide["recipes"]:
         action = recipe.get("action") or {}
         mechanisms = set(action.get("mechanisms") or []) | recipe_mechanisms.get(
@@ -3505,6 +3706,525 @@ def reference_patch_layout_records(
     )]
 
 
+def apd_observability_records(
+    run_scenes: Iterable[Any],
+    output_dir: Path,
+    experiment_root: Path | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load bounded APD aggregate and targeted-trace evidence from capture roots."""
+
+    iteration_rows: list[dict[str, Any]] = []
+    trace_rows: list[dict[str, Any]] = []
+    trace_sources: list[dict[str, Any]] = []
+    contracts: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
+    for run_scene in run_scenes:
+        instrumentation_dir = getattr(run_scene, "instrumentation_dir", None)
+        if instrumentation_dir is None:
+            continue
+        sources.append({
+            "label": str(run_scene.label),
+            "configured_run": str(
+                getattr(run_scene, "configured_label", run_scene.label)
+            ),
+            "repeat": int(run_scene.repeat),
+            "scene_id": str(run_scene.scene_id),
+            "estimation_stage": str(getattr(run_scene, "estimation_stage", "photometric")),
+            "geometric_iteration": getattr(run_scene, "geometric_iteration", None),
+            "capture_profile": str(getattr(run_scene, "capture_profile", "summary")),
+            "instrumentation_dir": Path(instrumentation_dir),
+            "trace_only": False,
+        })
+
+    executions_path = (
+        experiment_root / "trace_reruns" / "executions.json"
+        if experiment_root is not None else None
+    )
+    if executions_path is not None and executions_path.is_file() and not executions_path.is_symlink():
+        try:
+            payload = json.loads(executions_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("trace-rerun execution receipt is not a JSON object")
+            if (
+                payload.get("schema_name") != "openmvs.dmap.trace_rerun_executions"
+                or payload.get("schema_version") != 1
+                or not isinstance(payload.get("executions"), list)
+            ):
+                raise ValueError("trace-rerun execution receipt schema is invalid")
+            trace_root = executions_path.parent.resolve()
+            for execution in payload["executions"]:
+                if not isinstance(execution, dict):
+                    raise ValueError("trace-rerun execution row is not an object")
+                label = str(execution.get("run", ""))
+                scene_id = str(execution.get("scene_id", ""))
+                if (
+                    re.fullmatch(r"[A-Za-z0-9_.-]+", label) is None
+                    or re.fullmatch(r"[A-Za-z0-9_.-]+", scene_id) is None
+                ):
+                    raise ValueError("trace-rerun execution identity is unsafe")
+                validations = execution.get("validation")
+                boundary = execution.get("runtime_boundary_receipt")
+                admitted = (
+                    execution.get("dry_run") is False
+                    and execution.get("return_code") == 0
+                    and isinstance(boundary, dict)
+                    and boundary.get("valid") is True
+                    and isinstance(validations, list)
+                    and bool(validations)
+                    and all(
+                        isinstance(item, dict) and bool(item.get("validation"))
+                        for item in validations
+                    )
+                )
+                run_dir = trace_root / label / scene_id
+                closure = integrity.validate_capture_artifact_closure(run_dir)
+                instrumentation_dir = run_dir / "dmap_instrumentation"
+                instrumentation_valid = (
+                    instrumentation_dir.is_dir() and not instrumentation_dir.is_symlink()
+                )
+                if not admitted or not closure.valid or not instrumentation_valid:
+                    trace_sources.append({
+                        "run": label, "configured_run": label,
+                        "repeat": 0, "scene_id": scene_id,
+                        "estimation_stage": "photometric", "geometric_iteration": None,
+                        "capture_profile": "trace", "kind": "targeted_trace",
+                        "available": False, "rows_included": 0, "truncated": False,
+                        "path": relative_path(run_dir, output_dir),
+                        "reason": (
+                            "trace execution admission failed" if not admitted
+                            else (
+                                f"capture artifact closure failed: {closure.reason}"
+                                if not closure.valid
+                                else "trace instrumentation directory is unavailable or unsafe"
+                            )
+                        ),
+                    })
+                    continue
+                stage_sources = [("photometric", None, instrumentation_dir)]
+                geometric_root = instrumentation_dir / "geometric_iterations"
+                if geometric_root.is_dir() and not geometric_root.is_symlink():
+                    for stage_dir in sorted(geometric_root.glob("iteration*")):
+                        match = re.fullmatch(r"iteration(\d+)", stage_dir.name)
+                        if match is not None and stage_dir.is_dir() and not stage_dir.is_symlink():
+                            stage_sources.append((
+                                "geometric_consistency", int(match.group(1)), stage_dir,
+                            ))
+                for estimation_stage, geometric_iteration, stage_dir in stage_sources:
+                    sources.append({
+                        "label": label, "configured_run": label,
+                        "repeat": 0, "scene_id": scene_id,
+                        "estimation_stage": estimation_stage,
+                        "geometric_iteration": geometric_iteration,
+                        "capture_profile": "trace",
+                        "instrumentation_dir": stage_dir,
+                        "trace_only": True,
+                    })
+        except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as exc:
+            trace_sources.append({
+                "run": "unknown", "configured_run": "unknown",
+                "repeat": 0, "scene_id": "unknown",
+                "estimation_stage": "photometric", "geometric_iteration": None,
+                "capture_profile": "trace", "kind": "targeted_trace",
+                "available": False, "rows_included": 0, "truncated": False,
+                "path": relative_path(executions_path, output_dir),
+                "reason": str(exc),
+            })
+
+    seen: set[tuple[Any, ...]] = set()
+    for source_record in sources:
+        root = Path(source_record["instrumentation_dir"]).resolve()
+        identity = (
+            source_record["label"], source_record["repeat"], source_record["scene_id"],
+            source_record["estimation_stage"], source_record["geometric_iteration"], str(root),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        metadata_path = root / "run_metadata.json"
+        metadata: dict[str, Any] = {}
+        if metadata_path.is_file() and not metadata_path.is_symlink():
+            try:
+                loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata = loaded if isinstance(loaded, dict) else {}
+            except (json.JSONDecodeError, OSError, UnicodeError):
+                metadata = {}
+        parameters = metadata.get("cuda_patchmatch_parameters")
+        contract = (
+            parameters.get("adaptive_patch_deformation")
+            if isinstance(parameters, dict) else None
+        )
+        if not isinstance(contract, dict):
+            contract = {}
+        apd_enabled = contract.get("enabled") is True
+        common = {
+            "run": identity[0], "repeat": identity[1], "scene_id": identity[2],
+            "configured_run": source_record["configured_run"],
+            "estimation_stage": identity[3], "geometric_iteration": identity[4],
+            "capture_profile": source_record["capture_profile"],
+        }
+        trace_only = bool(source_record["trace_only"])
+        if contract and not trace_only:
+            contracts.append({**common, **json_value(contract)})
+
+        iteration_path = root / "instrumentation" / "apd_iteration.csv"
+        if not trace_only and iteration_path.is_file() and not iteration_path.is_symlink():
+            try:
+                size = iteration_path.stat().st_size
+                if size <= 0 or size > MAX_APD_ITERATION_CSV_BYTES:
+                    raise ValueError(
+                        f"APD iteration CSV size {size} is outside the report limit"
+                    )
+                with iteration_path.open(newline="", encoding="utf-8") as handle:
+                    for row in csv.DictReader(handle):
+                        parsed_row: dict[str, Any] = {}
+                        for key, value in row.items():
+                            if value is None:
+                                parsed_row[key] = None
+                            elif re.fullmatch(r"[-+]?\d+", value):
+                                parsed_row[key] = int(value)
+                            else:
+                                try:
+                                    number = float(value)
+                                except ValueError:
+                                    parsed_row[key] = value
+                                else:
+                                    parsed_row[key] = (
+                                        number if math.isfinite(number) else None
+                                    )
+                        normalized = canonical_pyramid_record({**parsed_row, **common})
+                        normalized["source_path"] = relative_path(
+                            iteration_path, output_dir
+                        )
+                        iteration_rows.append(json_value(normalized))
+            except (OSError, UnicodeError, ValueError, csv.Error) as exc:
+                trace_sources.append({
+                    **common, "kind": "iteration_summary", "available": False,
+                    "path": relative_path(iteration_path, output_dir),
+                    "reason": str(exc),
+                })
+        elif apd_enabled and not trace_only:
+            trace_sources.append({
+                **common, "kind": "iteration_summary", "available": False,
+                "path": relative_path(iteration_path, output_dir),
+                "reason": "APD is enabled but apd_iteration.csv is unavailable",
+            })
+
+        trace_path = root / "instrumentation" / "apd_traces.jsonl"
+        source = {
+            **common, "kind": "targeted_trace", "available": False,
+            "path": relative_path(trace_path, output_dir), "rows_included": 0,
+            "truncated": False, "reason": "not requested",
+        }
+        if trace_path.is_file() and not trace_path.is_symlink():
+            source["reason"] = ""
+            consumed_bytes = 0
+            source_row_start = len(trace_rows)
+            try:
+                with trace_path.open(encoding="utf-8") as handle:
+                    for line_number, line in enumerate(handle, start=1):
+                        line_bytes = len(line.encode("utf-8"))
+                        consumed_bytes += line_bytes
+                        if line_bytes > MAX_TRACE_JSONL_LINE_BYTES:
+                            raise ValueError(
+                                f"APD trace line {line_number} exceeds the line-size limit"
+                            )
+                        if (
+                            len(trace_rows) - source_row_start >= MAX_APD_TRACE_REPORT_ROWS
+                            or consumed_bytes > MAX_APD_TRACE_REPORT_BYTES
+                        ):
+                            source["truncated"] = True
+                            source["reason"] = (
+                                "report embedding limit reached; the complete JSONL remains "
+                                "available at the recorded path"
+                            )
+                            break
+                        if not line.strip():
+                            continue
+                        row = json.loads(line)
+                        if not isinstance(row, dict):
+                            raise ValueError(
+                                f"APD trace line {line_number} is not a JSON object"
+                            )
+                        if row.get("schema_name") != "openmvs.dmap.apd_trace":
+                            raise ValueError(
+                                f"APD trace line {line_number} has an invalid schema"
+                            )
+                        if row.get("schema_version") not in {1, 2, 3}:
+                            raise ValueError(
+                                f"APD trace line {line_number} has an unsupported version"
+                            )
+                        normalized = canonical_pyramid_record({**row, **common})
+                        normalized["source_path"] = relative_path(trace_path, output_dir)
+                        trace_rows.append(json_value(normalized))
+                        source["rows_included"] += 1
+                source["available"] = source["rows_included"] > 0
+                if not source["available"] and not source["reason"]:
+                    source["reason"] = "APD trace JSONL contains no records"
+            except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as exc:
+                del trace_rows[source_row_start:]
+                source["rows_included"] = 0
+                source["reason"] = str(exc)
+        elif apd_enabled:
+            source["reason"] = "APD targeted trace was not requested or was not admitted"
+        if apd_enabled or trace_path.exists():
+            trace_sources.append(source)
+    return iteration_rows, trace_rows, trace_sources, contracts
+
+
+def apd_multiscale_records(
+    run_scenes: Iterable[Any],
+    output_dir: Path,
+) -> list[dict[str, Any]]:
+    """Load bounded, versioned APD stage-transfer records for every pyramid level."""
+
+    output: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    consumed_bytes = 0
+    for run_scene in run_scenes:
+        instrumentation_dir = getattr(run_scene, "instrumentation_dir", None)
+        if instrumentation_dir is None:
+            continue
+        root = Path(instrumentation_dir).resolve()
+        identity = (
+            str(run_scene.label), int(run_scene.repeat), str(run_scene.scene_id),
+            str(getattr(run_scene, "estimation_stage", "photometric")),
+            getattr(run_scene, "geometric_iteration", None), str(root),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        path = root / "instrumentation" / "apd_multiscale_stages.jsonl"
+        if not path.is_file() or path.is_symlink():
+            continue
+        common = {
+            "run": identity[0], "repeat": identity[1], "scene_id": identity[2],
+            "configured_run": str(
+                getattr(run_scene, "configured_label", run_scene.label)
+            ),
+            "estimation_stage": identity[3], "geometric_iteration": identity[4],
+            "capture_profile": str(getattr(run_scene, "capture_profile", "summary")),
+        }
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    line_bytes = len(line.encode("utf-8"))
+                    consumed_bytes += line_bytes
+                    if line_bytes > MAX_TRACE_JSONL_LINE_BYTES:
+                        raise ValueError(
+                            f"APD multiscale line {line_number} exceeds the line-size limit"
+                        )
+                    if (
+                        len(output) >= MAX_APD_MULTISCALE_REPORT_ROWS
+                        or consumed_bytes > MAX_APD_MULTISCALE_REPORT_BYTES
+                    ):
+                        raise ValueError("APD multiscale report embedding limit reached")
+                    if not line.strip():
+                        continue
+                    payload = json.loads(line)
+                    if not isinstance(payload, dict):
+                        raise ValueError(
+                            f"APD multiscale line {line_number} is not a JSON object"
+                        )
+                    clock = _json_object(payload.get("clock"))
+                    transfer = _json_object(payload.get("transfer"))
+                    schedule = _json_object(payload.get("schedule"))
+                    source_state = _json_object(payload.get("source_state"))
+                    input_state = _json_object(payload.get("input_state"))
+                    output_state = _json_object(payload.get("output_state"))
+                    input_reliability = _json_object(input_state.get("reliability"))
+                    output_reliability = _json_object(output_state.get("reliability"))
+                    input_anchors = _json_object(
+                        input_state.get("anchor_count_provenance")
+                    )
+                    output_anchors = _json_object(
+                        output_state.get("anchor_count_provenance")
+                    )
+                    input_eligible = _json_object(
+                        input_state.get("deformable_eligible_provenance")
+                    )
+                    output_eligible = _json_object(
+                        output_state.get("deformable_eligible_provenance")
+                    )
+                    width = _trace_integer(payload.get("width"))
+                    height = _trace_integer(payload.get("height"))
+                    pyramid_level = _trace_integer(payload.get("pyramid_level"))
+                    image_id = _trace_integer(payload.get("image_id"))
+                    area = width * height if width and height else None
+                    transfer_available = transfer.get("available") is True
+                    schedule_policy = str(schedule.get("policy") or "")
+                    level_index = _trace_integer(clock.get("level_index"))
+                    level_count = _trace_integer(clock.get("level_count"))
+                    stage_index = _trace_integer(clock.get("stage_index"))
+                    errors: list[str] = []
+                    if (
+                        payload.get("schema_name")
+                        != "openmvs.dmap.apd_multiscale_stage_record"
+                        or _trace_integer(payload.get("schema_version")) != 1
+                        or _trace_integer(payload.get("state_schema_version")) != 1
+                    ):
+                        errors.append("unsupported schema")
+                    if (
+                        image_id is None or image_id < 0
+                        or pyramid_level is None or pyramid_level < 0
+                        or area is None or area <= 0
+                    ):
+                        errors.append("invalid frame, pyramid, or extent identity")
+                    if clock.get("status") != "valid":
+                        errors.append("invalid stage clock")
+                    if (
+                        level_index is None or level_index < 0
+                        or level_count is None or level_count <= 0
+                        or level_index >= level_count
+                        or stage_index is None or stage_index < 0
+                    ):
+                        errors.append("invalid stage-clock indices")
+                    if transfer_available != (transfer.get("status") == "valid"):
+                        errors.append("transfer status/availability mismatch")
+                    if transfer_available != (schedule_policy == "adaptive_patch_deformation"):
+                        errors.append("transfer availability/schedule mismatch")
+                    if schedule.get("valid") is not True:
+                        errors.append("invalid APD stage schedule")
+                    if schedule.get(
+                        "consumes_transferred_reliability_at_iteration_zero"
+                    ) is not transfer_available:
+                        errors.append("iteration-zero transfer-consumption mismatch")
+                    if input_state.get("available") is not transfer_available:
+                        errors.append("input-state/transfer availability mismatch")
+                    if source_state.get("available") is not transfer_available:
+                        errors.append("source-state/transfer availability mismatch")
+                    if output_state.get("available") is not True:
+                        errors.append("output state unavailable")
+                    if area is not None and _trace_integer(
+                        output_reliability.get("num_pixels")
+                    ) != area:
+                        errors.append("output reliability extent mismatch")
+                    if transfer_available and area is not None and _trace_integer(
+                        input_reliability.get("num_pixels")
+                    ) != area:
+                        errors.append("input reliability extent mismatch")
+                    if transfer_available and (
+                        _trace_integer(source_state.get("version")) != 1
+                        or _trace_integer(source_state.get("width")) in {None, 0}
+                        or _trace_integer(source_state.get("height")) in {None, 0}
+                        or _trace_integer(source_state.get("stage_index")) is None
+                    ):
+                        errors.append("invalid transferred source-state identity")
+
+                    def validate_state_stats(
+                        label: str,
+                        reliability: dict[str, Any],
+                        anchors: dict[str, Any],
+                        eligible: dict[str, Any],
+                    ) -> None:
+                        if area is None:
+                            return
+                        counts = [
+                            _trace_integer(reliability.get(key))
+                            for key in ("unknown", "unreliable", "reliable", "invalid_code")
+                        ]
+                        if (
+                            any(value is None or value < 0 for value in counts)
+                            or sum(value or 0 for value in counts) != area
+                            or counts[3] != 0
+                        ):
+                            errors.append(f"{label} reliability histogram is invalid")
+                        for name, stats, maximum_limit in (
+                            ("anchor", anchors, 8),
+                            ("eligibility", eligible, 1),
+                        ):
+                            if (
+                                _trace_integer(stats.get("num_pixels")) != area
+                                or _trace_integer(stats.get("nonzero")) is None
+                                or not 0 <= int(stats.get("nonzero", -1)) <= area
+                                or _trace_integer(stats.get("maximum")) is None
+                                or not 0 <= int(stats.get("maximum", -1)) <= maximum_limit
+                            ):
+                                errors.append(f"{label} {name} statistics are invalid")
+
+                    validate_state_stats(
+                        "output", output_reliability, output_anchors, output_eligible
+                    )
+                    if transfer_available:
+                        validate_state_stats(
+                            "input", input_reliability, input_anchors, input_eligible
+                        )
+                    expected_weight_quality = (
+                        "exact_runtime_state" if transfer_available
+                        else "compatibility_derived"
+                    )
+                    if output_state.get(
+                        "classifier_view_weight_quality"
+                    ) != expected_weight_quality:
+                        errors.append("classifier view-weight quality is inconsistent")
+                    record = {
+                        **common,
+                        "image_id": image_id,
+                        "pyramid_level": pyramid_level,
+                        "width": width,
+                        "height": height,
+                        "level_index": level_index,
+                        "level_count": level_count,
+                        "stage_index": stage_index,
+                        "stage_clock_status": clock.get("status"),
+                        "source_level_index": _trace_integer(source_state.get("level_index")),
+                        "source_stage_index": _trace_integer(source_state.get("stage_index")),
+                        "transfer_status": transfer.get("status"),
+                        "transfer_available": transfer_available,
+                        "schedule_policy": schedule_policy,
+                        "reliability_eta": _trace_integer(schedule.get("reliability_eta")),
+                        "ransac_normalized_threshold": schedule.get(
+                            "ransac_normalized_threshold"
+                        ),
+                        "input_unknown": _trace_integer(input_reliability.get("unknown")),
+                        "input_unreliable": _trace_integer(
+                            input_reliability.get("unreliable")
+                        ),
+                        "input_reliable": _trace_integer(input_reliability.get("reliable")),
+                        "input_reliable_ratio": input_reliability.get("reliable_ratio"),
+                        "input_anchor_nonzero_ratio": input_anchors.get("nonzero_ratio"),
+                        "input_deformable_eligible_ratio": input_eligible.get(
+                            "nonzero_ratio"
+                        ),
+                        "output_unknown": _trace_integer(output_reliability.get("unknown")),
+                        "output_unreliable": _trace_integer(
+                            output_reliability.get("unreliable")
+                        ),
+                        "output_reliable": _trace_integer(output_reliability.get("reliable")),
+                        "output_reliable_ratio": output_reliability.get("reliable_ratio"),
+                        "output_anchor_nonzero_ratio": output_anchors.get("nonzero_ratio"),
+                        "output_deformable_eligible_ratio": output_eligible.get(
+                            "nonzero_ratio"
+                        ),
+                        "classifier_view_weight_source": output_state.get(
+                            "classifier_view_weight_source"
+                        ),
+                        "classifier_view_weight_quality": output_state.get(
+                            "classifier_view_weight_quality"
+                        ),
+                        "valid": not errors,
+                        "validation_errors": errors,
+                        "source_path": relative_path(path, output_dir),
+                        "stage_state": json_value(payload),
+                    }
+                    output.append(json_value(canonical_pyramid_record(record)))
+        except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as exc:
+            output.append({
+                **common,
+                "available": False,
+                "valid": False,
+                "validation_errors": [str(exc)],
+                "source_path": relative_path(path, output_dir),
+            })
+    output.sort(key=lambda row: (
+        str(row.get("run")), int(row.get("repeat") or 0),
+        str(row.get("scene_id")), _identity_integer(row.get("image_id")),
+        str(row.get("estimation_stage")),
+        _identity_integer(row.get("geometric_iteration")),
+        _identity_integer(row.get("level_index")),
+    ))
+    return output
+
+
 def _cuda_resource_plan_records(
     dataframe: pd.DataFrame,
     *,
@@ -3813,6 +4533,15 @@ def build_report_model(
     reference_patch_layouts = reference_patch_layout_records(
         run_scenes, output_dir
     )
+    (
+        apd_iterations,
+        apd_traces,
+        apd_trace_sources,
+        apd_contracts,
+    ) = apd_observability_records(
+        run_scenes, output_dir, experiment_root=experiment_root
+    )
+    apd_multiscale_stages = apd_multiscale_records(run_scenes, output_dir)
     component_registry_model = component_registry.build_registry([
         *records(map_catalog),
         *records(signal_availability),
@@ -3883,6 +4612,7 @@ def build_report_model(
     diagnostic_reasons_by_key: dict[tuple[str, int], set[str]] = {}
     for item in run_scenes:
         key = (str(item.label), int(item.repeat))
+        configured_run = str(getattr(item, "configured_label", item.label))
         diagnostic_only = bool(getattr(item, "diagnostic_only", False))
         diagnostic_reason = str(getattr(item, "diagnostic_only_reason", "") or "")
         parity_eligible, parity_reason = quality_eligibility_by_run.get(
@@ -3892,6 +4622,7 @@ def build_report_model(
             "id": _run_id(*key),
             "deep_link_id": _run_id(*key),
             "label": key[0],
+            "configured_run": configured_run,
             "role": str(item.role),
             "repeat": key[1],
             "diagnostic_only": diagnostic_only,
@@ -3909,6 +4640,10 @@ def build_report_model(
         if bool(entry["diagnostic_only"]) != diagnostic_only:
             raise ValueError(
                 f"run {key[0]!r} repeat {key[1]} mixes diagnostic-only and quality cohorts"
+            )
+        if str(entry["configured_run"]) != configured_run:
+            raise ValueError(
+                f"run {key[0]!r} repeat {key[1]} mixes configured-run identities"
             )
         if diagnostic_reason:
             diagnostic_reasons_by_key.setdefault(key, set()).add(diagnostic_reason)
@@ -4493,6 +5228,11 @@ def build_report_model(
         },
         "mechanics": {
             "reference_patch_layouts": reference_patch_layouts,
+            "apd_contracts": apd_contracts,
+            "apd_multiscale_stages": apd_multiscale_stages,
+            "apd_iterations": apd_iterations,
+            "apd_traces": apd_traces,
+            "apd_trace_sources": apd_trace_sources,
             "observer_kernel_timing_diagnostics": records(performance),
             "texture_stratification": texture_stratification,
             "accepted_gain_census": accepted_gain_census,
@@ -4521,6 +5261,9 @@ def build_report_model(
                     row.get("available") is True
                     for row in reference_patch_layouts
                 ),
+                "apd_iteration_mechanics": bool(apd_iterations),
+                "apd_multiscale_stages": bool(apd_multiscale_stages),
+                "apd_targeted_traces": bool(apd_traces),
                 "exact_hot_kernel": not exact_iterations.empty,
                 "low_texture_update_hysteresis": bool(
                     low_texture_hysteresis.get("rows")
@@ -4668,6 +5411,72 @@ def validate_report_model(model: dict[str, Any], output_dir: Path) -> dict[str, 
         {"missing": sorted(declared_signal_ids - registry_signal_ids)},
     )
     mechanics = model.get("mechanics") or {}
+    apd_multiscale_rows = mechanics.get("apd_multiscale_stages") or []
+    apd_multiscale_errors: list[str] = []
+    apd_multiscale_identities: set[tuple[Any, ...]] = set()
+    apd_multiscale_chains: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    if not isinstance(apd_multiscale_rows, list):
+        apd_multiscale_errors.append("apd_multiscale_stages is not a list")
+        apd_multiscale_rows = []
+    for index, row in enumerate(apd_multiscale_rows):
+        if not isinstance(row, dict):
+            apd_multiscale_errors.append(f"rows[{index}] is not an object")
+            continue
+        identity = (
+            row.get("run"), _identity_integer(row.get("repeat")),
+            row.get("scene_id"), _identity_integer(row.get("image_id")),
+            _identity_integer(row.get("stage_index")),
+        )
+        if identity in apd_multiscale_identities:
+            apd_multiscale_errors.append(f"rows[{index}] duplicates identity {identity}")
+        apd_multiscale_identities.add(identity)
+        if row.get("valid") is not True or row.get("validation_errors"):
+            apd_multiscale_errors.append(
+                f"rows[{index}] failed stage-record validation"
+            )
+        level = _model_integer(row.get("level_index"))
+        level_count = _model_integer(row.get("level_count"))
+        stage_index = _model_integer(row.get("stage_index"))
+        width = _model_integer(row.get("width"))
+        height = _model_integer(row.get("height"))
+        if (
+            level is None or level < 0
+            or level_count is None or level_count <= 0 or level >= level_count
+            or stage_index is None or stage_index < 0
+            or width is None or width <= 0 or height is None or height <= 0
+        ):
+            apd_multiscale_errors.append(f"rows[{index}] has an invalid clock or extent")
+        transferred = row.get("transfer_available") is True
+        policy = row.get("schedule_policy")
+        if transferred != (policy == "adaptive_patch_deformation"):
+            apd_multiscale_errors.append(
+                f"rows[{index}] transfer and schedule policy disagree"
+            )
+        chain_key = (
+            row.get("run"), _identity_integer(row.get("repeat")),
+            row.get("scene_id"), _identity_integer(row.get("image_id")),
+        )
+        apd_multiscale_chains.setdefault(chain_key, []).append(row)
+    for chain_key, chain in apd_multiscale_chains.items():
+        ordered = sorted(chain, key=lambda row: _identity_integer(row.get("stage_index")))
+        for previous, current in zip(ordered, ordered[1:]):
+            if current.get("transfer_available") is not True:
+                continue
+            if _model_integer(current.get("source_stage_index")) != _model_integer(
+                previous.get("stage_index")
+            ):
+                apd_multiscale_errors.append(
+                    f"chain {chain_key} does not bind a transferred stage to its predecessor"
+                )
+    add(
+        "apd_multiscale_stages",
+        not apd_multiscale_errors,
+        {
+            "rows": len(apd_multiscale_rows),
+            "chains": len(apd_multiscale_chains),
+            "errors": apd_multiscale_errors,
+        },
+    )
     patch_layout_rows = mechanics.get("reference_patch_layouts") or []
     patch_layout_errors: list[str] = []
     patch_layout_identities: set[tuple[Any, ...]] = set()

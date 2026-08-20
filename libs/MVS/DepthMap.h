@@ -36,6 +36,9 @@
 // I N C L U D E S /////////////////////////////////////////////////
 
 #include "PointCloud.h"
+#ifdef _USE_CUDA
+#include "PatchMatchAPDCUDA.h"
+#endif
 
 
 // D E F I N E S ///////////////////////////////////////////////////
@@ -79,6 +82,37 @@ namespace MVS {
 DEFINE_CVDATATYPE(MVS::ViewsID)
 
 namespace MVS {
+
+#ifdef _USE_CUDA
+// Runtime-only APD state carried between pyramid levels and the later
+// geometric-consistency passes. It is deliberately separate from the stable
+// DMAP serialization contract and remains empty when APD is disabled.
+struct APDMultiscaleDepthState {
+	CUDA::APDMultiscaleStateHeader header;
+	Image8U reliabilityMap;
+	Image8U anchorCountMap;
+	Image8U deformableEligibleMap;
+
+	bool IsValid() const {
+		const cv::Size expectedSize((int)header.width, (int)header.height);
+		return header.version == CUDA::APD_MULTISCALE_STATE_VERSION &&
+			header.width > 0u && header.height > 0u &&
+			reliabilityMap.size() == expectedSize &&
+			anchorCountMap.size() == expectedSize &&
+			deformableEligibleMap.size() == expectedSize;
+	}
+	void Release() {
+		header = CUDA::APDMultiscaleStateHeader{};
+		reliabilityMap.release();
+		anchorCountMap.release();
+		deformableEligibleMap.release();
+	}
+	size_t GetMemorySize() const {
+		return reliabilityMap.memory_size()+anchorCountMap.memory_size()+
+			deformableEligibleMap.memory_size();
+	}
+};
+#endif
 
 DECOPT_SPACE(OPTDENSE)
 
@@ -162,6 +196,9 @@ extern MVS_API bool bEstimateConfidenceCUDA; // when CUDA estimation is used, ru
 extern MVS_API unsigned nEstimationIters;
 extern MVS_API unsigned nEstimationGeometricIters;
 extern MVS_API unsigned nPatchMatchCUDAInstances;
+// Adaptive Patch Deformation for CUDA PatchMatch (0 - disabled/default,
+// 1 - paper deformable cost). Later APD stages extend this mode deliberately.
+extern MVS_API unsigned nPatchMatchCUDAAPD;
 #ifdef _USE_DMAP_INSTRUMENTATION
 extern MVS_API unsigned nPatchMatchInstrumentLevel;
 extern MVS_API String strPatchMatchInstrumentConfig;
@@ -287,6 +324,10 @@ struct MVS_API DepthData {
 		// confMapAdjusted this IS cleared by Release() -- it is a cheap, recomputable derived cache
 		// with no cross-event delivery obligation, so it simply follows the DepthData's own lifetime
 	ViewsMap viewsMap; // view-IDs map (indexing images vector starting after first view)
+	#ifdef _USE_CUDA
+	APDMultiscaleDepthState apdMultiscaleState; // retained across Release() only while later
+		// APD stages still need the previous stage's reliability/anchor provenance
+	#endif
 	float dMin, dMax; // global depth range for this image
 	cv::Size size; // image size used to estimate this depth-map
 	bool bConfAdjusted; // the confidence recalibration already ran for this view -- either fused

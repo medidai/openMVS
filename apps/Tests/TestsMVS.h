@@ -37,6 +37,10 @@
 
 namespace MVS {
 
+// test the host/device APD paper-mechanics contract
+bool AdaptivePatchDeformationContractTest();
+/*----------------------------------------------------------------*/
+
 // test MVS stages on a small sample dataset
 bool PipelineTest(bool forceCPU = false, bool verbose = false);
 /*----------------------------------------------------------------*/

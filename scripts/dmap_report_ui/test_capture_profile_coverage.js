@@ -131,6 +131,68 @@ function modelWithPatchEvidence() {
   return model;
 }
 
+function modelWithProfileScopedTrace() {
+  const model = baseModel();
+  model.runs.forEach((run) => { run.configured_run = run.label; });
+  model.runs.push(
+    {
+      label: "baseline [deep]", configured_run: "baseline", repeat: 0,
+      role: "baseline", diagnostic_only: true, capture_profiles: ["deep"],
+    },
+    {
+      label: "candidate [deep]", configured_run: "candidate", repeat: 0,
+      role: "variant", diagnostic_only: true, capture_profiles: ["deep"],
+    },
+  );
+  const frame = model.scenes[0].frames[0];
+  Object.assign(frame, {
+    logical_iterations: [0], pyramid_levels: [0],
+    logical_iterations_by_pyramid_level: {0: [0]},
+    run_frames: ["baseline [deep]", "candidate [deep]"].map((run) => ({
+      run, repeat: 0, scene_id: "scene-a", image_id: 17,
+      estimation_stage: "photometric", geometric_iteration: null,
+      capture_profile: "deep",
+      iterations: [{
+        run, repeat: 0, scene_id: "scene-a", image_id: 17,
+        estimation_stage: "photometric", geometric_iteration: null,
+        pyramid_level: 0, logical_iteration: 0,
+      }],
+    })),
+  });
+  model.mechanics.apd_traces = [{
+    run: "candidate", configured_run: "candidate", repeat: 0,
+    scene_id: "scene-a", image_id: 17, estimation_stage: "photometric",
+    geometric_iteration: null, pyramid_level: 0, logical_iteration: 0,
+    trace_index: 0, x: 3, y: 4, label: "synthetic-configured-trace",
+    paper_profile: {
+      costs: [0.4, 0.2, 0.3], reliability: 2, reason: "synthetic",
+      global_minimum_offset: 0, global_minimum_cost: 0.2, separation: 0.1,
+    },
+    anchor_model: {
+      reason: "synthetic", anchors: [], fitted_plane_valid: true,
+      fitted_plane_depth: 1.25,
+    },
+    update: {
+      source: "apd_final_refinement", update_stage: 2,
+      fitted_plane_available: true, fitted_plane_tested: true,
+      fitted_plane_accepted: true, fitted_plane_working_cost: 0.2,
+      fitted_plane_native_cost: 0.25,
+      final_refinement: {
+        incumbent_cost: 0.4, best_cost: 0.25, improvement: 0.15,
+        offset: -1, tested_count: 11, finite_count: 11, accepted: true,
+      },
+    }, views: [],
+  }];
+  model.mechanics.apd_trace_sources = [{
+    run: "candidate", configured_run: "candidate", repeat: 0,
+    scene_id: "scene-a", estimation_stage: "photometric",
+    geometric_iteration: null, capture_profile: "trace", kind: "targeted_trace",
+    available: true, rows_included: 1, truncated: false,
+    reason: "available", path: "../traces/apd_traces.jsonl",
+  }];
+  return model;
+}
+
 function renderedHtml(model) {
   const embeddedModel = JSON.stringify(model).replaceAll("<", "\\u003c");
   return TEMPLATE
@@ -159,6 +221,10 @@ function dumpDom(model, hash = "") {
 
 function mapSection(dom) {
   return dom.match(/<section class="section-band map-section"[\s\S]*?<section class="section-band"/)?.[0] || "";
+}
+
+function mechanicsSection(dom) {
+  return dom.match(/<div id="mechanics-content"[\s\S]*?<\/section>/)?.[0] || "";
 }
 
 test("derived fixed reference grids render per arm with clamp-aware loupes", (context) => {
@@ -272,4 +338,30 @@ test("coverage preserves failed, unavailable, not-requested, and absent unit sta
   assert.match(section, /capture-state not-recorded[^>]*>Not recorded/);
   assert.match(section, /synthetic failure/);
   assert.match(section, /synthetic unavailable reason/);
+});
+
+test("targeted traces follow their configured run into deep mechanics profiles", (context) => {
+  if (!browserBinary()) return context.skip("Chrome or Chromium is unavailable");
+  const deepState = [
+    "baseline=baseline%20%5Bdeep%5D", "variant=candidate%20%5Bdeep%5D",
+    "scene=scene-a", "frame=frame-scene-a-17", "captureStage=photometric",
+    "pyramidLevel=0", "alignment=same", "iteration=0", "mapPreset=apd",
+  ].join("&");
+  const dom = dumpDom(modelWithProfileScopedTrace(), `#${deepState}`);
+  const mechanics = mechanicsSection(dom);
+  assert.match(dom, /value="baseline \[deep\]" selected/);
+  assert.match(dom, /value="candidate \[deep\]" selected/);
+  assert.match(
+    mechanics,
+    /<details class="apd-trace-card"[\s\S]*?synthetic-configured-trace/,
+  );
+  assert.match(mechanics, /APD schema v3/);
+  assert.match(mechanics, /Update stage[\s\S]*?Fitted proposal/);
+  assert.match(mechanics, /Final native search[\s\S]*?Final cost gain/);
+
+  const unrelated = dumpDom(
+    modelWithProfileScopedTrace(),
+    `#${deepState.replace("variant=candidate%20%5Bdeep%5D", "variant=baseline%20%5Bdeep%5D")}`,
+  );
+  assert.doesNotMatch(mechanicsSection(unrelated), /<details class="apd-trace-card"/);
 });

@@ -87,6 +87,10 @@ bool UnitTests()
 		VERBOSE("ERROR: TestConfidenceInterval failed!");
 		return false;
 	}
+	if (!MVS::AdaptivePatchDeformationContractTest()) {
+		VERBOSE("ERROR: AdaptivePatchDeformationContractTest failed!");
+		return false;
+	}
 	VERBOSE("All unit tests passed (%s)", TD_TIMER_GET_FMT().c_str());
 	return true;
 }

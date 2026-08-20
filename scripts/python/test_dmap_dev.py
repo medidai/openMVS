@@ -545,6 +545,86 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             self.assertEqual(discovered[0].depth_map_dir, scene / "timing" / "depth_maps")
             self.assertEqual(discovered[0].timing_dir, summary)
 
+    def test_apd_summary_hot_kernel_is_diagnostic_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scene = root / "runs" / "candidate" / "repeat_00" / "scene-a"
+            instrumentation, depth_maps = make_discovery_capture(
+                scene, "timing", max_resolution=3200, frame_width=3200
+            )
+            summary_path = instrumentation / "depthmaps" / "0001" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["apd_observability"] = {"enabled": True}
+            summary["candidate_accounting_mode"] = (
+                "exact_apd_working_objective_aggregate"
+            )
+            dmap_dev.write_json(summary_path, summary)
+
+            discovered = dmap_dev.discover_run_scenes(
+                {"runs": [{"label": "candidate", "role": "variant"}]}, root
+            )
+
+            self.assertEqual(len(discovered), 1)
+            capture = discovered[0]
+            self.assertEqual(capture.label, "candidate [summary]")
+            self.assertEqual(capture.configured_label, "candidate")
+            self.assertEqual(capture.instrumentation_dir, instrumentation)
+            self.assertEqual(capture.depth_map_dir, depth_maps)
+            self.assertTrue(capture.diagnostic_only)
+            self.assertTrue(
+                capture.allow_process_specialization_divergence_for_diagnostics
+            )
+            self.assertIn("production endpoint", capture.diagnostic_only_reason)
+
+    def test_apd_summary_uses_prefilter_as_quality_and_remains_auxiliary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scene = root / "runs" / "candidate" / "repeat_00" / "scene-a"
+            timing_instrumentation, _timing_depth = make_discovery_capture(
+                scene, "timing", max_resolution=3200, frame_width=3200
+            )
+            maps_instrumentation, _maps_depth = make_discovery_capture(
+                scene, "maps", max_resolution=3200, frame_width=3200
+            )
+            prefilter_instrumentation, prefilter_depth = make_prefilter_capture(scene)
+            summary_path = (
+                timing_instrumentation / "depthmaps" / "0001" / "summary.json"
+            )
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["apd_observability"] = {"enabled": True}
+            summary["candidate_accounting_mode"] = (
+                "exact_apd_working_objective_aggregate"
+            )
+            dmap_dev.write_json(summary_path, summary)
+            config = {"runs": [{"label": "candidate", "role": "variant"}]}
+
+            analysis = dmap_dev.discover_run_scenes(config, root)
+            auxiliary = dmap_dev.discover_auxiliary_profile_scenes(config, root)
+
+            self.assertEqual(
+                {row.capture_profile for row in analysis}, {"prefilter", "deep"}
+            )
+            by_label = {row.label: row for row in analysis}
+            quality = by_label["candidate"]
+            self.assertEqual(quality.instrumentation_dir, prefilter_instrumentation)
+            self.assertEqual(quality.depth_map_dir, prefilter_depth)
+            self.assertFalse(quality.diagnostic_only)
+            self.assertEqual(
+                by_label["candidate [deep]"].instrumentation_dir,
+                maps_instrumentation,
+            )
+            self.assertEqual(len(auxiliary), 1)
+            summary_evidence = auxiliary[0]
+            self.assertEqual(summary_evidence.label, "candidate [summary]")
+            self.assertEqual(summary_evidence.capture_profile, "summary")
+            self.assertEqual(
+                summary_evidence.instrumentation_dir, timing_instrumentation
+            )
+            self.assertTrue(summary_evidence.diagnostic_only)
+            self.assertIn(
+                "production endpoint", summary_evidence.diagnostic_only_reason
+            )
+
     def test_prefilter_capture_is_discovered_and_marks_deep_signals_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1708,6 +1788,163 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             self.assertFalse(valid)
             self.assertIn("coarse compatibility resource tier", reason)
 
+    def test_deep_completion_accepts_validated_apd_exact_resource_tier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "maps"
+            instrumentation = run_dir / "dmap_instrumentation"
+            frame = instrumentation / "depthmaps" / "0001"
+            frame.mkdir(parents=True)
+            (run_dir / "command.sh").write_text("true\n", encoding="utf-8")
+            dmap_dev.write_json(run_dir / "repro.json", {
+                "return_code": 0, "dry_run": False,
+                "command": [
+                    "DensifyPointCloudDMapObserve", "--iters", "0",
+                    "--geometric-iters", "0", "--sub-resolution-levels", "0",
+                    "--fusion-mode", "1", "--patch-match-cuda-apd", "1",
+                ],
+            })
+            dmap_dev.write_json(instrumentation / "run_metadata.json", {
+                "schema_name": "openmvs.dmap.run",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
+            })
+            dmap_dev.write_json(instrumentation / "scene_summary.json", {
+                "schema_name": "openmvs.dmap.scene_summary",
+                "estimation_stage": "photometric",
+                "geometric_iteration": None,
+            })
+            dmap_dev.write_json(frame / "summary.json", {
+                "schema_version": 4, "image_id": 1,
+            })
+            dmap_dev.write_json(frame / "map_manifest.json", {
+                "schema_version": 4,
+                "exact_capture": {
+                    "requested": False,
+                    "available": False,
+                    "unavailable_reason": "APD-specific exact mechanics capture",
+                },
+                "apd_capture": {
+                    "schema_name": "openmvs.dmap.apd_pixel_mechanics",
+                    "schema_version": dmap_dev.instrumentation_validator.APD_SCHEMA_VERSION,
+                    "requested": True,
+                    "summary_available": True,
+                    "maps_available": True,
+                },
+            })
+            depth = run_dir / "depth_maps" / "depth0001.dmap"
+            depth.parent.mkdir()
+            depth.write_bytes(b"dmap")
+            plan = {
+                "schema_name": "openmvs.dmap.resource_plan",
+                "schema_version": 4,
+                "image_id": 1,
+                "pyramid_level": 0,
+                "num_logical_states": 1,
+                "width": 2,
+                "height": 2,
+                "summary_available": True,
+                "compatibility_maps_requested": False,
+                "maps_requested": True,
+                "maps_available": True,
+                "exact_requested": False,
+                "exact_available": False,
+                "apd_requested": True,
+                "apd_summary_available": True,
+                "apd_maps_available": True,
+                "limits_mib": {"device": 0, "host": 0, "frame_storage": 0},
+                "effective_estimate_bytes": {
+                    "device": 0,
+                    "host": 0,
+                    "frame_storage": 100,
+                    "current_pyramid_storage": 100,
+                    "frame_storage_committed_before": 0,
+                    "full_resolution_priority_reserve": 0,
+                },
+                "storage_preflight": {
+                    "attempted": True,
+                    "succeeded": True,
+                    "requested_bytes": 100,
+                    "requested_plus_priority_reserve_bytes": 100,
+                    "frame_priority_reservation_bytes": 0,
+                    "frame_priority_reservation_consumed": False,
+                },
+            }
+            plans_path = instrumentation / "resource_plans.jsonl"
+            plans_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+            closure = mock.Mock(valid=True, status="complete", reason="fixture")
+            validation = {
+                "valid": True,
+                "checks": [],
+                "apd_validation": {
+                    "schema_name": "openmvs.dmap.apd_pixel_mechanics",
+                    "schema_version": dmap_dev.instrumentation_validator.APD_SCHEMA_VERSION,
+                    "requested": True,
+                    "available": True,
+                    "implementation_label": "paper_partial",
+                },
+            }
+
+            with mock.patch.object(
+                dmap_dev.instrumentation_validator, "validate",
+                return_value=validation,
+            ), mock.patch.object(
+                dmap_dev.integrity, "validate_capture_artifact_closure",
+                return_value=closure,
+            ):
+                valid, reason = dmap_dev.validate_completed_run_mode(run_dir, "maps")
+                self.assertTrue(valid, reason)
+
+                plan["apd_maps_available"] = False
+                plans_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+                valid, reason = dmap_dev.validate_completed_run_mode(run_dir, "maps")
+                self.assertFalse(valid)
+                self.assertIn("fine exact-map resource tier", reason)
+
+                plan["apd_maps_available"] = True
+                plans_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+                validation["apd_validation"]["available"] = False
+                valid, reason = dmap_dev.validate_completed_run_mode(run_dir, "maps")
+
+            self.assertFalse(valid)
+            self.assertIn("generic or APD-specific exact Process<true>", reason)
+
+    def test_apd_exact_admission_supports_versioned_matching_contracts(self) -> None:
+        base_capture = {
+            "schema_name": dmap_dev.instrumentation_validator.APD_SCHEMA_NAME,
+            "requested": True,
+            "summary_available": True,
+            "maps_available": True,
+        }
+        base_validation = {
+            "requested": True,
+            "available": True,
+            "implementation_label": "paper_partial",
+        }
+        for version in dmap_dev.instrumentation_validator.APD_SUPPORTED_SCHEMA_VERSIONS:
+            with self.subTest(version=version):
+                capture = dict(base_capture, schema_version=version)
+                validation = dict(
+                    base_validation,
+                    schema_name=dmap_dev.instrumentation_validator.APD_SCHEMA_NAME,
+                    schema_version=version,
+                )
+                generic, apd = dmap_dev.validated_process_true_map_contracts(
+                    {"apd_capture": capture}, {"apd_validation": validation}
+                )
+                self.assertFalse(generic)
+                self.assertTrue(apd)
+
+        capture = dict(base_capture, schema_version=2)
+        mismatched = dict(
+            base_validation,
+            schema_name=dmap_dev.instrumentation_validator.APD_SCHEMA_NAME,
+            schema_version=1,
+        )
+        _generic, apd = dmap_dev.validated_process_true_map_contracts(
+            {"apd_capture": capture}, {"apd_validation": mismatched}
+        )
+        self.assertFalse(apd)
+
     def test_capture_topology_requires_declared_geometric_stages_and_levels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             instrumentation = Path(directory) / "dmap_instrumentation"
@@ -2366,6 +2603,28 @@ class DMapDevelopmentReportTests(unittest.TestCase):
         )
 
         self.assertEqual(result, ["--iters", "5", "--number-views", "3"])
+
+    def test_trace_report_resolution_prefers_numbered_master_and_rejects_ambiguity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preferred = root / "reports" / "01_master_report"
+            self.assertEqual(dmap_dev.resolve_trace_report_dir(root, None), preferred)
+
+            preferred.mkdir(parents=True)
+            (preferred / "frames.csv").write_text("run\n", encoding="utf-8")
+            alternate = root / "reports" / "02_alternate"
+            alternate.mkdir()
+            (alternate / "frames.csv").write_text("run\n", encoding="utf-8")
+            self.assertEqual(dmap_dev.resolve_trace_report_dir(root, None), preferred)
+
+            (preferred / "frames.csv").unlink()
+            self.assertEqual(dmap_dev.resolve_trace_report_dir(root, None), alternate)
+
+            another = root / "reports" / "03_alternate"
+            another.mkdir()
+            (another / "frames.csv").write_text("run\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "pass --report-dir explicitly"):
+                dmap_dev.resolve_trace_report_dir(root, None)
 
     def test_endpoint_argument_filter_removes_observer_control(self) -> None:
         args = [
@@ -3168,6 +3427,32 @@ class DMapDevelopmentReportTests(unittest.TestCase):
         )
         self.assertNotIn("99", command)
 
+    def test_on_demand_captures_share_controlled_program_options_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run"
+            working_dir = root / "work"
+            working_dir.mkdir()
+
+            path = dmap_dev.prepare_controlled_program_options_config(
+                run_dir, working_dir
+            )
+
+            self.assertEqual(path, run_dir / "generated" / "Densify.drilldown.cfg")
+            self.assertEqual(path.read_bytes(), b"")
+            self.assertEqual(
+                dmap_dev.prepare_controlled_program_options_config(
+                    run_dir, working_dir
+                ),
+                path,
+            )
+            implicit = working_dir / "DensifyPointCloudDMapObserve.cfg"
+            implicit.write_text("iters=99\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "implicit program-options file"):
+                dmap_dev.prepare_controlled_program_options_config(
+                    root / "other-run", working_dir
+                )
+
     def test_trace_completion_requires_exact_maps_and_every_requested_row(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory) / "trace"
@@ -3259,6 +3544,56 @@ class DMapDevelopmentReportTests(unittest.TestCase):
                 )
                 self.assertFalse(valid)
                 self.assertIn("missing 2 requested pixel/state rows", reason)
+
+                traces_path.write_text(
+                    '{"image_id":7,"trace_index":0,"x":2,"y":3,"scale_number":0,"logical_iteration":-1}\n'
+                    '{"image_id":7,"trace_index":0,"x":2,"y":3,"scale_number":0,"logical_iteration":0}\n'
+                    '{"image_id":7,"trace_index":1,"x":5,"y":8,"scale_number":0,"logical_iteration":-1}\n'
+                    '{"image_id":7,"trace_index":1,"x":5,"y":8,"scale_number":0,"logical_iteration":0}\n',
+                    encoding="utf-8",
+                )
+                dmap_dev.write_json(frame / "map_manifest.json", {
+                    "exact_capture": {"requested": False, "available": False},
+                    "apd_capture": {
+                        "schema_name": "openmvs.dmap.apd_pixel_mechanics",
+                        "schema_version": 2,
+                        "requested": True,
+                        "summary_available": True,
+                        "maps_available": True,
+                    },
+                    "num_iterations": 1,
+                    "num_logical_states": 2,
+                    "pyramid_level": 0,
+                })
+                apd_traces_path = traces_path.parent / "apd_traces.jsonl"
+                apd_traces_path.write_text(
+                    '{"schema_name":"openmvs.dmap.apd_trace","schema_version":2,'
+                    '"image_id":7,"trace_index":0,"x":2,"y":3,"scale_number":0,'
+                    '"logical_iteration":0}\n'
+                    '{"schema_name":"openmvs.dmap.apd_trace","schema_version":2,'
+                    '"image_id":7,"trace_index":1,"x":5,"y":8,"scale_number":0,'
+                    '"logical_iteration":0}\n',
+                    encoding="utf-8",
+                )
+                self.assertEqual(
+                    dmap_dev.drilldown_run_complete(run_dir, "trace", 7, pixels),
+                    (
+                        True,
+                        "validated 2 targeted trace pixels across 1 stage(s) "
+                        "and 2 logical states",
+                    ),
+                )
+                apd_traces_path.write_text(
+                    '{"schema_name":"openmvs.dmap.apd_trace","schema_version":2,'
+                    '"image_id":7,"trace_index":0,"x":2,"y":3,"scale_number":0,'
+                    '"logical_iteration":0}\n',
+                    encoding="utf-8",
+                )
+                valid, reason = dmap_dev.drilldown_run_complete(
+                    run_dir, "trace", 7, pixels
+                )
+                self.assertFalse(valid)
+                self.assertIn("missing 1 requested pixel/iteration rows", reason)
 
     def test_trace_completion_validates_scaled_deduplicated_pyramid_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3973,6 +4308,24 @@ class DMapDevelopmentReportTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "cannot choose an unambiguous cohort"):
             dmap_dev.trace_capture_frames(frames, "baseline")
+
+    def test_trace_capture_frames_prefers_deep_over_apd_summary(self) -> None:
+        frames = pd.DataFrame([
+            {
+                "run": f"baseline [{profile}]", "configured_run": "baseline",
+                "capture_profile": profile, "diagnostic_only": True,
+                "repeat": 0, "scene_id": "scene", "image_id": 7,
+                "estimation_stage": "geometric_consistency",
+                "geometric_iteration": 3,
+            }
+            for profile in ("summary", "deep")
+        ])
+
+        selected = dmap_dev.trace_capture_frames(frames, "baseline")
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected.iloc[0]["capture_profile"], "deep")
+        self.assertEqual(selected.iloc[0]["run"], "baseline [deep]")
 
     def test_reference_dmap_does_not_fall_back_to_another_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4967,6 +5320,71 @@ class DMapDevelopmentReportTests(unittest.TestCase):
             markdown.count(f"--evidence-context {root / 'evidence_context.json'}"),
             2,
         )
+
+    def test_mechanics_only_executive_summary_is_explicit_and_nonempty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.yaml"
+            config_path.write_text("schema_version: 2\n", encoding="utf-8")
+            markdown = dmap_dev.build_markdown(
+                config={"_config_path": str(config_path)},
+                report_path=root / "report.md",
+                frames=pd.DataFrame(), passes=pd.DataFrame(),
+                annotations=pd.DataFrame([{
+                    "fit_status": "scene_context_error",
+                    "error": "annotation provider is not configured",
+                }]),
+                stability=pd.DataFrame(), performance=pd.DataFrame(),
+                comparisons=pd.DataFrame(), gates=[], pareto=[], findings=[], plots=[],
+                instrumentation_plots={}, diagnostic_panels={}, outputs={},
+                exact_cost_evolution=pd.DataFrame(), exact_iterations=pd.DataFrame(),
+                exact_views=pd.DataFrame(), cpu_view_candidates=pd.DataFrame(),
+                cpu_estimation_selection=pd.DataFrame(), postprocess_filters=pd.DataFrame(),
+                confidence_adjustment=pd.DataFrame(), cuda_resource_plans=pd.DataFrame(),
+                filter_resource_plans=pd.DataFrame(), resource_plan_validation=pd.DataFrame(),
+                reproducibility_artifacts=pd.DataFrame(),
+                mechanics={
+                    "apd_contracts": [{
+                        "enabled": True, "capture_profile": "deep",
+                        "implementation_label": "paper_partial",
+                        "implemented_through": "APD14-C1",
+                        "required_mechanics_not_yet_implemented": [
+                            "anchor-driven view selection",
+                        ],
+                    }],
+                    "apd_iterations": [{
+                        "capture_profile": "deep", "scene_id": "scene",
+                        "image_id": 1, "estimation_stage": "photometric",
+                        "geometric_iteration": None, "logical_iteration": 0,
+                        "classified": 100, "reliability_reliable": 10,
+                        "ransac_valid": 50, "deformable_updates": 50,
+                        "anchor_count_mean": 3.5, "center_cost_mean": 0.4,
+                        "anchor_mean_cost_mean": 0.3, "working_cost_mean": 0.35,
+                        "working_gap_mean": 0.02, "native_persistent_cost_mean": 0.45,
+                        "anchor_view_selection_attempted": 50,
+                        "anchor_view_selection_used": 40,
+                        "view_selection_mode_previous_weights_fallback": 10,
+                        "immutable_anchor_state_updates": 50,
+                        "anchor_proposals_tested": 300,
+                        "anchor_proposals_finite": 240,
+                        "anchor_proposals_accepted": 30,
+                        "anchor_propagation_final_winners": 15,
+                        "best_anchor_working_cost_mean": 0.25,
+                        "accepted_anchor_native_cost_mean": 0.4,
+                    }],
+                },
+            )
+
+        executive = markdown.split("## 2. Algorithm Description", 1)[0]
+        self.assertIn("Mechanics-only sentinel; no quality verdict", executive)
+        self.assertIn("APD Exact Mechanics", executive)
+        self.assertIn("C2 Anchor Views And Propagation", executive)
+        self.assertIn("80.00%", executive)
+        self.assertIn("paper_partial", executive)
+        self.assertIn("anchor-driven view selection", executive)
+        self.assertIn("Pareto ranking unavailable", executive)
+        self.assertIn("No automatic quality finding is available", executive)
+        self.assertNotIn("_No data available._", executive)
 
     def test_external_raw_artifacts_are_plain_text_not_report_links(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
