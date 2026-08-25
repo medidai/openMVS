@@ -93,11 +93,13 @@ enum DepthFlags {
 	// full-resolution sweep costing roughly as much as a fusion pass, so it stays off unless the
 	// user asks for it explicitly (--postprocess-dmaps 8). Scene::ComputeDepthMaps resolves this to
 	// either ADJUST_CONFIDENCE or 0 once the estimation backend is known; it never survives past that.
-	// Bit values are chosen for config back-compat: AUTO recycles the retired ADJUST_CONFIDENCE_FAST
+	// Bit values are chosen for config back-compat: AUTO recycles the old ADJUST_CONFIDENCE_FAST
 	// bit (whose "cheap adjust" meaning it inherits), and ADJUST_CONFIDENCE keeps its historical
-	// value, so existing configs and scripts keep their behavior.
+	// value. The exact 2.3 fast-adjust formula remains available under a new, explicit bit so users
+	// upgrading from 2.3 can preserve its confidence-map contract without changing AUTO semantics.
 	ADJUST_CONFIDENCE_AUTO = (1 << 2),
 	ADJUST_CONFIDENCE      = (1 << 3), // recalibrate confidence to predict fusion survival (see DepthMapsData::AdjustConfidence)
+	ADJUST_CONFIDENCE_COMPAT_23 = (1 << 4), // reproduce OpenMVS 2.3 AdjustConfidenceFast exactly
 	OPTIMIZE               = (REMOVE_SPECKLES|FILL_GAPS)
 };
 enum FuseMode {
@@ -258,7 +260,7 @@ struct MVS_API DepthData {
 	DepthMap depthMap; // depth-map
 	NormalMap normalMap; // normal-map in camera space
 	ConfidenceMap confMap; // confidence-map
-	ConfidenceMap confMapAdjusted; // recalibrated confidence-map computed by AdjustConfidence(), held
+	ConfidenceMap confMapAdjusted; // recalibrated confidence-map computed by a standalone adjust, held
 		// in memory until the deferred EVT_ADJUSTDEPTHMAP swap (confMap = move(confMapAdjusted));
 		// intentionally NOT cleared by Release() so it survives a cache eviction/reload of this
 		// DepthData between the filter and adjust events

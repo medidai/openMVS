@@ -110,7 +110,7 @@ MDEFVAR_OPTDENSE_int32(nOptimizerMaxIters, "Optimizer Max Iters", "MRF optimizer
 MDEFVAR_OPTDENSE_uint32(nSpeckleSize, "Speckle Size", "maximal size of a speckle (small speckles get removed)", "100")
 MDEFVAR_OPTDENSE_uint32(nIpolGapSize, "Interpolate Gap Size", "interpolate small gaps (left<->right, top<->bottom)", "7")
 MDEFVAR_OPTDENSE_int32(nIgnoreMaskLabel, "Ignore Mask Label", "label id used during ignore mask filter (<0 - disabled)", "-1")
-DEFVAR_OPTDENSE_uint32(nOptimize, "Optimize", "should we filter the extracted depth-maps? (1 - remove-speckles, 2 - fill-gaps, 4 - adjust-confidence only if the depth-maps are estimated on the GPU, where it is nearly free, 8 - adjust-confidence)", "4") // see DepthFlags
+DEFVAR_OPTDENSE_uint32(nOptimize, "Optimize", "should we filter the extracted depth-maps? (1 - remove-speckles, 2 - fill-gaps, 4 - adaptive adjust-confidence only if the depth-maps are estimated on the GPU, where it is nearly free, 8 - adaptive adjust-confidence, 16 - OpenMVS 2.3 fast-confidence compatibility; 16 cannot be combined with 4 or 8)", "4") // see DepthFlags
 DEFVAR_OPTDENSE_uint32(nFuseFilter, "Fuse Filter", "how to fuse the depth-maps into one dense point-cloud?", "2", "0", "1") // see FuseMode
 MDEFVAR_OPTDENSE_uint32(nEstimateColors, "Estimate Colors", "should we estimate the colors for the dense point-cloud?", "2", "0", "1")
 MDEFVAR_OPTDENSE_uint32(nEstimateNormals, "Estimate Normals", "should we estimate the normals for the dense point-cloud?", "2", "0", "1")
