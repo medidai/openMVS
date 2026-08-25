@@ -106,6 +106,9 @@ public:
 	// not an OMP thread, so nesting rules do not gate it), violating this codebase's
 	// no-per-view-threading rule. DenseFuseDepthMaps passes true -- single serial caller, idle cores.
 	const ConfidenceMap& GetIntraMapPrior(DepthData& depthData, bool bParallel) const;
+	// Exact OpenMVS 2.3 AdjustConfidenceFast behavior, exposed as an explicit compatibility mode.
+	// Uses the standalone phase's deferred swap so every reference reads raw neighbor confidence.
+	bool AdjustConfidenceCompat23(DepthData& depthDataRef, const IIndexArr& idxNeighbors);
 	bool AdjustConfidence(DepthData& depthDataRef, const IIndexArr& idxNeighbors);
 	// integrated fusion-faithful confidence -- epilogue of the LAST geometric-consistency
 	// iteration, run from the CALLER (DenseReconstructionEstimate's EVT_SAVEDEPTHMAP handler) while

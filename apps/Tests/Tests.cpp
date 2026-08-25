@@ -82,6 +82,10 @@ bool UnitTests()
 	if (!SEACAVE::TestLeastAbsoluteDeviationSolver()) {
 		VERBOSE("ERROR: TestLeastAbsoluteDeviationSolver failed!");
 		return false;
+	if (!MVS::ConfidenceCompat23Test()) {
+		VERBOSE("ERROR: ConfidenceCompat23Test failed!");
+		return false;
+	}
 	}
 	if (!SEACAVE::TestConfidenceInterval()) {
 		VERBOSE("ERROR: TestConfidenceInterval failed!");

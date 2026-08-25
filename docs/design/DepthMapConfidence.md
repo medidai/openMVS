@@ -120,7 +120,9 @@ Never cache adjusted confidence on the device across views.
 | **standalone CPU sweep** | `--postprocess-dmaps 8`, CPU estimation, `--geometric-iters 0`, or re-adjusting existing dmaps | 93 ms/map at 0.29 MP, ~2.4 s/map at 6.1 MP |
 
 `--postprocess-dmaps` bits: `1` remove-speckles, `2` fill-gaps, `4` **ADJUST_CONFIDENCE_AUTO**
-(default), `8` ADJUST_CONFIDENCE (force on). AUTO resolves in `ComputeDepthMaps` to on for CUDA
+(default), `8` ADJUST_CONFIDENCE (force adaptive adjustment on), `16`
+ADJUST_CONFIDENCE_COMPAT_23 (reproduce the OpenMVS 2.3 `AdjustConfidenceFast` formula exactly).
+Bits `4`/`8` and `16` are mutually exclusive. AUTO resolves in `ComputeDepthMaps` to on for CUDA
 estimation and off for CPU — on the GPU the recalibration rides along on buffers that are already
 there; on the CPU it costs a separate full-resolution sweep comparable to a fusion pass, which is not
 a cost to impose by default. `Estimate Confidence CUDA = 0` (dense config file) forces the CPU
@@ -132,6 +134,11 @@ version even when CUDA estimates.
 > (`--export-conf-features`) no longer exist (§ 10).
 
 **Double-adjust guards.** In-process: the standalone phase is skipped for any view the integrated
+For upgrade compatibility, `--postprocess-dmaps 19` applies remove-speckles + fill-gaps + the exact
+2.3 fast-confidence calculation. It is intentionally a standalone CPU phase: preserving the old
+nearest-neighbor projection and raw-neighbor-confidence ordering is part of the compatibility
+contract.
+
 path already adjusted. Cross-process: every recalibrated dmap carries a `CONF_ADJUSTED` flag bit in
 its header (`Interface.h`), and the standalone phase warns and skips flagged views instead of
 compounding the posterior on its own output. The flag survives the SFM undistortion rewrite and is

@@ -36,6 +36,9 @@
 // S T R U C T S ///////////////////////////////////////////////////
 
 namespace MVS {
+// verify the explicit OpenMVS 2.3 fast-confidence compatibility contract
+bool ConfidenceCompat23Test();
+
 
 // test MVS stages on a small sample dataset
 bool PipelineTest(bool forceCPU = false, bool verbose = false);
