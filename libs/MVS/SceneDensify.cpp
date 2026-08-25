@@ -1397,6 +1397,81 @@ static inline bool SampleDepthBilinear(const DepthMap& dm, float px, float py,
 	return true;
 }
 
+// Reproduce OpenMVS 2.3's AdjustConfidenceFast confidence-map contract exactly, while using the
+// current standalone phase's in-memory deferred swap instead of the historical adjusted.fast.cmap
+// disk round-trip. In particular this intentionally keeps the old nearest-neighbor projection,
+// fixed 1% depth-similarity threshold, top-two negative-confidence penalty, and 30/70 blend.
+bool DepthMapsData::AdjustConfidenceCompat23(DepthData& depthDataRef, const IIndexArr& idxNeighbors)
+{
+	ASSERT(depthDataRef.IsValid() && !depthDataRef.IsEmpty() && !idxNeighbors.empty());
+	ASSERT(depthDataRef.confMap.size() == depthDataRef.depthMap.size());
+	if (depthDataRef.bConfAdjusted) {
+		VERBOSE("warning: view %u confidence is already recalibrated (dmap CONF_ADJUSTED flag), skipping the OpenMVS 2.3 compatibility adjust", depthDataRef.GetView().GetID());
+		return false;
+	}
+	const auto timeStart(std::chrono::steady_clock::now());
+	constexpr Depth thDepthSimilarity(0.01f);
+	constexpr Depth sigmaDepthDiff(1.f / (-2.f * SQUARE(thDepthSimilarity)));
+	const DepthData::ViewData& imageRef = depthDataRef.GetView();
+	ConfidenceMap newConfMap(depthDataRef.depthMap.size());
+	unsigned nProcessed(0), nDiscarded(0);
+	for (int r=0; r<depthDataRef.depthMap.rows; ++r) {
+		for (int c=0; c<depthDataRef.depthMap.cols; ++c) {
+			const Depth& depthRef = depthDataRef.depthMap(r,c);
+			if (depthRef <= 0) {
+				newConfMap(r,c) = 0;
+				continue;
+			}
+			const Point3 X(imageRef.camera.TransformPointI2W(Point3(c,r,depthRef)));
+			const float confPhotoRef(depthDataRef.confMap(r,c));
+			Depth minDiff(1.f);
+			float bestConf(0), negBestConf1(0), negBestConf2(0);
+			for (IIndex idxN: idxNeighbors) {
+				const DepthData& depthData = arrDepthData[idxN];
+				const DepthData::ViewData& image = depthData.GetView();
+				const Point3 camX(image.camera.TransformPointW2C(X));
+				if (camX.z <= 0)
+					continue;
+				const ImageRef x(ROUND2INT(image.camera.TransformPointC2I(camX)));
+				if (!depthData.depthMap.isInside(x))
+					continue;
+				const Depth depth(depthData.depthMap(x));
+				if (depth <= 0)
+					continue;
+				const Depth diff(DepthSimilarity((Depth)camX.z, depth));
+				const float conf(depthData.confMap(x));
+				if (diff > thDepthSimilarity) {
+					if (negBestConf1 < conf) {
+						negBestConf2 = negBestConf1;
+						negBestConf1 = conf;
+					} else if (negBestConf2 < conf)
+						negBestConf2 = conf;
+				}
+				if (minDiff > diff || (minDiff == diff && bestConf < conf)) {
+					minDiff = diff;
+					bestConf = conf;
+				}
+			}
+			const float confPhoto(MINF(confPhotoRef, bestConf));
+			const float confSimilarity(EXP(SQUARE(minDiff) * sigmaDepthDiff));
+			const float negBestConfs(negBestConf1 + negBestConf2);
+			const bool bKeep(confPhoto > negBestConfs);
+			newConfMap(r,c) = bKeep ? 0.3f*confPhoto + 0.7f*confSimilarity :
+				(negBestConfs > 0.f ? 0.1f*confPhoto/negBestConfs : 0.f);
+			if (confSimilarity <= 0.5f)
+				++nDiscarded;
+			++nProcessed;
+		}
+	}
+	depthDataRef.confMapAdjusted = std::move(newConfMap);
+	const auto timeEnd(std::chrono::steady_clock::now());
+	g_confAdjustComputeNS.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(timeEnd-timeStart).count());
+	DEBUG("Confidence-map %3u adjusted with OpenMVS 2.3 compatibility using %u other images: %u/%u depths discarded",
+		imageRef.GetID(), idxNeighbors.size(), nDiscarded, nProcessed);
+	return true;
+} // AdjustConfidenceCompat23
+/*----------------------------------------------------------------*/
+
 bool DepthMapsData::AdjustConfidence(DepthData& depthDataRef, const IIndexArr& idxNeighbors)
 {
 	ASSERT(depthDataRef.IsValid() && !depthDataRef.IsEmpty() && !idxNeighbors.empty());
@@ -3187,6 +3262,14 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 	}
 	#endif // _USE_CUDA || _USE_METAL
 
+	// The explicit compatibility and adaptive algorithms produce different confidence contracts;
+	// applying both would compound them. This is runtime user input, so reject it cleanly.
+	if ((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE_COMPAT_23) != 0 &&
+		(OPTDENSE::nOptimize & (OPTDENSE::ADJUST_CONFIDENCE_AUTO|OPTDENSE::ADJUST_CONFIDENCE)) != 0) {
+		VERBOSE("error: --postprocess-dmaps cannot combine OpenMVS 2.3 confidence compatibility (16) with adaptive confidence (4 or 8)");
+		return false;
+	}
+
 	// resolve the ADJUST_CONFIDENCE_AUTO default now that the estimation backend is known: the
 	// confidence recalibration is enabled by default only when it is nearly free, i.e. when CUDA
 	// estimates the depth-maps and the sweep runs fused into the last geometric-consistency iteration
@@ -3327,7 +3410,7 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 		VERBOSE("skipping the postprocess confidence-adjust phase (--postprocess-dmaps 8): the adaptive "
 			"confidence was already recalibrated during the last geometric-consistency iteration");
 	} else
-	if ((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE) != 0) {
+	if ((OPTDENSE::nOptimize & (OPTDENSE::ADJUST_CONFIDENCE|OPTDENSE::ADJUST_CONFIDENCE_COMPAT_23)) != 0) {
 		TD_TIMER_STARTD();
 		g_confAdjustComputeNS.store(0);
 		g_confPriorComputeNS.store(0);
@@ -3357,15 +3440,16 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 		{
 			// estimated peak memory: per pixel 4B depth + 12B normal + 4B conf + 4B views (upper
 			// bound; normal/views may be absent) resident in the cache, plus 4B for the
-			// confMapAdjusted side buffer and 4B for the cached intra-map priorMap
+			// confMapAdjusted side buffer and, for adaptive confidence only, 4B for priorMap
 			// (GetIntraMapPrior) -- at the semaphore barrier every image's side buffers are live
-			// simultaneously, so both belong in the estimate even though the cache can't see them
+			// simultaneously, so they belong in the estimate even though the cache can't see them
 			size_t estPeakMemory(0);
+			const unsigned numSideMaps((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE) ? 2u : 1u);
 			for (const DepthData& depthData: data.depthMaps.arrDepthData)
 				if (depthData.IsValid())
-					estPeakMemory += (size_t)depthData.size.area() * ((1/*depth*/+3/*normal*/+1/*conf*/+1/*confMapAdjusted*/+1/*priorMap*/)*4 + 4/*views*/);
-			VERBOSE("Adjust-confidence phase: caching all %u depth-maps in memory, estimated peak %lluMB (incl. in-memory adjusted confidence + prior)",
-				data.images.size(), (unsigned long long)(estPeakMemory>>20));
+					estPeakMemory += (size_t)depthData.size.area() * ((1/*depth*/+3/*normal*/+1/*conf*/+numSideMaps)*4 + 4/*views*/);
+			VERBOSE("Adjust-confidence phase: caching all %u depth-maps in memory, estimated peak %lluMB (incl. in-memory adjusted confidence%s)",
+				data.images.size(), (unsigned long long)(estPeakMemory>>20), numSideMaps == 2 ? " + prior" : "");
 		}
 		#endif
 		// start working threads
@@ -3706,8 +3790,12 @@ void Scene::DenseReconstructionFilter(void* pData)
 				if (idxNeighbors.size() == numMaxNeighbors)
 					break;
 			}
-			// filter the depth-map for this image
-			if ((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE) != 0 && data.depthMaps.AdjustConfidence(depthData, idxNeighbors)) {
+			// filter the depth-map for this image; the modes are mutually exclusive (validated in
+			// ComputeDepthMaps), and both deliver through the same deferred swap event
+			const bool bAdjusted((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE_COMPAT_23) != 0
+				? data.depthMaps.AdjustConfidenceCompat23(depthData, idxNeighbors)
+				: ((OPTDENSE::nOptimize & OPTDENSE::ADJUST_CONFIDENCE) != 0 && data.depthMaps.AdjustConfidence(depthData, idxNeighbors)));
+			if (bAdjusted) {
 				// load the filtered map after all depth-maps were filtered
 				data.events.AddEvent(new EVTAdjustDepthMap(evtImage.idxImage));
 			}

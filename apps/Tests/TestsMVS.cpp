@@ -40,6 +40,66 @@
 DEFINE_LOG_NAME(lt, _T("TestMVS "));
 
 namespace MVS {
+// verify the exact OpenMVS 2.3 AdjustConfidenceFast formula and deferred-write contract
+bool ConfidenceCompat23Test()
+{
+	Scene scene;
+	scene.images.Resize(3);
+	const Camera camera(Matrix3x3::eye(), Matrix3x3::eye(), Point3(REAL(0), REAL(0), REAL(0)));
+	FOREACH(i, scene.images) {
+		Image& image(scene.images[i]);
+		image.ID = i;
+		image.poseID = 0;
+		image.width = 3;
+		image.height = 1;
+		image.camera = camera;
+	}
+	DepthMapsData depthMaps(scene);
+	FOREACH(i, depthMaps.arrDepthData) {
+		DepthData& depthData(depthMaps.arrDepthData[i]);
+		DepthData::ViewData& view(depthData.images.AddEmpty());
+		view.scale = 1.f;
+		view.camera = camera;
+		view.cameraDepthMap = camera;
+		view.pImageData = &scene.images[i];
+		depthData.size = cv::Size(3, 1);
+		depthData.depthMap.create(1, 3);
+		depthData.confMap.create(1, 3);
+	}
+	DepthData& depthDataRef(depthMaps.arrDepthData[0]);
+	depthDataRef.depthMap(0,0) = 1.f;
+	depthDataRef.depthMap(0,1) = 1.f;
+	depthDataRef.depthMap(0,2) = 0.f;
+	depthDataRef.confMap(0,0) = 0.8f;
+	depthDataRef.confMap(0,1) = 0.8f;
+	depthDataRef.confMap(0,2) = 0.5f;
+	DepthData& depthDataN1(depthMaps.arrDepthData[1]);
+	depthDataN1.depthMap(0,0) = 1.f;
+	depthDataN1.depthMap(0,1) = 1.02f;
+	depthDataN1.depthMap(0,2) = 1.f;
+	depthDataN1.confMap(0,0) = 0.7f;
+	depthDataN1.confMap(0,1) = 0.9f;
+	depthDataN1.confMap(0,2) = 0.1f;
+	DepthData& depthDataN2(depthMaps.arrDepthData[2]);
+	depthDataN2.depthMap(0,0) = 1.f;
+	depthDataN2.depthMap(0,1) = 1.03f;
+	depthDataN2.depthMap(0,2) = 1.f;
+	depthDataN2.confMap(0,0) = 0.6f;
+	depthDataN2.confMap(0,1) = 0.8f;
+	depthDataN2.confMap(0,2) = 0.1f;
+	IIndexArr idxNeighbors;
+	idxNeighbors.push_back(1);
+	idxNeighbors.push_back(2);
+	if (!depthMaps.AdjustConfidenceCompat23(depthDataRef, idxNeighbors) ||
+		ABS(depthDataRef.confMapAdjusted(0,0) - 0.91f) > 1e-6f ||
+		ABS(depthDataRef.confMapAdjusted(0,1) - 0.1f*0.8f/1.7f) > 1e-6f ||
+		depthDataRef.confMapAdjusted(0,2) != 0.f || depthDataRef.confMap(0,0) != 0.8f) {
+		VERBOSE("ERROR: OpenMVS 2.3 confidence compatibility formula failed");
+		return false;
+	}
+	depthDataRef.bConfAdjusted = true;
+	if (depthMaps.AdjustConfidenceCompat23(depthDataRef, idxNeighbors)) {
+		VERBOSE("ERROR: OpenMVS 2.3 confidence compatibility double-adjust guard failed");
 
 // test MVS stages on a small sample dataset
 bool PipelineTest(bool forceCPU, bool verbose)
