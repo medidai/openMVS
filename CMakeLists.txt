@@ -27,6 +27,7 @@ ENDIF()
 
 # List configuration options
 OPTION(OpenMVS_BUILD_TOOLS "Build example applications" ON)
+OPTION(OpenMVS_BUILD_SFM "Build Structure-from-Motion library and applications" ON)
 OPTION(OpenMVS_BUILD_VIEWER "Build viewer application" ON)
 OPTION(OpenMVS_USE_OPENMP "Enable OpenMP library" ON)
 OPTION(OpenMVS_USE_BREAKPAD "Enable BreakPad library" ON)
@@ -386,13 +387,17 @@ if(OpenMVS_BUILD_TOOLS)
 endif()
 ADD_SUBDIRECTORY(docs)
 
-if (OpenMVS_ENABLE_TESTS)
+if(OpenMVS_ENABLE_TESTS)
 	# enable testing functionality
 	ENABLE_TESTING()
 	# define tests
-	ADD_TEST(NAME CommonUnitTests COMMAND $<TARGET_FILE:Tests> "0")
-	ADD_TEST(NAME SFMPipelineTest COMMAND $<TARGET_FILE:Tests> "1")
-	ADD_TEST(NAME MVSPipelineTest COMMAND $<TARGET_FILE:Tests> "2")
+	if(OpenMVS_BUILD_SFM)
+		ADD_TEST(NAME CommonUnitTests COMMAND $<TARGET_FILE:Tests> "0")
+		ADD_TEST(NAME SFMPipelineTest COMMAND $<TARGET_FILE:Tests> "1")
+		ADD_TEST(NAME MVSPipelineTest COMMAND $<TARGET_FILE:Tests> "2")
+	else()
+		ADD_TEST(NAME MVSConfidenceCompat23Test COMMAND $<TARGET_FILE:Tests> "0")
+	endif()
 endif()
 
 # Export the package for use from the build-tree

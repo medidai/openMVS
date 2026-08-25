@@ -100,6 +100,11 @@ bool ConfidenceCompat23Test()
 	depthDataRef.bConfAdjusted = true;
 	if (depthMaps.AdjustConfidenceCompat23(depthDataRef, idxNeighbors)) {
 		VERBOSE("ERROR: OpenMVS 2.3 confidence compatibility double-adjust guard failed");
+		return false;
+	}
+	return true;
+}
+/*----------------------------------------------------------------*/
 
 // test MVS stages on a small sample dataset
 bool PipelineTest(bool forceCPU, bool verbose)

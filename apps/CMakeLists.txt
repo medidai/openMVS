@@ -1,6 +1,8 @@
 # Add applications
-ADD_SUBDIRECTORY(CreateStructure)
-ADD_SUBDIRECTORY(ExtractKeyframes)
+if(OpenMVS_BUILD_SFM)
+	ADD_SUBDIRECTORY(CreateStructure)
+	ADD_SUBDIRECTORY(ExtractKeyframes)
+endif()
 ADD_SUBDIRECTORY(InterfaceCOLMAP)
 ADD_SUBDIRECTORY(InterfaceMetashape)
 ADD_SUBDIRECTORY(InterfaceMVSNet)
