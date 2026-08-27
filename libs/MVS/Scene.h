@@ -126,6 +126,7 @@ public:
 	void AddNoiseCameraPoses(float epsPosition, float epsRotation);
 	Scene SubScene(const IIndexArr& idxImages) const;
 	Scene& CropToROI(const OBB3f&, unsigned minNumPoints=3);
+	bool EstimateROICompat23(int nEstimateROI=2, float scale=1.1f);
 	bool EstimateROI(float scaleROI=1.1f, int upAxis=-1);
 	bool EstimateGravityDirection(Point3f& up) const;
 	FloatArr ROIPointWeights(const UnsignedArr& indices, float& medianNeighborDistance) const;

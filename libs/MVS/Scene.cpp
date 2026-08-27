@@ -862,8 +862,10 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 	unsigned nPoints = 0;
 	imageData.avgDepth = 0;
 	ASSERT(fWeightPointInsideROI >= 0 && fWeightPointInsideROI <= 1);
-	const bool bCheckInsideROI(fWeightPointInsideROI > 0 && IsBounded());
-	const float fWeightPointOutsideROI(bCheckInsideROI ? 1.f - fWeightPointInsideROI : 1.f);
+	const bool bROICompat23(OPTDENSE::bROICompat23);
+	const bool bCheckInsideROI(IsBounded() && (bROICompat23 || fWeightPointInsideROI > 0));
+	const float fWeightPointOutsideROI(bCheckInsideROI ? (bROICompat23 ? 0.7f : 1.f-fWeightPointInsideROI) : 1.f);
+	const float fWeightPointInsideROIEffective(bROICompat23 ? 1.f : fWeightPointInsideROI);
 	const float sigmaAngleSmall(-1.f/(2.f*SQUARE(fOptimAngle*0.38f)));
 	const float sigmaAngleLarge(-1.f/(2.f*SQUARE(fOptimAngle*0.7f)));
 	FOREACH(idx, pointcloud.points) {
@@ -879,7 +881,7 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 		// store this point
 		if (views.size() >= nMinPointViews)
 			points.push_back((uint32_t)idx);
-		const float wROI(bCheckInsideROI && obb.Intersects(point) ? fWeightPointInsideROI : fWeightPointOutsideROI);
+		const float wROI(bCheckInsideROI && obb.Intersects(point) ? fWeightPointInsideROIEffective : fWeightPointOutsideROI);
 		if (wROI <= 0)
 			continue;
 		imageData.avgDepth += depth;
@@ -2096,6 +2098,100 @@ static float GrowBound(FloatArr& coords, float bound, float maxGap, bool bDropIs
 	}
 	return bound;
 }
+
+// estimate region-of-interest using the OpenMVS 2.3 adaptive heuristic
+//  - nEstimateROI: 0 - disabled, 1 - enabled, 2 - adaptive
+//  - scale: ratio applied to the ROI extents
+bool Scene::EstimateROICompat23(int nEstimateROI, float scale)
+{
+	ASSERT(nEstimateROI >= 0 && nEstimateROI <= 2 && scale > 0);
+	if (nEstimateROI == 0) {
+		DEBUG_ULTIMATE("The scene will be considered as unbounded (no ROI)");
+		return false;
+	}
+	if (!pointcloud.IsValid()) {
+		VERBOSE("error: no valid point-cloud for the ROI estimation");
+		return false;
+	}
+	CameraArr cameras;
+	FOREACH(i, images) {
+		const Image& imageData = images[i];
+		if (!imageData.IsValid())
+			continue;
+		cameras.emplace_back(imageData.camera);
+	}
+	const unsigned nCameras = cameras.size();
+	if (nCameras < 3) {
+		VERBOSE("warning: not enough valid views for the ROI estimation");
+		return false;
+	}
+	// compute the camera center and the direction median
+	FloatArr x(nCameras), y(nCameras), z(nCameras), nx(nCameras), ny(nCameras), nz(nCameras);
+	FOREACH(i, cameras) {
+		const Point3f camC(cameras[i].C);
+		x[i] = camC.x;
+		y[i] = camC.y;
+		z[i] = camC.z;
+		const Point3f camDirect(cameras[i].Direction());
+		nx[i] = camDirect.x;
+		ny[i] = camDirect.y;
+		nz[i] = camDirect.z;
+	}
+	const CMatrix camCenter(x.GetMedian(), y.GetMedian(), z.GetMedian());
+	CMatrix camDirectMean(nx.GetMean(), ny.GetMean(), nz.GetMean());
+	const float camDirectMeanLen = (float)norm(camDirectMean);
+	if (!ISZERO(camDirectMeanLen))
+		camDirectMean /= camDirectMeanLen;
+	if (camDirectMeanLen > FSQRT_2 / 2.f && nEstimateROI == 2) {
+		VERBOSE("The camera directions mean is unbalanced; the scene will be considered unbounded (no ROI)");
+		return false;
+	}
+	DEBUG_ULTIMATE("The camera positions median is (%f,%f,%f), directions mean and norm are (%f,%f,%f), %f",
+				   camCenter.x, camCenter.y, camCenter.z, camDirectMean.x, camDirectMean.y, camDirectMean.z, camDirectMeanLen);
+	FloatArr cameraDistances(nCameras);
+	FOREACH(i, cameras)
+		cameraDistances[i] = (float)cameras[i].Distance(camCenter);
+	// estimate scene center and radius
+	const float camDistMed = cameraDistances.GetMedian();
+	const float camShiftCoeff = TAN(ASIN(CLAMP(camDirectMeanLen, 0.f, 0.999f)));
+	const CMatrix sceneCenter = camCenter + camShiftCoeff * camDistMed * camDirectMean;
+	FOREACH(i, cameras) {
+		if (cameras[i].PointDepth(sceneCenter) <= 0 && nEstimateROI == 2) {
+			VERBOSE("Found a camera not pointing towards the scene center; the scene will be considered unbounded (no ROI)");
+			return false;
+		}
+		cameraDistances[i] = (float)cameras[i].Distance(sceneCenter);
+	}
+	const float sceneRadius = cameraDistances.GetMax();
+	DEBUG_ULTIMATE("The estimated scene center is (%f,%f,%f), radius is %f",
+				   sceneCenter.x, sceneCenter.y, sceneCenter.z, sceneRadius);
+	Point3fArr ptsInROI;
+	FOREACH(i, pointcloud.points) {
+		const PointCloud::Point& point = pointcloud.points[i];
+		const PointCloud::ViewArr& views = pointcloud.pointViews[i];
+		FOREACH(j, views) {
+			const Image& imageData = images[views[j]];
+			if (!imageData.IsValid())
+				continue;
+			const Camera& camera = imageData.camera;
+			if (camera.PointDepth(point) < sceneRadius * 2.0f) {
+				ptsInROI.emplace_back(point);
+				break;
+			}
+		}
+	}
+	obb.Set(AABB3f(ptsInROI.begin(), ptsInROI.size()).EnlargePercent(scale));
+	#if TD_VERBOSE != TD_VERBOSE_OFF
+	if (VERBOSITY_LEVEL > 2) {
+		VERBOSE("Set the OpenMVS 2.3 compatible ROI with the AABB of position (%f,%f,%f) and extent (%f,%f,%f)",
+				obb.m_pos[0], obb.m_pos[1], obb.m_pos[2], obb.m_ext[0], obb.m_ext[1], obb.m_ext[2]);
+	} else {
+		VERBOSE("Set the OpenMVS 2.3 compatible ROI by the estimated core points");
+	}
+	#endif
+	return true;
+} // EstimateROICompat23
+/*----------------------------------------------------------------*/
 
 // estimate the region-of-interest (ROI) based on the known poses and sparse point-cloud
 //  - scaleROI: ROI scale factor, multipled after computation

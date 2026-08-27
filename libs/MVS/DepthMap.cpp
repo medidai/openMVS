@@ -100,6 +100,7 @@ MDEFVAR_OPTDENSE_float(fMinAngle, "Min Angle", "Min angle for accepting the dept
 MDEFVAR_OPTDENSE_float(fOptimAngle, "Optim Angle", "Optimal angle for computing the depth triangulation", "12.0")
 MDEFVAR_OPTDENSE_float(fMaxAngle, "Max Angle", "Max angle for accepting the depth triangulation", "65.0")
 MDEFVAR_OPTDENSE_float(fWeightPointInsideROI, "Weight Point Inside ROI", "weight a point inside ROI when estimating the neighbor views (0 - ignore ROI, <1 - weight more ROI points, 1 - consider only ROI points)", "0.7")
+MDEFVAR_OPTDENSE_bool(bROICompat23, "ROI Compat 23", "restore OpenMVS 2.3 adaptive ROI estimation and neighbor weighting", "0")
 MDEFVAR_OPTDENSE_float(fDescriptorMinMagnitudeThreshold, "Descriptor Min Magnitude Threshold", "minimum patch texture variance accepted when matching two patches (0 - disabled)", "0.02") // 0.02: pixels with patch texture variance below 0.0004 (0.02^2) will be removed from depthmap; 0.12: patch texture variance below 0.02 (0.12^2) is considered texture-less
 MDEFVAR_OPTDENSE_float(fDepthReprojectionErrorThreshold, "Depth Reprojection Error Threshold", "maximum relative difference between measured and depth projected pixel", "1.2")
 MDEFVAR_OPTDENSE_float(fDepthDiffThreshold, "Depth Diff Threshold", "maximum variance allowed for the depths during fusion", "0.01")

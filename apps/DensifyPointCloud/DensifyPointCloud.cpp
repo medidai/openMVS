@@ -67,6 +67,7 @@ float fBorderROI;
 float fScaleROI;
 int upAxis;
 bool bCrop2ROI;
+bool bROICompat23;
 int	nTowerMode;
 int nFusionMode;
 unsigned nNormalizeCoordinates;
@@ -185,6 +186,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("export-number-views", boost::program_options::value(&OPT::nExportNumViews)->default_value(0), "export points with >= number of views (0 - disabled, <0 - save MVS project too)")
 		("roi-border", boost::program_options::value(&OPT::fBorderROI)->default_value(0), "add a border to the region-of-interest when cropping the scene (0 - disabled, >0 - percentage, <0 - absolute)")
 		("estimate-roi", boost::program_options::value(&OPT::fScaleROI)->default_value(1.1f), "estimate and set region-of-interest, scale factor applied to the estimated extents (0 - disabled, <1 - shrink, >1 - expand)")
+		("roi-compat-23", boost::program_options::value(&OPT::bROICompat23)->default_value(false), "restore OpenMVS 2.3 adaptive ROI estimation and exact 1.0/0.7 neighbor weights")
 		("crop-to-roi", boost::program_options::value(&OPT::bCrop2ROI)->default_value(true), "crop scene using the region-of-interest")
 		("up-axis", boost::program_options::value(&OPT::upAxis)->default_value(-1), "set the up-axis for ROI estimation and tower-mode (0 - X, 1 - Y, 2 - Z, <0 - auto-detect from cameras and ground plane)")
 		("remove-dmaps", boost::program_options::value(&bRemoveDmaps)->default_value(false), "remove depth-maps after fusion")
@@ -280,6 +282,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	OPTDENSE::nEstimationGeometricIters = nEstimationGeometricIters;
 	OPTDENSE::nPatchMatchCUDAInstances = nPatchMatchCUDAInstances;
 	OPTDENSE::bPatchMatchCUDACompat23 = bPatchMatchCUDACompat23;
+	OPTDENSE::bROICompat23 = OPT::bROICompat23;
 	OPTDENSE::fWeightPointInsideROI = fWeightPointInsideROI;
 	OPTDENSE::nEstimateColors = nEstimateColors;
 	OPTDENSE::nEstimateNormals = nEstimateNormals;
@@ -412,8 +415,12 @@ int main(int argc, LPCTSTR* argv)
 			return EXIT_SUCCESS;
 		}
 	}
-	if (!scene.IsBounded() && OPT::fScaleROI > 0)
-		scene.EstimateROI(OPT::fScaleROI, OPT::upAxis);
+	if (!scene.IsBounded() && OPT::fScaleROI > 0) {
+		if (OPT::bROICompat23)
+			scene.EstimateROICompat23(2, OPT::fScaleROI);
+		else
+			scene.EstimateROI(OPT::fScaleROI, OPT::upAxis);
+	}
 	if (!OPT::strExportROIFileName.empty()) {
 		if (!scene.IsBounded()) {
 			VERBOSE("error: no valid ROI to export");
