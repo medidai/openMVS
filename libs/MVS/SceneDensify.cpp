@@ -3172,7 +3172,9 @@ bool Scene::ComputeDepthMaps(DenseDepthMapData& data)
 	// select images to be used for dense reconstruction
 	{
 		#if TD_VERBOSE != TD_VERBOSE_OFF
-		if (OPTDENSE::fWeightPointInsideROI > 0 && IsBounded()) {
+		if (OPTDENSE::bROICompat23 && IsBounded()) {
+			VERBOSE("Select neighbor views using OpenMVS 2.3 ROI weights (inside 1.00, outside 0.70)");
+		} else if (OPTDENSE::fWeightPointInsideROI > 0 && IsBounded()) {
 			VERBOSE("Select neighbor views by weighting inside ROI points with %.2f", OPTDENSE::fWeightPointInsideROI);
 		}
 		#endif
