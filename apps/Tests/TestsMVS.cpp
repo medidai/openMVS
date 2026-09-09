@@ -30,6 +30,9 @@
  */
 
 #include "../../libs/MVS.h"
+#include <cstring>
+
+#include <sstream>
 
 
 // D E F I N E S ///////////////////////////////////////////////////
@@ -101,6 +104,145 @@ bool ConfidenceCompat23Test()
 	if (depthMaps.AdjustConfidenceCompat23(depthDataRef, idxNeighbors)) {
 		VERBOSE("ERROR: OpenMVS 2.3 confidence compatibility double-adjust guard failed");
 		return false;
+	}
+	return true;
+}
+/*----------------------------------------------------------------*/
+
+// verify exact float32 DR round-trip and D2 auto-detection
+bool DMapCompat23Test()
+{
+	const struct PassCase {
+		unsigned nComponents;
+		unsigned nTotalGeometricIters;
+		int nGeometricIter;
+		unsigned nExpected;
+	} passCases[] = {
+		{0, 4, -1, 0},
+		{3, 0, -1, 0},
+		{1, 1, -1, 1},
+		{2, 1, 0, 0},
+		{3, 4, -1, 3},
+		{3, 4, 0, 3},
+		{3, 4, 1, 3},
+		{3, 4, 2, 3},
+		{3, 4, 3, 0},
+	};
+	for (const PassCase& passCase: passCases) {
+		if (IntermediateDMapFloatComponentsForPass(passCase.nComponents,
+			passCase.nGeometricIter, passCase.nTotalGeometricIters) != passCase.nExpected) {
+			VERBOSE("ERROR: intermediate DMap float-component pass selection failed");
+			return false;
+		}
+	}
+
+	DepthDataRaw data;
+	data.header.type = HeaderDepthDataRaw::CONF_ADJUSTED;
+	data.header.imageWidth = 2;
+	data.header.imageHeight = 2;
+	data.header.dMin = 0.5f;
+	data.header.dMax = 4.f;
+	data.imageFileName = "images/ref.jpg";
+	data.IDs = std::vector<uint32_t>{7, 9, 11};
+	for (int i=0; i<9; ++i) {
+		data.K.val[i] = (i%4 == 0 ? 2.0 : 0.0);
+		data.R.val[i] = (i%4 == 0 ? 1.0 : 0.0);
+	}
+	data.C = cv::Point3_<double>(1.0, 2.0, 3.0);
+
+	cv::Mat depthMap(2, 2, CV_32FC1);
+	cv::Mat normalMap(2, 2, CV_32FC3);
+	cv::Mat confMap(2, 2, CV_32FC1);
+	cv::Mat viewsMap(2, 2, CV_8UC4);
+	const float depthValues[] = {0.f, 1.234567f, 2.345678f, 3.456789f};
+	const float normalValues[] = {
+		0.f, 0.f, 0.f,
+		0.267261f, 0.534522f, -0.801784f,
+		-0.436436f, 0.872872f, -0.218218f,
+		0.707107f, 0.408248f, -0.577350f,
+	};
+	const float confValues[] = {0.f, 0.123456f, 0.654321f, 0.987654f};
+	const uint8_t viewValues[] = {
+		0, 1, 2, 3,
+		4, 5, 6, 7,
+		8, 9, 10, 11,
+		12, 13, 14, 15,
+	};
+	std::memcpy(depthMap.ptr(), depthValues, sizeof(depthValues));
+	std::memcpy(normalMap.ptr(), normalValues, sizeof(normalValues));
+	std::memcpy(confMap.ptr(), confValues, sizeof(confValues));
+	std::memcpy(viewsMap.ptr(), viewValues, sizeof(viewValues));
+
+	std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+	if (!ExportDepthDataRawCompat23(stream, data, depthMap, normalMap, confMap, viewsMap)) {
+		VERBOSE("ERROR: OpenMVS 2.3 DMap compatibility export failed");
+		return false;
+	}
+	const std::string payload(stream.str());
+	if (payload.size() < 2 || payload[0] != 'D' || payload[1] != 'R') {
+		VERBOSE("ERROR: OpenMVS 2.3 DMap compatibility header failed");
+		return false;
+	}
+	stream.seekg(0);
+	DepthDataRaw imported;
+	cv::Mat depthImported, normalImported, confImported, viewsImported;
+	if (!ImportDepthDataRawAuto(stream, imported, depthImported, normalImported, confImported, viewsImported, HeaderDepthDataRaw::CONTENT_MASK) ||
+		imported.imageFileName != data.imageFileName || imported.IDs != data.IDs ||
+		(imported.header.type & HeaderDepthDataRaw::CONF_ADJUSTED) == 0 ||
+		std::memcmp(depthMap.ptr(), depthImported.ptr(), sizeof(depthValues)) != 0 ||
+		std::memcmp(normalMap.ptr(), normalImported.ptr(), sizeof(normalValues)) != 0 ||
+		std::memcmp(confMap.ptr(), confImported.ptr(), sizeof(confValues)) != 0 ||
+		std::memcmp(viewsMap.ptr(), viewsImported.ptr(), sizeof(viewValues)) != 0) {
+		VERBOSE("ERROR: OpenMVS 2.3 DMap compatibility round-trip failed");
+		return false;
+	}
+
+	std::stringstream streamD2(std::ios::in | std::ios::out | std::ios::binary);
+	if (!ExportDepthDataRaw(streamD2, data, depthMap, normalMap, confMap, viewsMap)) {
+		VERBOSE("ERROR: D2 regression export failed");
+		return false;
+	}
+	const std::string payloadD2(streamD2.str());
+	streamD2.seekg(0);
+	DepthDataRaw importedD2;
+	cv::Mat depthImportedD2, normalImportedD2, confImportedD2, viewsImportedD2;
+	if (payloadD2.size() < 2 || payloadD2[0] != 'D' || payloadD2[1] != '2' ||
+		!ImportDepthDataRawAuto(streamD2, importedD2, depthImportedD2, normalImportedD2, confImportedD2, viewsImportedD2, HeaderDepthDataRaw::CONTENT_MASK) ||
+		(importedD2.header.type & HeaderDepthDataRaw::CONF_ADJUSTED) == 0 ||
+		std::memcmp(depthMap.ptr(), depthImportedD2.ptr(), sizeof(depthValues)) == 0 ||
+		std::memcmp(normalMap.ptr(), normalImportedD2.ptr(), sizeof(normalValues)) == 0 ||
+		std::memcmp(confMap.ptr(), confImportedD2.ptr(), sizeof(confValues)) == 0 ||
+		std::memcmp(viewsMap.ptr(), viewsImportedD2.ptr(), sizeof(viewValues)) != 0) {
+		VERBOSE("ERROR: D2 auto-detection or quantization regression failed");
+		return false;
+	}
+
+	for (unsigned nFloatComponents=1; nFloatComponents<=3; ++nFloatComponents) {
+		std::stringstream streamHybrid(std::ios::in | std::ios::out | std::ios::binary);
+		if (!ExportDepthDataRawCompat23Components(streamHybrid, data,
+			depthMap, normalMap, confMap, viewsMap, nFloatComponents)) {
+			VERBOSE("ERROR: intermediate component handoff export failed");
+			return false;
+		}
+		const std::string payloadHybrid(streamHybrid.str());
+		streamHybrid.seekg(0);
+		DepthDataRaw importedHybrid;
+		cv::Mat depthHybrid, normalHybrid, confHybrid, viewsHybrid;
+		if (payloadHybrid.size() < 2 || payloadHybrid[0] != 'D' || payloadHybrid[1] != 'R' ||
+			!ImportDepthDataRawAuto(streamHybrid, importedHybrid,
+				depthHybrid, normalHybrid, confHybrid, viewsHybrid,
+				HeaderDepthDataRaw::CONTENT_MASK) ||
+			std::memcmp(depthHybrid.ptr(),
+				(nFloatComponents & DMAP_FLOAT_DEPTH) ? depthMap.ptr() : depthImportedD2.ptr(),
+				sizeof(depthValues)) != 0 ||
+			std::memcmp(normalHybrid.ptr(),
+				(nFloatComponents & DMAP_FLOAT_NORMAL) ? normalMap.ptr() : normalImportedD2.ptr(),
+				sizeof(normalValues)) != 0 ||
+			std::memcmp(confHybrid.ptr(), confImportedD2.ptr(), sizeof(confValues)) != 0 ||
+			std::memcmp(viewsHybrid.ptr(), viewsMap.ptr(), sizeof(viewValues)) != 0) {
+			VERBOSE("ERROR: intermediate component handoff contract failed for mask %u", nFloatComponents);
+			return false;
+		}
 	}
 	return true;
 }

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <sstream>
 
 
 // D E F I N E S ///////////////////////////////////////////////////
@@ -891,6 +892,25 @@ struct HeaderDepthDataRaw {
 };
 /*----------------------------------------------------------------*/
 
+// OpenMVS 2.3 depth-map header. Compatibility exports retain the historical
+// float32 map payloads so an experiment can isolate D2 quantization from the
+// estimator changes while the default D2 codec remains untouched.
+struct HeaderDepthDataRawCompat23 {
+	uint16_t name; // file type
+	uint8_t type; // content type
+	uint8_t padding; // reserve
+	uint32_t imageWidth, imageHeight; // image resolution
+	uint32_t depthWidth, depthHeight; // depth-map resolution
+	float dMin, dMax; // depth range for this view
+	// image file name, IDs and pose use the same layout as D2
+	// depth, normal and confidence maps are stored as float32
+	inline HeaderDepthDataRawCompat23() : name(0), type(0), padding(0) {}
+	static uint16_t HeaderDepthDataRawName() { return *reinterpret_cast<const uint16_t*>("DR"); }
+};
+static_assert(sizeof(HeaderDepthDataRawCompat23) == 28, "OpenMVS 2.3 depth-map header layout changed");
+/*----------------------------------------------------------------*/
+
+
 
 // the meta-data of one depth-map, everything a DMAP file stores besides the maps
 // themselves, which are passed separately as the caller's own matrices
@@ -1277,13 +1297,81 @@ inline bool ExportDepthDataRaw(const std::string& fileName, const DepthDataRaw& 
 	return stream.flush().good();
 }
 
+// Export the exact OpenMVS 2.3 float32 depth-map payload.
+inline bool ExportDepthDataRawCompat23(std::ostream& stream, const DepthDataRaw& data,
+	const cv::Mat& depthMap, const cv::Mat& normalMap, const cv::Mat& confMap, const cv::Mat& viewsMap)
+{
+	if (depthMap.empty() || depthMap.type() != CV_32FC1 || data.IDs.empty() || data.IDs.size() >= 256)
+		return false;
+	if ((!normalMap.empty() && (normalMap.type() != CV_32FC3 || normalMap.rows != depthMap.rows || normalMap.cols != depthMap.cols)) ||
+		(!confMap.empty() && (confMap.type() != CV_32FC1 || confMap.rows != depthMap.rows || confMap.cols != depthMap.cols)) ||
+		(!viewsMap.empty() && (viewsMap.type() != CV_8UC4 || viewsMap.rows != depthMap.rows || viewsMap.cols != depthMap.cols)))
+		return false;
+
+	const int height(depthMap.rows), width(depthMap.cols);
+	HeaderDepthDataRawCompat23 header;
+	header.name = HeaderDepthDataRawCompat23::HeaderDepthDataRawName();
+	// Preserve non-content flags such as CONF_ADJUSTED so the later postprocess does not recalibrate twice.
+	header.type = (uint8_t)((data.header.type & ~(unsigned)HeaderDepthDataRaw::CONTENT_MASK) | HeaderDepthDataRaw::HAS_DEPTH);
+	header.imageWidth = data.header.imageWidth;
+	header.imageHeight = data.header.imageHeight;
+	header.depthWidth = (uint32_t)width;
+	header.depthHeight = (uint32_t)height;
+	header.dMin = data.header.dMin;
+	header.dMax = data.header.dMax;
+	if (header.imageWidth < header.depthWidth || header.imageHeight < header.depthHeight)
+		return false;
+	if (!normalMap.empty())
+		header.type |= HeaderDepthDataRaw::HAS_NORMAL;
+	if (!confMap.empty())
+		header.type |= HeaderDepthDataRaw::HAS_CONF;
+	if (!viewsMap.empty())
+		header.type |= HeaderDepthDataRaw::HAS_VIEWS;
+	stream.write((const char*)&header, sizeof(HeaderDepthDataRawCompat23));
+
+	const uint16_t nFileNameSize((uint16_t)data.imageFileName.length());
+	stream.write((const char*)&nFileNameSize, sizeof(uint16_t));
+	stream.write(data.imageFileName.c_str(), nFileNameSize);
+
+	const uint32_t nIDs((uint32_t)data.IDs.size());
+	stream.write((const char*)&nIDs, sizeof(uint32_t));
+	stream.write((const char*)data.IDs.data(), sizeof(uint32_t)*nIDs);
+
+	stream.write((const char*)data.K.val, sizeof(double)*9);
+	stream.write((const char*)data.R.val, sizeof(double)*9);
+	stream.write((const char*)&data.C.x, sizeof(double)*3);
+
+	for (int r=0; r<height; ++r)
+		stream.write((const char*)depthMap.ptr(r), (size_t)width*sizeof(float));
+	if ((header.type & HeaderDepthDataRaw::HAS_NORMAL) != 0)
+		for (int r=0; r<height; ++r)
+			stream.write((const char*)normalMap.ptr(r), (size_t)width*sizeof(float)*3);
+	if ((header.type & HeaderDepthDataRaw::HAS_CONF) != 0)
+		for (int r=0; r<height; ++r)
+			stream.write((const char*)confMap.ptr(r), (size_t)width*sizeof(float));
+	if ((header.type & HeaderDepthDataRaw::HAS_VIEWS) != 0)
+		for (int r=0; r<height; ++r)
+			stream.write((const char*)viewsMap.ptr(r), (size_t)width*4);
+	return (bool)stream;
+}
+inline bool ExportDepthDataRawCompat23(const std::string& fileName, const DepthDataRaw& data,
+	const cv::Mat& depthMap, const cv::Mat& normalMap, const cv::Mat& confMap, const cv::Mat& viewsMap)
+{
+	std::ofstream stream(fileName, std::ofstream::binary);
+	if (!stream.is_open())
+		return false;
+	if (!ExportDepthDataRawCompat23(stream, data, depthMap, normalMap, confMap, viewsMap))
+		return false;
+	return stream.flush().good();
+}
+
 // Import the depth-data of one view from the given stream, opened in binary mode.
 // Every map requested through flags and present in the file is created at the stored
 // resolution and read into directly; the others are stepped over and left untouched.
 // Passing no flag at all reads the meta-data alone, the maps being the bulk of the file.
-inline bool ImportDepthDataRaw(std::istream& stream, DepthDataRaw& data,
+inline bool ImportDepthDataRawD2(std::istream& stream, DepthDataRaw& data,
 	cv::Mat& depthMap, cv::Mat& normalMap, cv::Mat& confMap, cv::Mat& viewsMap,
-	unsigned flags=HeaderDepthDataRaw::HAS_DEPTH|HeaderDepthDataRaw::HAS_NORMAL|HeaderDepthDataRaw::HAS_CONF|HeaderDepthDataRaw::HAS_VIEWS)
+	unsigned flags)
 {
 	// read header
 	HeaderDepthDataRaw& header = data.header;
@@ -1372,6 +1460,163 @@ inline bool ImportDepthDataRaw(std::istream& stream, DepthDataRaw& data,
 
 	return (bool)stream;
 }
+
+inline bool ImportDepthDataRawCompat23(std::istream& stream, DepthDataRaw& data,
+	cv::Mat& depthMap, cv::Mat& normalMap, cv::Mat& confMap, cv::Mat& viewsMap,
+	unsigned flags)
+{
+	HeaderDepthDataRawCompat23 headerCompat23;
+	stream.read((char*)&headerCompat23, sizeof(HeaderDepthDataRawCompat23));
+	if (!stream ||
+		headerCompat23.name != HeaderDepthDataRawCompat23::HeaderDepthDataRawName() ||
+		(headerCompat23.type & HeaderDepthDataRaw::HAS_DEPTH) == 0 ||
+		headerCompat23.depthWidth == 0 || headerCompat23.depthHeight == 0 ||
+		headerCompat23.imageWidth < headerCompat23.depthWidth || headerCompat23.imageHeight < headerCompat23.depthHeight)
+		return false;
+
+	HeaderDepthDataRaw& header(data.header);
+	header = HeaderDepthDataRaw();
+	header.name = headerCompat23.name;
+	header.type = headerCompat23.type;
+	header.imageWidth = headerCompat23.imageWidth;
+	header.imageHeight = headerCompat23.imageHeight;
+	header.depthWidth = headerCompat23.depthWidth;
+	header.depthHeight = headerCompat23.depthHeight;
+	header.dMin = headerCompat23.dMin;
+	header.dMax = headerCompat23.dMax;
+
+	uint16_t nFileNameSize;
+	stream.read((char*)&nFileNameSize, sizeof(uint16_t));
+	data.imageFileName.resize(nFileNameSize);
+	if (nFileNameSize > 0)
+		stream.read(&data.imageFileName[0], nFileNameSize);
+
+	uint32_t nIDs;
+	stream.read((char*)&nIDs, sizeof(uint32_t));
+	if (!stream || nIDs == 0 || nIDs >= 256)
+		return false;
+	data.IDs.resize(nIDs);
+	stream.read((char*)data.IDs.data(), sizeof(uint32_t)*nIDs);
+
+	stream.read((char*)data.K.val, sizeof(double)*9);
+	stream.read((char*)data.R.val, sizeof(double)*9);
+	stream.read((char*)&data.C.x, sizeof(double)*3);
+	if (!stream || flags == 0)
+		return (bool)stream;
+	if ((!depthMap.empty() && depthMap.type() != CV_32FC1) ||
+		(!normalMap.empty() && normalMap.type() != CV_32FC3) ||
+		(!confMap.empty() && confMap.type() != CV_32FC1) ||
+		(!viewsMap.empty() && viewsMap.type() != CV_8UC4))
+		return false;
+
+	const int height((int)header.depthHeight), width((int)header.depthWidth);
+	const size_t area((size_t)height*width);
+	if ((flags & HeaderDepthDataRaw::HAS_DEPTH) != 0) {
+		depthMap.create(height, width, CV_32FC1);
+		for (int r=0; r<height; ++r)
+			stream.read((char*)depthMap.ptr(r), (size_t)width*sizeof(float));
+	} else {
+		stream.seekg((std::streamoff)(sizeof(float)*area), std::ios::cur);
+	}
+
+	if ((header.type & HeaderDepthDataRaw::HAS_NORMAL) != 0) {
+		if ((flags & HeaderDepthDataRaw::HAS_NORMAL) != 0) {
+			normalMap.create(height, width, CV_32FC3);
+			for (int r=0; r<height; ++r)
+				stream.read((char*)normalMap.ptr(r), (size_t)width*sizeof(float)*3);
+		} else {
+			stream.seekg((std::streamoff)(sizeof(float)*area*3), std::ios::cur);
+		}
+	}
+
+	if ((header.type & HeaderDepthDataRaw::HAS_CONF) != 0) {
+		if ((flags & HeaderDepthDataRaw::HAS_CONF) != 0) {
+			confMap.create(height, width, CV_32FC1);
+			for (int r=0; r<height; ++r)
+				stream.read((char*)confMap.ptr(r), (size_t)width*sizeof(float));
+		} else {
+			stream.seekg((std::streamoff)(sizeof(float)*area), std::ios::cur);
+		}
+	}
+
+	if ((header.type & flags & HeaderDepthDataRaw::HAS_VIEWS) != 0) {
+		viewsMap.create(height, width, CV_8UC4);
+		for (int r=0; r<height; ++r)
+			stream.read((char*)viewsMap.ptr(r), (size_t)width*4);
+	}
+	return (bool)stream;
+}
+
+// Auto-detect D2 or the historical DR codec on a seekable stream.
+inline bool ImportDepthDataRawAuto(std::istream& stream, DepthDataRaw& data,
+	cv::Mat& depthMap, cv::Mat& normalMap, cv::Mat& confMap, cv::Mat& viewsMap,
+	unsigned flags)
+{
+	const std::istream::pos_type start(stream.tellg());
+	if (start == std::istream::pos_type(-1))
+		return false;
+	uint16_t name;
+	stream.read((char*)&name, sizeof(uint16_t));
+	if (!stream)
+		return false;
+	stream.seekg(start);
+	if (!stream)
+		return false;
+	if (name == HeaderDepthDataRaw::HeaderDepthDataRawName())
+		return ImportDepthDataRawD2(stream, data, depthMap, normalMap, confMap, viewsMap, flags);
+	if (name == HeaderDepthDataRawCompat23::HeaderDepthDataRawName())
+		return ImportDepthDataRawCompat23(stream, data, depthMap, normalMap, confMap, viewsMap, flags);
+	return false;
+}
+// Write a legacy DR handoff while preserving only the selected float32 fields.
+// Unselected depth/normal fields and confidence are round-tripped through the
+// production D2 codec first, exactly reproducing the values a later pass would read.
+inline bool ExportDepthDataRawCompat23Components(std::ostream& stream,
+	const DepthDataRaw& data, const cv::Mat& depthMap, const cv::Mat& normalMap,
+	const cv::Mat& confMap, const cv::Mat& viewsMap, unsigned nFloatComponents)
+{
+	constexpr unsigned nFloatDepth(1u);
+	constexpr unsigned nFloatNormal(2u);
+	constexpr unsigned nSupported(nFloatDepth | nFloatNormal);
+	if (nFloatComponents == 0 || (nFloatComponents & ~nSupported) != 0)
+		return false;
+	std::stringstream d2Stream(std::ios::in | std::ios::out | std::ios::binary);
+	if (!ExportDepthDataRaw(d2Stream, data, depthMap, normalMap, confMap, viewsMap))
+		return false;
+	d2Stream.seekg(0);
+	DepthDataRaw quantizedData;
+	cv::Mat depthMapD2, normalMapD2, confMapD2, viewsMapD2;
+	if (!ImportDepthDataRawD2(d2Stream, quantizedData,
+		depthMapD2, normalMapD2, confMapD2, viewsMapD2,
+		HeaderDepthDataRaw::CONTENT_MASK))
+		return false;
+	return ExportDepthDataRawCompat23(stream, data,
+		(nFloatComponents & nFloatDepth) ? depthMap : depthMapD2,
+		(nFloatComponents & nFloatNormal) ? normalMap : normalMapD2,
+		confMapD2, viewsMap);
+}
+inline bool ExportDepthDataRawCompat23Components(const std::string& fileName,
+	const DepthDataRaw& data, const cv::Mat& depthMap, const cv::Mat& normalMap,
+	const cv::Mat& confMap, const cv::Mat& viewsMap, unsigned nFloatComponents)
+{
+	std::ofstream stream(fileName, std::ofstream::binary);
+	if (!stream.is_open())
+		return false;
+	if (!ExportDepthDataRawCompat23Components(stream, data,
+		depthMap, normalMap, confMap, viewsMap, nFloatComponents))
+		return false;
+	stream.flush();
+	return (bool)stream;
+}
+
+// Preserve the original D2-only stream API; file imports below auto-detect both codecs.
+inline bool ImportDepthDataRaw(std::istream& stream, DepthDataRaw& data,
+	cv::Mat& depthMap, cv::Mat& normalMap, cv::Mat& confMap, cv::Mat& viewsMap,
+	unsigned flags=HeaderDepthDataRaw::HAS_DEPTH|HeaderDepthDataRaw::HAS_NORMAL|HeaderDepthDataRaw::HAS_CONF|HeaderDepthDataRaw::HAS_VIEWS)
+{
+	return ImportDepthDataRawD2(stream, data, depthMap, normalMap, confMap, viewsMap, flags);
+}
+
 // same, reading from the given file
 inline bool ImportDepthDataRaw(const std::string& fileName, DepthDataRaw& data,
 	cv::Mat& depthMap, cv::Mat& normalMap, cv::Mat& confMap, cv::Mat& viewsMap,
@@ -1380,7 +1625,7 @@ inline bool ImportDepthDataRaw(const std::string& fileName, DepthDataRaw& data,
 	std::ifstream stream(fileName, std::ifstream::binary);
 	if (!stream.is_open())
 		return false;
-	return ImportDepthDataRaw(stream, data, depthMap, normalMap, confMap, viewsMap, flags);
+	return ImportDepthDataRawAuto(stream, data, depthMap, normalMap, confMap, viewsMap, flags);
 }
 /*----------------------------------------------------------------*/
 

@@ -3708,7 +3708,10 @@ void Scene::DenseReconstructionEstimate(void* pData)
 			const int dmCols = depthData.depthMap.cols;
 			// save compute depth-map for this image
 			if (!depthData.depthMap.empty()) {
-				if (!depthData.Save(ComposeDepthFilePath(viewID, data.nEstimationGeometricIter < 0 ? "dmap" : "geo.dmap")))
+				const unsigned nDMapFloatComponents(IntermediateDMapFloatComponentsForPass(
+					OPTDENSE::nDMapIntermediateFloatComponents,
+					data.nEstimationGeometricIter, OPTDENSE::nEstimationGeometricIters));
+				if (!depthData.Save(ComposeDepthFilePath(viewID, data.nEstimationGeometricIter < 0 ? "dmap" : "geo.dmap"), nDMapFloatComponents))
 					exit(EXIT_FAILURE);
 			}
 			depthData.ReleaseImages();

@@ -164,6 +164,7 @@ extern MVS_API bool bEstimateConfidenceCUDA; // when CUDA estimation is used, ru
 extern MVS_API unsigned nEstimationIters;
 extern MVS_API unsigned nEstimationGeometricIters;
 extern MVS_API unsigned nPatchMatchCUDAInstances;
+extern MVS_API unsigned nDMapIntermediateFloatComponents;
 extern MVS_API bool bPatchMatchCUDACompat23;
 extern MVS_API bool bROICompat23;
 extern MVS_API float fEstimationGeometricWeight;
@@ -176,6 +177,24 @@ extern MVS_API float fRandomSmoothDepth;
 extern MVS_API float fRandomSmoothNormal;
 extern MVS_API float fRandomSmoothBonus;
 } // namespace OPTDENSE
+/*----------------------------------------------------------------*/
+
+
+enum DMapFloatComponent : unsigned {
+	DMAP_FLOAT_DEPTH = 1u,
+	DMAP_FLOAT_NORMAL = 2u,
+	DMAP_FLOAT_COMPONENT_MASK = DMAP_FLOAT_DEPTH | DMAP_FLOAT_NORMAL,
+};
+
+// Preserve selected float32 fields only while a saved map will be re-imported
+// by a later PatchMatch pass. The final map always retains the production D2 codec.
+inline unsigned IntermediateDMapFloatComponentsForPass(unsigned nComponents,
+	int nGeometricIter, unsigned nTotalGeometricIters) {
+	ASSERT((nComponents & ~DMAP_FLOAT_COMPONENT_MASK) == 0);
+	return nTotalGeometricIters > 0 &&
+		nGeometricIter < static_cast<int>(nTotalGeometricIters)-1 ?
+		nComponents : 0u;
+}
 /*----------------------------------------------------------------*/
 
 
@@ -315,7 +334,7 @@ struct MVS_API DepthData {
 
 	void ApplyIgnoreMask(const BitMatrix&);
 
-	bool Save(const String& fileName) const;
+	bool Save(const String& fileName, unsigned nDMapFloatComponents=0) const;
 	bool Load(const String& fileName, unsigned flags=HeaderDepthDataRaw::CONTENT_MASK);
 
 	unsigned GetRef();
@@ -635,7 +654,8 @@ MVS_API bool ExportDepthDataRaw(const String&, const String& imageFileName,
 	const KMatrix&, const RMatrix&, const CMatrix&,
 	Depth dMin, Depth dMax,
 	const DepthMap&, const NormalMap&, const ConfidenceMap&, const ViewsMap&,
-	bool bConfAdjusted=false/*mark the stored confMap as already recalibrated (CONF_ADJUSTED)*/);
+	bool bConfAdjusted=false/*mark the stored confMap as already recalibrated (CONF_ADJUSTED)*/,
+	unsigned nDMapFloatComponents=0/*float32 handoff fields: 1 depth, 2 normals; zero writes D2*/);
 MVS_API bool ImportDepthDataRaw(const String&, String& imageFileName,
 	IIndexArr&, cv::Size& imageSize,
 	KMatrix&, RMatrix&, CMatrix&,
