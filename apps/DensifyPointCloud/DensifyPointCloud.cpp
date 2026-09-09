@@ -139,6 +139,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	unsigned nEstimationIters;
 	unsigned nEstimationGeometricIters;
 	unsigned nPatchMatchCUDAInstances;
+	unsigned nDMapIntermediateFloatComponents;
 	bool bPatchMatchCUDACompat23;
 	float fWeightPointInsideROI;
 	unsigned nEstimateColors;
@@ -168,6 +169,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("iters", boost::program_options::value(&nEstimationIters)->default_value(numIters), "number of patch-match iterations")
 		("geometric-iters", boost::program_options::value(&nEstimationGeometricIters)->default_value(2), "number of geometric consistent patch-match iterations (0 - disabled)")
 		("patch-match-cuda-instances", boost::program_options::value(&nPatchMatchCUDAInstances)->default_value(4), "number of parallel CUDA PatchMatch worker instances (clamped to nMaxThreads)")
+		("dmap-intermediate-float-components", boost::program_options::value(&nDMapIntermediateFloatComponents)->default_value(0), "bit mask selecting float32 fields in initial and non-final PatchMatch handoffs: 1 depth, 2 normals; other fields use D2 quantization and final depth-maps remain D2")
 		("patch-match-cuda-compat-23", boost::program_options::value(&bPatchMatchCUDACompat23)->default_value(false), "restore OpenMVS 2.3 CUDA proposal and coarse-to-fine prior behavior")
 		("weight-point-inside-roi", boost::program_options::value(&fWeightPointInsideROI)->default_value(0.7f), "weight a point inside ROI when estimating neighbor views")
 		("estimate-colors", boost::program_options::value(&nEstimateColors)->default_value(2), "estimate the colors for the dense point-cloud (0 - disabled, 1 - final, 2 - estimate)")
@@ -281,6 +283,11 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	OPTDENSE::nEstimationIters = nEstimationIters;
 	OPTDENSE::nEstimationGeometricIters = nEstimationGeometricIters;
 	OPTDENSE::nPatchMatchCUDAInstances = nPatchMatchCUDAInstances;
+	if (nDMapIntermediateFloatComponents > 3) {
+		VERBOSE("error: invalid --dmap-intermediate-float-components %u (expected 0..3)", nDMapIntermediateFloatComponents);
+		return false;
+	}
+	OPTDENSE::nDMapIntermediateFloatComponents = nDMapIntermediateFloatComponents;
 	OPTDENSE::bPatchMatchCUDACompat23 = bPatchMatchCUDACompat23;
 	OPTDENSE::bROICompat23 = OPT::bROICompat23;
 	OPTDENSE::fWeightPointInsideROI = fWeightPointInsideROI;

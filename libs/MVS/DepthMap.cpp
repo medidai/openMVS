@@ -122,6 +122,7 @@ DEFVAR_OPTDENSE_bool(bEstimateConfidenceCUDA, "Estimate Confidence CUDA", "when 
 DEFVAR_OPTDENSE_uint32(nEstimationIters, "Estimation Iters", "Number of patch-match iterations", "3")
 DEFVAR_OPTDENSE_uint32(nEstimationGeometricIters, "Estimation Geometric Iters", "Number of geometric consistent patch-match iterations (0 - disabled)", "2")
 DEFVAR_OPTDENSE_uint32(nPatchMatchCUDAInstances, "PatchMatch CUDA Instances", "Number of parallel CUDA PatchMatch worker instances (clamped to nMaxThreads)", "4")
+MDEFVAR_OPTDENSE_uint32(nDMapIntermediateFloatComponents, "Intermediate DMap Float Components", "bit mask selecting float32 fields in initial and non-final PatchMatch handoffs: 1 depth, 2 normals", "0")
 MDEFVAR_OPTDENSE_bool(bPatchMatchCUDACompat23, "PatchMatch CUDA 2.3 Compatibility", "restore the OpenMVS 2.3 CUDA proposal and coarse-to-fine prior behavior", "0")
 MDEFVAR_OPTDENSE_float(fEstimationGeometricWeight, "Estimation Geometric Weight", "pairwise geometric consistency cost weight", "0.1")
 MDEFVAR_OPTDENSE_uint32(nRandomIters, "Random Iters", "Number of iterations for random assignment per pixel", "6")
@@ -259,7 +260,7 @@ void DepthData::ApplyIgnoreMask(const BitMatrix& mask)
 /*----------------------------------------------------------------*/
 
 
-bool DepthData::Save(const String& fileName) const
+bool DepthData::Save(const String& fileName, unsigned nDMapFloatComponents) const
 {
 	ASSERT(IsValid() && !depthMap.empty() && !confMap.empty());
 	const String fileNameTmp(fileName+".tmp"); {
@@ -268,7 +269,7 @@ bool DepthData::Save(const String& fileName) const
 		for (const ViewData& image: images)
 			IDs.push_back(image.GetID());
 		const ViewData& image0 = GetView();
-		if (!ExportDepthDataRaw(fileNameTmp, image0.pImageData->name, IDs, depthMap.size(), image0.camera.K, image0.camera.R, image0.camera.C, dMin, dMax, depthMap, normalMap, confMap, viewsMap, bConfAdjusted))
+		if (!ExportDepthDataRaw(fileNameTmp, image0.pImageData->name, IDs, depthMap.size(), image0.camera.K, image0.camera.R, image0.camera.C, dMin, dMax, depthMap, normalMap, confMap, viewsMap, bConfAdjusted, nDMapFloatComponents))
 			return false;
 	}
 	if (!File::renameFile(fileNameTmp, fileName)) {
@@ -2100,7 +2101,7 @@ bool MVS::ExportDepthDataRaw(const String& fileName, const String& imageFileName
 	const KMatrix& K, const RMatrix& R, const CMatrix& C,
 	Depth dMin, Depth dMax,
 	const DepthMap& depthMap, const NormalMap& normalMap, const ConfidenceMap& confMap, const ViewsMap& viewsMap,
-	bool bConfAdjusted)
+	bool bConfAdjusted, unsigned nDMapFloatComponents)
 {
 	ASSERT(!IDs.empty() && IDs.size() < 256);
 	ASSERT(!depthMap.empty());
@@ -2123,8 +2124,12 @@ bool MVS::ExportDepthDataRaw(const String& fileName, const String& imageFileName
 	data.K = K;
 	data.R = R;
 	data.C = C;
-	if (!ExportDepthDataRaw(static_cast<const std::string&>(fileName), data,
-		depthMap, normalMap, confMap, viewsMap))
+	const bool bExported(nDMapFloatComponents ?
+		ExportDepthDataRawCompat23Components(static_cast<const std::string&>(fileName), data,
+			depthMap, normalMap, confMap, viewsMap, nDMapFloatComponents) :
+		ExportDepthDataRaw(static_cast<const std::string&>(fileName), data,
+			depthMap, normalMap, confMap, viewsMap));
+	if (!bExported)
 	{
 		DEBUG("error: writing depth-data to file '%s'", fileName.c_str());
 		return false;

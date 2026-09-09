@@ -28,7 +28,7 @@ int main()
 	OPEN_LOG();
 	OPEN_LOGCONSOLE();
 	Initialize(APPNAME);
-	const bool success = MVS::ConfidenceCompat23Test();
+	const bool success = MVS::ConfidenceCompat23Test() && MVS::DMapCompat23Test();
 	Finalize();
 	CLOSE_LOGCONSOLE();
 	CLOSE_LOG();

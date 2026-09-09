@@ -87,6 +87,10 @@ bool UnitTests()
 		VERBOSE("ERROR: ConfidenceCompat23Test failed!");
 		return false;
 	}
+	if (!MVS::DMapCompat23Test()) {
+		VERBOSE("ERROR: DMapCompat23Test failed!");
+		return false;
+	}
 	if (!SEACAVE::TestConfidenceInterval()) {
 		VERBOSE("ERROR: TestConfidenceInterval failed!");
 		return false;
