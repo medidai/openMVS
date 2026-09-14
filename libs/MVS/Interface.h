@@ -1590,7 +1590,8 @@ inline bool ExportDepthDataRawCompat23Components(std::ostream& stream,
 		depthMapD2, normalMapD2, confMapD2, viewsMapD2,
 		HeaderDepthDataRaw::CONTENT_MASK))
 		return false;
-	return ExportDepthDataRawCompat23(stream, data,
+	return ExportDepthDataRawCompat23(stream,
+		(nFloatComponents & nFloatDepth) ? data : quantizedData,
 		(nFloatComponents & nFloatDepth) ? depthMap : depthMapD2,
 		(nFloatComponents & nFloatNormal) ? normalMap : normalMapD2,
 		confMapD2, viewsMap);
