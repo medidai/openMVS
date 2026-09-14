@@ -5,6 +5,8 @@ if(OpenMVS_BUILD_SFM)
 	else()
 		FILE(GLOB LIBRARY_FILES_C "*.cpp")
 	endif()
+	# The dense-only entry point must not be linked alongside Tests.cpp.
+	LIST(REMOVE_ITEM LIBRARY_FILES_C "${CMAKE_CURRENT_SOURCE_DIR}/TestsMVSOnly.cpp")
 	FILE(GLOB LIBRARY_FILES_H "*.h" "*.inl")
 	SET(TEST_LIBS "SFM;MVS")
 else()
