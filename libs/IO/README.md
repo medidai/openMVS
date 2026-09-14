@@ -1,0 +1,182 @@
+# IO Library
+
+The IO library handles all file format reading and writing in OpenMVS -- both 3D geometry (point clouds, meshes) and 2D images. If data enters or leaves the system through a file, it goes through this library.
+
+## What You Need to Know First
+
+### The library is a format abstraction layer
+
+You rarely interact with IO directly. Instead, the MVS library's `PointCloud`, `Mesh`, and `Scene` classes call into IO when you do `LoadPLY()`, `SaveOBJ()`, etc. Understanding IO matters when you need to add a new format, debug file loading issues, or extend what's stored in an existing format.
+
+### PLY is the primary 3D format
+
+While multiple formats are supported, PLY (Polygon File Format) is the workhorse. It's used for:
+- Sparse and dense point clouds (with optional colors, normals, view indices)
+- Triangle meshes (with optional textures)
+- Intermediate pipeline outputs
+
+PLY files are typically saved in **little-endian binary** (`PLY::BINARY_LE`) for performance. ASCII mode is available for debugging.
+
+## 3D Geometry Formats
+
+### PLY (`PLY.h`, `PLY.cpp`)
+
+The PLY parser is a full implementation of the PLY specification. Key concepts:
+
+**Elements and Properties**: A PLY file is organized into elements (like "vertex" or "face"), each with typed properties:
+```
+element vertex 1000
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+element face 500
+property list uchar int vertex_indices
+```
+
+**Reading pattern**:
+```cpp
+PLY ply;
+if (!ply.read(fileName))
+    return false;
+
+// Find and read vertex element
+if (ply.find_element("vertex")) {
+    ply.describe_element("vertex", vertexCount);
+    // Set up property handlers...
+    for (int i = 0; i < vertexCount; i++)
+        ply.get_element(&vertex);
+}
+```
+
+**Writing pattern**:
+```cpp
+PLY ply;
+ply.write(fileName, numElements, elementNames, PLY::BINARY_LE, 0);
+// Describe properties, then header_complete()
+for (auto& v : vertices)
+    ply.put_element(&v);
+```
+
+**Comments**: PLY comments store metadata. OpenMVS uses them for texture file references:
+```
+comment TextureFile texture_0.png
+comment TextureFile texture_1.jpg
+```
+
+**Property combine rules**: When merging mesh data, properties can be combined using rules like `AVERAGE_RULE`, `MAJORITY_RULE`, `MINIMUM_RULE`, etc.
+
+### OBJ (`OBJ.h`, `OBJ.cpp`)
+
+Wavefront OBJ support with full material library (.mtl) handling:
+
+- **`ObjModel`**: Container with vertices, texture coordinates, normals, and face groups
+- **`MaterialLib`**: Material definitions including diffuse textures
+- **Groups**: Faces are organized by material name
+
+Textures are saved as separate image files (PNG for lossless, JPEG for lossy) and referenced from the .mtl file.
+
+```cpp
+ObjModel model;
+model.Load("mesh.obj");      // Loads .obj + .mtl + texture images
+model.Save("output.obj", 6); // 6 decimal places for vertex precision
+```
+
+### glTF (`tiny_gltf.h`)
+
+Modern 3D format support via the third-party header-only `tiny_gltf` library. Supports both binary (`.glb`) and ASCII (`.gltf`) variants. Used by `Mesh::LoadGLTF()` / `Mesh::SaveGLTF()` and equivalent PointCloud methods.
+
+## Image Format System
+
+### Factory pattern with auto-detection
+
+The image system uses a factory pattern. You call `CImage::Create(fileName, mode)` and it detects the format from the file extension, returning the appropriate subclass:
+
+```cpp
+CImage* img = CImage::Create("photo.jpg", CImage::READ);
+img->ReadHeader();
+img->ReadData(buffer, PF_R8G8B8, stride, width);
+delete img;
+```
+
+### Supported formats
+
+| Format | Class | Always Available? | Notes |
+|--------|-------|-------------------|-------|
+| BMP | `CImageBMP` | Yes | Simple uncompressed bitmap |
+| TGA | `CImageTGA` | Yes | Supports RLE compression |
+| DDS | `CImageDDS` | Yes | DirectX format with DXT compression and mipmaps |
+| PNG | `CImagePNG` | Optional (`_USE_PNG`) | Lossless, requires libpng |
+| JPEG | `CImageJPG` | Optional (`_USE_JPG`) | Lossy, requires libjpeg |
+| TIFF | `CImageTIFF` | Optional (`_USE_TIFF`) | Multi-page support, requires libtiff |
+| JpegXL | `CImageJXL` | Optional (`_USE_JXL`) | Modern codec, requires libjxl |
+| SCI | `CImageSCI` | Yes | Custom OpenMVS binary format |
+
+The optional formats are enabled at build time based on available system libraries. The CMake build auto-detects them and sets `_USE_PNG`, `_USE_JPG`, etc.
+
+### Pixel formats
+
+The library defines a rich set of pixel formats for conversion between different representations:
+
+- **Grayscale**: `PF_GRAY8` (8-bit), `PF_GRAY32F` (32-bit float, used for depth maps)
+- **RGB**: `PF_R8G8B8` (24-bit), `PF_R8G8B8A8` (32-bit with alpha)
+- **BGR**: `PF_B8G8R8`, `PF_B8G8R8A8` (OpenCV's native order)
+- **Compressed**: `PF_DXT1` through `PF_DXT5` (S3TC block compression)
+
+`CImage::FilterFormat()` handles conversion between formats.
+
+## How Other Libraries Use IO
+
+**PointCloud** (in MVS lib):
+```cpp
+pointCloud.LoadPLY("sparse.ply");
+pointCloud.SavePLY("dense.ply", /*bViews=*/true, /*bLegacy=*/false, /*bBinary=*/true);
+```
+
+**Mesh** (in MVS lib):
+```cpp
+mesh.LoadPLY("mesh.ply");
+mesh.SaveOBJ("textured.obj");       // Creates .obj + .mtl + textures
+mesh.SaveGLTF("model.glb", true);   // Binary glTF
+```
+
+**Scene** (in MVS lib): Uses `.mvs` native format (Boost serialization, not part of IO) but IO handles all import/export to standard formats.
+
+## Third-Party Code
+
+- **`tiny_gltf.h`**: glTF 2.0 loader/writer (Syoyo Fujita, header-only, MIT license)
+- **`json.hpp`**: nlohmann JSON (header-only, MIT license)
+- **`TinyXML2.h/cpp`**: Lightweight XML parser
+
+## File Organization
+
+```
+libs/IO/
+├── Common.h/cpp        # Library entry point, conditional includes
+├── PLY.h/cpp           # PLY parser/writer (~2000+ lines)
+├── OBJ.h/cpp           # Wavefront OBJ with materials
+├── Image.h/cpp         # CImage base class + factory
+├── ImageBMP.h/cpp      # BMP format
+├── ImageTGA.h/cpp      # TGA format (with RLE)
+├── ImageDDS.h/cpp      # DDS format (with DXT)
+├── ImagePNG.h/cpp      # PNG format (optional)
+├── ImageJPG.h/cpp      # JPEG format (optional)
+├── ImageTIFF.h/cpp     # TIFF format (optional)
+├── ImageJXL.h/cpp      # JPEG XL format (optional)
+├── ImageSCI.h/cpp      # Custom OpenMVS format
+├── tiny_gltf.h         # glTF loader (third-party, header-only)
+├── json.hpp            # JSON library (third-party, header-only)
+├── TinyXML2.h/cpp      # XML parser (third-party)
+└── CMakeLists.txt      # Build config with optional dependency detection
+```
+
+## Dependencies
+
+- **Common** (required): Base types and utilities
+- **libpng** (optional): PNG support
+- **libjpeg** (optional): JPEG support
+- **libtiff** (optional): TIFF support
+- **libjxl** (optional): JPEG XL support
+- **exiv2** (optional): EXIF metadata extraction

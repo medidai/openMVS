@@ -34,6 +34,3 @@ RUN cd eigen_build &&\
     cmake . ../eigen &&\
     make && make install &&\
     cd ..
-
-# VCGLib
-RUN git clone https://github.com/cdcseacave/VCG.git vcglib

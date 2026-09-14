@@ -43,8 +43,14 @@ using namespace STEREO;
 // uncomment to enable OpenCV filter demo
 //#define _USE_FILTER_DEMO
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("SemGblMt"));
 
 #ifdef _USE_FILTER_DEMO
 #include "opencv2/ximgproc/disparity_filter.hpp"
@@ -306,17 +312,17 @@ int disparityFiltering(cv::Mat left, cv::Mat right, int argc, const LPCSTR* argv
 	{
 		cv::Mat filtered_disp_vis;
 		cv::ximgproc::getDisparityVis(filtered_disp,filtered_disp_vis,vis_mult);
-		cv::imwrite(dst_path,filtered_disp_vis);
+		SaveImage(filtered_disp_vis, dst_path);
 	}
 	if(dst_raw_path!="None")
 	{
 		cv::Mat raw_disp_vis;
 		cv::ximgproc::getDisparityVis(left_disp,raw_disp_vis,vis_mult);
-		cv::imwrite(dst_raw_path,raw_disp_vis);
+		SaveImage(raw_disp_vis, dst_raw_path);
 	}
 	if(dst_conf_path!="None")
 	{
-		cv::imwrite(dst_conf_path,conf_map);
+		SaveImage(conf_map, dst_conf_path);
 	}
 
 	if(!no_display)
@@ -615,7 +621,8 @@ void SemiGlobalMatcher::Match(const Scene& scene, IIndex idxImage, IIndex numNei
 				image.camera = leftImageLevel.camera;
 				DepthMap depthMap;
 				Depth dMin, dMax;
-				TriangulatePoints2DepthMap(image, scene.pointcloud, points, depthMap, dMin, dMax, true);
+				TriangulatePoints2DepthMap(image.camera, image.image.size(), scene.pointcloud, points, depthMap,
+					dMin, dMax, image.pImageData->avgDepth);
 				points.Release();
 				Matrix3x3 H2(H); Matrix4x4 Q2(Q);
 				Image::ScaleStereoRectification(H2, Q2, scale*0.5);
@@ -772,7 +779,14 @@ void SemiGlobalMatcher::Fuse(const Scene& scene, IIndex idxImage, IIndex numNeig
 			CMatrix poseC;
 			ComputeRelativePose(rightImage.camera.R, rightImage.camera.C, leftImage.camera.R, leftImage.camera.C, poseR, poseC);
 			Matrix4x4 P(Matrix4x4::IDENTITY);
-			AssembleProjectionMatrix(leftImage.camera.K, poseR, poseC, reinterpret_cast<Matrix3x4&>(P));
+			#if defined(__GNUC__) || defined(__clang__)
+			#pragma GCC diagnostic push
+			#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+			#endif
+			AssembleProjectionMatrix(leftImage.camera.K, poseR, poseC, reinterpret_cast<PMatrix&>(P));
+			#if defined(__GNUC__) || defined(__clang__)
+			#pragma GCC diagnostic pop
+			#endif
 			Matrix4x4 invK(Matrix4x4::IDENTITY);
 			cv::Mat(rightImage.camera.GetInvK()).copyTo(cv::Mat(4,4,cv::DataType<Matrix4x4::Type>::type,invK.val)(cv::Rect(0,0,3,3)));
 			Q = P*invK*Q;
@@ -1221,7 +1235,7 @@ void SemiGlobalMatcher::Match(const ViewData& leftImage, const ViewData& rightIm
 				}
 			}
 			for (int i=0; i<buffersize; ++i) {
-				LineData& line = linesBuffer[i]; 
+				LineData& line = linesBuffer[i];
 				memset(line.L, 0, sizeof(AccumCost)*maxNumDisp);
 				line.R.minDisp = line.R.maxDisp = 0;
 			}
@@ -2016,7 +2030,7 @@ bool SemiGlobalMatcher::ProjectDisparity2DepthMap(const DisparityMap& disparityM
 				depthMap(r,c) = Depth(0);
 				continue;
 			}
-			ValueAccumulator acc(Vec4f::ZERO, 0.f);
+			ValueAccumulator acc;
 			for (int i=0; i<4; ++i) {
 				const DepthData& depthData = depthDatas[i];
 				const Depth depth(depthData.depthMap(r,c));
@@ -2197,7 +2211,7 @@ Image8U3 SemiGlobalMatcher::DisparityMap2Image(const DisparityMap& disparityMap,
 				disparities.emplace_back(disparity);
 		}
 		if (!disparities.empty()) {
-			const std::pair<float,float> th(ComputeX84Threshold<Disparity,float>(disparities.data(), disparities.size(), 5.2f));
+			const std::pair<float,float> th(ComputeX84Threshold<Disparity,float>(disparities));
 			minDisparity = (Disparity)ROUND2INT(th.first-th.second);
 			maxDisparity = (Disparity)ROUND2INT(th.first+th.second);
 		}
@@ -2363,3 +2377,5 @@ bool MVS::STEREO::ExportCamerasEngin(const Scene& scene, const String& fileName)
 	return true;
 } // ExportCamerasEngin
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

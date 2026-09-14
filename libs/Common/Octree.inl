@@ -227,7 +227,7 @@ inline void TOctree<ITEMARR_TYPE,TYPE,DIMS,DATA_TYPE>::Insert(const ITEMARR_TYPE
 	const POINT_TYPE center = aabb.GetCenter();
 	m_radius = aabb.GetSize().maxCoeff()/Type(2);
 	// single connected list of next item indices
-	_InsertData<Functor> insertData = {items.size(), split};
+	_InsertData<Functor> insertData {items.size(), split};
 	std::iota(insertData.successors.begin(), insertData.successors.end(), IDX_TYPE(1));
 	insertData.successors.back() = _InsertData<Functor>::NO_INDEX;
 	// setup each cell
@@ -295,8 +295,8 @@ void TOctree<ITEMARR_TYPE,TYPE,DIMS,DATA_TYPE>::_Collect(const CELL_TYPE& cell, 
 {
 	if (cell.IsLeaf()) {
 		// add all items contained by the bounding-box
-		for (IDX_TYPE i=0; i<cell.Leaf().size; ++i) {
-			const IDX_TYPE idx = m_indices[cell.Leaf().idxBegin + i];
+		for (IDX_TYPE i=0; i<cell.GetNumItems(); ++i) {
+			const IDX_TYPE idx = m_indices[cell.GetFirstItemIdx() + i];
 			if (aabb.Intersects(m_items[idx]))
 				inserter(idx);
 		}
@@ -762,8 +762,8 @@ void TOctree<ITEMARR_TYPE,TYPE,DIMS,DATA_TYPE>::GetDebugInfo(DEBUGINFO* pInfo, b
 template <typename ITEMARR_TYPE, typename TYPE, int DIMS, typename DATA_TYPE>
 void TOctree<ITEMARR_TYPE,TYPE,DIMS,DATA_TYPE>::LogDebugInfo(const DEBUGINFO& info)
 {
-	//VERBOSE("NoItems: %d; Mem %s; MemItems %s; MemStruct %s; AvgMemStruct %.2f%%%%; NoNodes %d; NoLeaf %d; AvgLeaf %.2f%%%%; AvgDepth %.2f; MinDepth %d; MaxDepth %d",
-	VERBOSE("NumItems %d; Mem %s (%s items, %s struct - %.2f%%%%); NumNodes %d (leaves %d - %.2f%%%%); Depth %.2f (%d min, %d max)",
+	//VERBOSE("NoItems: %d; Mem %s; MemItems %s; MemStruct %s; AvgMemStruct %.2f%%; NoNodes %d; NoLeaf %d; AvgLeaf %.2f%%; AvgDepth %.2f; MinDepth %d; MaxDepth %d",
+	VERBOSE("NumItems %d; Mem %s (%s items, %s struct - %.2f%%); NumNodes %d (leaves %d - %.2f%%); Depth %.2f (%d min, %d max)",
 		info.numItems,
 		Util::formatBytes(info.memSize).c_str(), Util::formatBytes(info.memItems).c_str(), Util::formatBytes(info.memStruct).c_str(), double(info.memStruct)*100.0/info.memSize,
 		info.numNodes, info.numLeaves, float(info.numLeaves*100)/info.numNodes,

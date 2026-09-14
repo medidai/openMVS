@@ -165,19 +165,10 @@ inline void TAABB<TYPE,DIMS>::GetSize(POINT& ptSize) const
 template <typename TYPE, int DIMS>
 inline void TAABB<TYPE,DIMS>::GetCorner(BYTE i, POINT& ptCorner) const
 {
+	// use bit pattern to determine corner: 0 = min, 1 = max
 	ASSERT(i<numCorners);
-	if (DIMS == 1) {
-		ptCorner(0) = operator[](i);
-	}
-	if (DIMS == 2) {
-		ptCorner(0) = operator[]((i/2)*2 + 0);
-		ptCorner(1) = operator[]((i%2)*2 + 1);
-	}
-	if (DIMS == 3) {
-		ptCorner(0) = operator[]((i/4)*3     + 0);
-		ptCorner(1) = operator[](((i/2)%2)*3 + 1);
-		ptCorner(2) = operator[]((i%2)*3     + 2);
-	}
+	for (int j=0; j<DIMS; ++j)
+		ptCorner(j) = (i & (1 << j)) ? ptMax(j) : ptMin(j);
 }
 template <typename TYPE, int DIMS>
 inline typename TAABB<TYPE,DIMS>::POINT TAABB<TYPE,DIMS>::GetCorner(BYTE i) const
@@ -189,7 +180,7 @@ inline typename TAABB<TYPE,DIMS>::POINT TAABB<TYPE,DIMS>::GetCorner(BYTE i) cons
 template <typename TYPE, int DIMS>
 inline void TAABB<TYPE,DIMS>::GetCorners(POINT pts[numCorners]) const
 {
-	for (BYTE i=0; i<numCorners; ++i)
+	for (int i=0; i<numCorners; ++i)
 		GetCorner(i, pts[i]);
 } // GetCorners
 /*----------------------------------------------------------------*/

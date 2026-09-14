@@ -3,6 +3,10 @@
 #define OpenMVS_MINOR_VERSION ${OpenMVS_MINOR_VERSION}
 #define OpenMVS_PATCH_VERSION ${OpenMVS_PATCH_VERSION}
 
+// Git commit information
+#define OpenMVS_GIT_COMMIT "${OpenMVS_GIT_COMMIT}"
+#define OpenMVS_GIT_MODIFIED ${OpenMVS_GIT_MODIFIED}
+
 // OpenMVS compiled as static or dynamic libs
 #cmakedefine BUILD_SHARED_LIBS
 
@@ -53,6 +57,9 @@
 // NVidia Cuda Runtime API
 #cmakedefine _USE_CUDA
 
+// Apple Metal compute backend
+#cmakedefine _USE_METAL
+
 // Fast float to int support
 #cmakedefine _USE_FAST_FLOAT2INT
 
@@ -64,3 +71,7 @@
 
 // SSE support
 #cmakedefine _USE_SSE
+
+// Headless debug mode (no modal dialogs, ASSERT prints to stderr, no LogConsole redirection)
+#cmakedefine _HEADLESS_DEBUG
+

@@ -10,7 +10,7 @@ INCLUDE(CheckIncludeFile)
 
 # BUILD_SHARED_LIBS is a standard CMake variable, but we declare it here to
 # make it prominent in the GUI.
-OPTION(BUILD_SHARED_LIBS "Build shared libraries (DLLs)" OFF)
+OPTION(BUILD_SHARED_LIBS "Build shared libraries (DLLs)" ON)
 OPTION(BUILD_SHARED_LIBS_FULL "Expose all functionality when built as shared libraries (DLLs)" OFF)
 OPTION(BUILD_EXCEPTIONS_ENABLED "Enable support for exceptions" ON)
 OPTION(BUILD_RTTI_ENABLED "Enable support run-time type information" ON)
@@ -158,7 +158,7 @@ macro(GetOperatingSystemArchitectureBitness)
 	elseif(CMAKE_SYSTEM_PROCESSOR MATCHES i686.*|i386.*|x86.*)
 		set(X86 1)
 	endif()
-	
+
 	if(NOT ${MY_VAR_PREFIX}_PACKAGE_REQUIRED)
 		set(${MY_VAR_PREFIX}_PACKAGE_REQUIRED "REQUIRED")
 	endif()
@@ -172,12 +172,14 @@ macro(ComposePackageLibSuffix)
 	set(PACKAGE_LIB_SUFFIX_DBG "")
 	set(PACKAGE_LIB_SUFFIX_REL "")
 	if(MSVC)
-		if("${MSVC_VERSION}" STRGREATER "1929")
-			set(PACKAGE_LIB_SUFFIX "/vc17")
+		if("${MSVC_VERSION}" STRGREATER "1949")
+			set(PACKAGE_LIB_SUFFIX "/vc18") # 1950+ : VS 2026 (toolset v145) -> vc18
+		elseif("${MSVC_VERSION}" STRGREATER "1929")
+			set(PACKAGE_LIB_SUFFIX "/vc17") # 1930-1949 : VS 2022 (toolset v143/v144) -> vc17
 		elseif("${MSVC_VERSION}" STRGREATER "1916")
-			set(PACKAGE_LIB_SUFFIX "/vc16")
+			set(PACKAGE_LIB_SUFFIX "/vc16") # 1920-1929 : VS 2019 (toolset v142) -> vc16
 		elseif("${MSVC_VERSION}" STRGREATER "1900")
-			set(PACKAGE_LIB_SUFFIX "/vc15")
+			set(PACKAGE_LIB_SUFFIX "/vc15") # 1910-1916 : VS 2017 (toolset v141) -> vc15
 		elseif("${MSVC_VERSION}" STREQUAL "1900")
 			set(PACKAGE_LIB_SUFFIX "/vc14")
 		elseif("${MSVC_VERSION}" STREQUAL "1800")
@@ -485,33 +487,34 @@ macro(optimize_default_compiler_settings)
 		add_extra_compiler_option(-Wswitch-enum)
 		add_extra_compiler_option(-Wswitch-default)
 	  else()
-		add_extra_compiler_option(-Wno-undef)
-		add_extra_compiler_option(-Wno-switch)
-		add_extra_compiler_option(-Wno-switch-enum)
-		add_extra_compiler_option(-Wno-switch-default)
-		add_extra_compiler_option(-Wno-implicit-fallthrough)
-		add_extra_compiler_option(-Wno-comment)
-		add_extra_compiler_option(-Wno-narrowing)
 		add_extra_compiler_option(-Wno-attributes)
-		add_extra_compiler_option(-Wno-ignored-attributes)
-		add_extra_compiler_option(-Wno-maybe-uninitialized)
-		add_extra_compiler_option(-Wno-enum-compare)
-		add_extra_compiler_option(-Wno-misleading-indentation)
-		add_extra_compiler_option(-Wno-missing-field-initializers)
-		add_extra_compiler_option(-Wno-unused-result)
-		add_extra_compiler_option(-Wno-unused-function)
-		add_extra_compiler_option(-Wno-unused-parameter)
-		add_extra_compiler_option(-Wno-delete-incomplete)
-		add_extra_compiler_option(-Wno-unnamed-type-template-args)
-		add_extra_compiler_option(-Wno-int-in-bool-context)
-		add_extra_compiler_option(-Wno-deprecated-declarations)
+		add_extra_compiler_option(-Wno-comment)
 		add_extra_compiler_option(-Wno-deprecated-anon-enum-enum-conversion)
+		add_extra_compiler_option(-Wno-deprecated-declarations)
 		add_extra_compiler_option(-Wno-deprecated-enum-compare-conditional)
 		add_extra_compiler_option(-Wno-deprecated-enum-enum-conversion)
+		add_extra_compiler_option(-Wno-delete-incomplete)
+		add_extra_compiler_option(-Wno-enum-compare)
+		add_extra_compiler_option(-Wno-ignored-attributes)
+		add_extra_compiler_option(-Wno-implicit-fallthrough)
+		add_extra_compiler_option(-Wno-int-in-bool-context)
+		add_extra_compiler_option(-Wno-maybe-uninitialized)
+		add_extra_compiler_option(-Wno-misleading-indentation)
+		add_extra_compiler_option(-Wno-missing-field-initializers)
+		add_extra_compiler_option(-Wno-narrowing)
+		add_extra_compiler_option(-Wno-nonportable-include-path)
+		add_extra_compiler_option(-Wno-switch)
+		add_extra_compiler_option(-Wno-switch-default)
+		add_extra_compiler_option(-Wno-switch-enum)
+		add_extra_compiler_option(-Wno-undef)
+		add_extra_compiler_option(-Wno-unnamed-type-template-args)
+		add_extra_compiler_option(-Wno-unused-function)
+		add_extra_compiler_option(-Wno-unused-parameter)
+		add_extra_compiler_option(-Wno-unused-result)
 	  endif()
 	  add_extra_compiler_option(-fdiagnostics-show-option)
 	  add_extra_compiler_option(-ftemplate-backtrace-limit=0)
-	  
+
 	  # The -Wno-long-long is required in 64bit systems when including system headers.
 	  if(X86_64)
 		add_extra_compiler_option(-Wno-long-long)
@@ -663,6 +666,41 @@ macro(optimize_default_compiler_settings)
 
 	  # enable __cplusplus
 	  set(BUILD_EXTRA_FLAGS "${BUILD_EXTRA_FLAGS} /Zc:__cplusplus")
+
+	  # Multi-process compilation: spawns one cl.exe child per core to compile TUs of
+	  # a single vcxproj in parallel. Without this, ClCompile runs TUs serially and
+	  # MSBuild's /m parallelism is wasted on projects with many sources (SFM: 31 .cpp,
+	  # MVS: 19, Viewer: 15). Huge win on full project builds.
+	  # NOTE: /MP alone is enough; do NOT combine with /cgthreads>1, as /MP * /cgthreads
+	  # oversubscribes the CPU (e.g. 24 cl.exe * 8 threads on a 16-core box -> thrash).
+	  set(BUILD_EXTRA_FLAGS "${BUILD_EXTRA_FLAGS} /MP")
+
+	  # Bound optimizer time on huge generated functions. Undocumented but widely used
+	  # (Chromium, Unreal). CRITICAL for MVS: without it, cl.exe hangs indefinitely in
+	  # the optimizer on large TUs like Scene.cpp / SceneTexture.cpp / SceneRefine.cpp
+	  # / Camera.cpp (observed with MSVC 14.50 on i7-13700K, 10+ min per TU with no
+	  # progress). No effect at /Od; kicks in only for optimized (Release/RelWithDebInfo)
+	  # builds where cl.exe's optimizer would otherwise spin on pathological inlining.
+	  set(BUILD_EXTRA_FLAGS "${BUILD_EXTRA_FLAGS} /d2ReducedOptimizeHugeFunctions")
+
+	  # Match the 8 MB main-thread stack that Linux and macOS provide by default.
+	  # The /O2-inlined Eigen + CGAL chain in Scene::EstimateROI (covariance PCA,
+	  # Eigen::SelfAdjointEigenSolver, AABB::Insert over thousands of rotated
+	  # points) needs ~1.3 MB of frame on its own; combined with the calling
+	  # frame and the OpenMP thread-pool warmup it overflows the 1 MB Windows
+	  # default and the app exits silently with STATUS_STACK_OVERFLOW
+	  # (0xC00000FD) right after "Scene loaded". Picking 8 MB instead of the
+	  # ~2 MB minimum aligns Windows with the implicit assumption the rest of
+	  # the codebase makes on POSIX, so behavior is platform-uniform; only the
+	  # main thread is affected (worker threads still default to 1 MB unless
+	  # opted in via CreateThread/_beginthreadex).
+	  set(BUILD_EXTRA_EXE_LINKER_FLAGS "${BUILD_EXTRA_EXE_LINKER_FLAGS} /STACK:8388608")
+	endif()
+
+	# Fix macOS linker warnings about reducing alignment from 0x8000 to 0x4000
+	# This is caused by Eigen's alignment requirements exceeding macOS segment max alignment
+	if(APPLE)
+		set(BUILD_EXTRA_EXE_LINKER_FLAGS "${BUILD_EXTRA_EXE_LINKER_FLAGS} -Wl,-w")
 	endif()
 
 	# Extra link libs if the user selects building static libs:
@@ -744,11 +782,15 @@ macro(fix_default_compiler_settings)
 				string(REPLACE "/MD" "-MT" ${flag_var} "${${flag_var}}")
 			endforeach()
 		endif()
-		# Set WholeProgramOptimization flags for release
-		SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /GL")
-		SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /GL")
-		SET(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
-		SET(CMAKE_MODULE_LINKER_FLAGS_RELEASE "${CMAKE_MODULE_LINKER_FLAGS_RELEASE} /LTCG")
+		# Whole-program optimization (/GL + /LTCG) for Release, gated on OpenMVS_ENABLE_IPO.
+		# When OFF, dependent EXE link times drop dramatically because linker can skip
+		# codegen of IL-form .obj files produced by /GL libs.
+		if(OpenMVS_ENABLE_IPO)
+			SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /GL")
+			SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /GL")
+			SET(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
+			SET(CMAKE_MODULE_LINKER_FLAGS_RELEASE "${CMAKE_MODULE_LINKER_FLAGS_RELEASE} /LTCG")
+		endif()
 	endif()
 	# Save libs and executables in the same place
 	SET(LIBRARY_OUTPUT_PATH "${CMAKE_BINARY_DIR}/lib${PACKAGE_LIB_SUFFIX}" CACHE PATH "Output directory for libraries")
@@ -810,7 +852,7 @@ macro(ConfigCompilerAndLinker)
   else()
     set(cxx_rtti_support "${cxx_no_rtti_flags}")
   endif()
-  
+
   set(cxx_default "${cxx_exception_support} ${cxx_rtti_support}" CACHE PATH "Common compile CXX flags")
   set(c_default "${CMAKE_C_FLAGS} ${cxx_base_flags}" CACHE PATH "Common compile C flags")
 
@@ -832,6 +874,13 @@ macro(ConfigLibrary)
 		set(DEF_INSTALL_CMAKE_DIR "lib/cmake")
 	endif()
 	set(INSTALL_CMAKE_DIR ${DEF_INSTALL_CMAKE_DIR} CACHE PATH "Installation directory for CMake files")
+	# Group the installed binaries, libraries and CMake files under a per-project
+	# subdirectory (<prefix>/bin/${PROJECT_NAME}, <prefix>/lib/${PROJECT_NAME}, ...).
+	# Disable to install them directly into <prefix>/bin, <prefix>/lib, ... so the
+	# executables sit next to their dependency DLLs (e.g. a shared vcpkg triplet).
+	# Headers are always namespaced under <prefix>/include/${PROJECT_NAME} to avoid
+	# collisions with other packages in a shared include prefix.
+	option(INSTALL_USE_SUBDIR "Group installed binaries/libraries/CMake files under a per-project (${PROJECT_NAME}) subdirectory" ON)
 	# Make relative paths absolute (needed later on)
 	foreach(p LIB BIN INCLUDE CMAKE)
 		set(var INSTALL_${p}_DIR)
@@ -841,13 +890,16 @@ macro(ConfigLibrary)
 		else()
 			set(${varp} "${CMAKE_INSTALL_PREFIX}/${${var}}")
 		endif()
-		set(${var} "${${varp}}/${PROJECT_NAME}")
+		set(${var} "${${varp}}")
+		if(INSTALL_USE_SUBDIR OR p STREQUAL "INCLUDE")
+			set(${var} "${${var}}/${PROJECT_NAME}")
+		endif()
 	endforeach()
 endmacro()
 
 function(create_rc_files name)
   # Create the manifest file
-  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/app.manifest" 
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/app.manifest"
     "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
     <assembly manifestVersion='1.0' xmlns='urn:schemas-microsoft-com:asm.v1'>
       <assemblyIdentity type='win32' name='${name}' version='1.0.0.0'/>
@@ -892,11 +944,19 @@ endfunction()
 # Defines the main libraries.  User tests should link
 # with one of them.
 function(cxx_library_with_type name folder type cxx_flags)
-  # type can be either STATIC or SHARED to denote a static or shared library.
+  # type can be STATIC, SHARED, or empty. When empty, BUILD_SHARED_LIBS decides.
   # ARGN refers to additional arguments after 'cxx_flags'.
-  add_library("${name}" ${type} ${ARGN})
+  set(_lib_type "${type}")
+  if (NOT _lib_type)
+    if (BUILD_SHARED_LIBS)
+      set(_lib_type SHARED)
+    else()
+      set(_lib_type STATIC)
+    endif()
+  endif()
+  add_library("${name}" ${_lib_type} ${ARGN})
   #set_target_properties("${name}" PROPERTIES COMPILE_FLAGS "${cxx_flags}")
-  if ((BUILD_SHARED_LIBS AND NOT type STREQUAL "STATIC") OR type STREQUAL "SHARED")
+  if (_lib_type STREQUAL "SHARED")
     set_target_properties("${name}" PROPERTIES COMPILE_DEFINITIONS "_USRDLL")
   else()
     set_target_properties("${name}" PROPERTIES COMPILE_DEFINITIONS "_LIB")
@@ -908,12 +968,22 @@ function(cxx_library_with_type name folder type cxx_flags)
   endif()
 endfunction()
 
-# cxx_executable_with_flags(name cxx_flags libs srcs...)
+# cxx_executable_with_flags(name cxx_flags libs [DISABLE_IPO] srcs...)
 #
 # creates a named C++ executable that depends on the given libraries and
 # is built from the given source files with the given compiler flags.
+# If DISABLE_IPO is specified, interprocedural optimization is disabled for this target on Windows.
 function(cxx_executable_with_flags name folder cxx_flags libs)
-  add_executable("${name}" ${ARGN})
+  set(disable_ipo OFF)
+  set(source_files ${ARGN})
+
+  # Check if DISABLE_IPO keyword is present
+  if("DISABLE_IPO" IN_LIST source_files)
+    list(REMOVE_ITEM source_files "DISABLE_IPO")
+    set(disable_ipo ON)
+  endif()
+
+  add_executable("${name}" ${source_files})
   if (cxx_flags)
     set_target_properties("${name}" PROPERTIES COMPILE_FLAGS "${cxx_flags}")
   endif()
@@ -924,9 +994,23 @@ function(cxx_executable_with_flags name folder cxx_flags libs)
   endforeach()
   # Set project folder
   set_target_properties("${name}" PROPERTIES FOLDER "${folder}")
+
+  # Disable IPO and LTO flags for this target if requested (useful for slow builds on Windows).
+  # /GL and /LTCG are appended globally to CMAKE_*_FLAGS_RELEASE in fix_default_compiler_settings(),
+  # NOT to any per-target COMPILE_FLAGS / LINK_FLAGS. Stripping those target properties is a no-op.
+  # Instead we append MSVC's documented negations, which override earlier occurrences (last wins):
+  #   /GL-      disables whole-program optimization at compile time
+  #   /LTCG:OFF disables link-time code generation at link time
+  # Both are per-config (Release only) since the globals only inject /GL and /LTCG in Release.
+  if(disable_ipo AND MSVC)
+    set_property(TARGET "${name}" PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+    target_compile_options("${name}" PRIVATE $<$<CONFIG:Release>:/GL->)
+    target_link_options("${name}" PRIVATE $<$<CONFIG:Release>:/LTCG:OFF>)
+  endif()
+
   if (MSVC)
-    # Check if any of the files listed in ARGN has the extension .rc
-    foreach (file ${ARGN})
+    # Check if any of the files listed in source_files has the extension .rc
+    foreach (file ${source_files})
       if (file MATCHES "\\.rc$")
         set_target_properties("${name}" PROPERTIES LINK_FLAGS "/MANIFEST:NO")
         break()
@@ -934,3 +1018,120 @@ function(cxx_executable_with_flags name folder cxx_flags libs)
     endforeach()
   endif()
 endfunction()
+
+
+# OpenMVS_GenerateOpencv4Overlay(<overlay_ports_var>)
+#
+# On Linux only, generate a build-tree overlay for vcpkg's `opencv4` port that
+# mirrors the upstream port from the user's pinned VCPKG_ROOT and injects two
+# extra CMake flags so OpenCV's videoio links against the system FFmpeg
+# (apt's libav*-dev) via pkg-config instead of vcpkg compiling its hermetic
+# `ffmpeg` port (a 30+ minute build otherwise unavoidable just to support
+# cv::VideoCapture in KeyframeExtractor).
+#
+# Avoids carrying the full upstream opencv4 port (~22 files, 700+ lines,
+# version-tied patches) inside this repo: when the user bumps VCPKG_COMMIT
+# (i.e., points VCPKG_ROOT at a newer vcpkg), the overlay is regenerated
+# against the new upstream files automatically. Windows and macOS skip the
+# overlay entirely — videoio uses OS-native backends there (MSMF / DirectShow
+# on Windows, AVFoundation on macOS), so vcpkg can build the upstream
+# opencv4 port unmodified.
+#
+# Argument: name of a list variable (in the caller's scope) onto which the
+# generated overlay path will be appended. The variable is updated via
+# PARENT_SCOPE — the caller does not need to read a return value.
+FUNCTION(OpenMVS_GenerateOpencv4Overlay overlay_ports_var)
+	IF(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+		RETURN()
+	ENDIF()
+	SET(_vcpkg_root "")
+	IF(DEFINED ENV{VCPKG_ROOT})
+		SET(_vcpkg_root "$ENV{VCPKG_ROOT}")
+	ELSEIF(DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "(.*)/scripts/buildsystems/vcpkg.cmake$")
+		SET(_vcpkg_root "${CMAKE_MATCH_1}")
+	ENDIF()
+	IF(NOT _vcpkg_root OR NOT EXISTS "${_vcpkg_root}/ports/opencv4/portfile.cmake")
+		MESSAGE(WARNING "VCPKG_ROOT not set or upstream opencv4 port not found — vcpkg will compile its hermetic ffmpeg port (slow). Set VCPKG_ROOT to your vcpkg checkout to enable the system-FFmpeg overlay.")
+		RETURN()
+	ENDIF()
+	# Verify the system FFmpeg dev packages are present via pkg-config: the
+	# override we splice forces WITH_FFMPEG=ON, and the upstream opencv4
+	# portfile sets ENABLE_CONFIG_VERIFICATION=ON, so an absent libav* would
+	# hard-fail the opencv4 build ~10 minutes in with a cryptic OpenCV error.
+	# Detect now and fast-fail with the exact apt-get line instead.
+	FIND_PACKAGE(PkgConfig QUIET)
+	SET(_ffmpeg_found FALSE)
+	IF(PkgConfig_FOUND)
+		pkg_check_modules(_OPENMVS_SYS_FFMPEG QUIET libavcodec libavformat libavutil libswscale libswresample)
+		IF(_OPENMVS_SYS_FFMPEG_FOUND)
+			SET(_ffmpeg_found TRUE)
+		ENDIF()
+	ENDIF()
+	IF(NOT _ffmpeg_found)
+		MESSAGE(FATAL_ERROR "OpenMVS opencv4 overlay needs the system FFmpeg dev packages, which were not found via pkg-config. Install them with:\n"
+			"    sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev\n"
+			"Then re-run cmake. (Without the overlay, vcpkg would compile its hermetic ffmpeg port instead — a 30+ minute build.)")
+	ENDIF()
+	SET(_upstream "${_vcpkg_root}/ports/opencv4")
+	SET(_overlay "${CMAKE_BINARY_DIR}/_vcpkg_overlay/opencv4")
+	# Mirror every file from the upstream port (manifest, patches, usage.in)
+	# into the overlay; file(COPY) is timestamp-aware so this is a no-op on
+	# subsequent reconfigures unless upstream actually changed.
+	FILE(MAKE_DIRECTORY "${_overlay}")
+	FILE(GLOB _files "${_upstream}/*")
+	FOREACH(_f IN LISTS _files)
+		GET_FILENAME_COMPONENT(_name "${_f}" NAME)
+		IF(NOT _name STREQUAL "portfile.cmake")
+			FILE(COPY "${_f}" DESTINATION "${_overlay}")
+		ENDIF()
+	ENDFOREACH()
+	# Read upstream's portfile.cmake, splice our flag block in just before
+	# vcpkg_cmake_configure(, and write the patched copy. ADDITIONAL_BUILD_FLAGS
+	# is the same list the upstream portfile passes into the configure OPTIONS
+	# *after* ${FEATURE_OPTIONS} and after its own
+	# -DOPENCV_FFMPEG_USE_FIND_PACKAGE=FFMPEG line, so our override wins on
+	# conflict.
+	FILE(READ "${_upstream}/portfile.cmake" _portfile)
+	SET(_injection "
+# OpenMVS overlay (auto-generated): force-enable the FFMPEG videoio backend
+# and have OpenCV detect it via pkg-config (system apt libav*-dev) instead
+# of pulling vcpkg's hermetic ffmpeg port. See <openmvs>/build/Utils.cmake.
+#
+# PKG_CONFIG_PATH ordering matters here. We need pkg-config to find:
+#   - libav*.pc only on the system (vcpkg's ffmpeg port isn't installed)
+#   - gtk+-3.0.pc, fontconfig.pc, etc. from vcpkg (newer versions than
+#     Ubuntu 24.04 ships — e.g. fontconfig 2.17.1 vs system 2.15.0; pango
+#     refuses anything < 2.17.0)
+#   - x11.pc / xext.pc / xrender.pc only on the system (vcpkg's gtk3 chain
+#     hard-requires these and vcpkg never ships them)
+# pkg-config searches PKG_CONFIG_PATH left-to-right then PKG_CONFIG_LIBDIR.
+# Putting vcpkg's pkgconfig dirs FIRST in PATH prevents the system's older
+# fontconfig from shadowing vcpkg's newer one and breaking the gtk chain;
+# the system dirs follow so ffmpeg / x11 remain reachable.
+foreach(_p
+    \"\${CURRENT_INSTALLED_DIR}/lib/pkgconfig\"
+    \"\${CURRENT_INSTALLED_DIR}/share/pkgconfig\"
+    \"/usr/lib/x86_64-linux-gnu/pkgconfig\"
+    \"/usr/lib/pkgconfig\"
+    \"/usr/share/pkgconfig\"
+)
+  if(EXISTS \"\${_p}\")
+    if(DEFINED ENV{PKG_CONFIG_PATH} AND NOT \"\$ENV{PKG_CONFIG_PATH}\" STREQUAL \"\")
+      set(ENV{PKG_CONFIG_PATH} \"\$ENV{PKG_CONFIG_PATH}:\${_p}\")
+    else()
+      set(ENV{PKG_CONFIG_PATH} \"\${_p}\")
+    endif()
+  endif()
+endforeach()
+list(APPEND ADDITIONAL_BUILD_FLAGS
+  -DWITH_FFMPEG=ON
+  -DOPENCV_FFMPEG_USE_FIND_PACKAGE=OFF
+)
+
+vcpkg_cmake_configure(")
+	STRING(REPLACE "vcpkg_cmake_configure(" "${_injection}" _portfile "${_portfile}")
+	FILE(WRITE "${_overlay}/portfile.cmake" "${_portfile}")
+	LIST(APPEND ${overlay_ports_var} "${_overlay}")
+	SET(${overlay_ports_var} "${${overlay_ports_var}}" PARENT_SCOPE)
+	MESSAGE(STATUS "Generated opencv4 overlay port at ${_overlay} (sources system FFmpeg)")
+ENDFUNCTION()

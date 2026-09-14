@@ -69,9 +69,9 @@ void CImageJXL::Close() {
 	CImage::Close();
 }
 
-HRESULT CImageJXL::ReadHeader() {
+bool CImageJXL::ReadHeader() {
 	if (!m_pStream)
-		return _FAIL;
+		return false;
 	JxlState*& state = reinterpret_cast<JxlState*&>(m_state);
 	if (state)
 		state->Close();
@@ -79,12 +79,12 @@ HRESULT CImageJXL::ReadHeader() {
 		state = new JxlState();
 	state->decoder = JxlDecoderCreate(NULL);
 	if (!state->decoder)
-		return _FAIL;
+		return false;
 	JxlDecoderSubscribeEvents(state->decoder, JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FULL_IMAGE);
 	// Read initial chunk
 	m_pStream->getInputStream()->setPos(0);
 	if (!state->ReadStreamChunk(m_pStream))
-		return _FAIL;
+		return false;
 	JxlDecoderSetInput(state->decoder, state->compressed.data(), state->compressed.size());
 	for (;;) {
 		JxlDecoderStatus status = JxlDecoderProcessInput(state->decoder);
@@ -111,7 +111,7 @@ HRESULT CImageJXL::ReadHeader() {
 						m_stride = 4;
 					} else {
 						Close();
-						return _FAIL; // Unsupported format
+						return false; // Unsupported format
 					}
 				} else if (state->info.num_color_channels == 4) {
 					m_format = PF_B8G8R8A8;
@@ -121,7 +121,7 @@ HRESULT CImageJXL::ReadHeader() {
 					m_stride = 3;
 				} else {
 					Close();
-					return _FAIL; // Unsupported format
+					return false; // Unsupported format
 				}
 				m_lineWidth = m_width * m_stride;
 				state->got_info = true;
@@ -132,13 +132,13 @@ HRESULT CImageJXL::ReadHeader() {
 			break;
 	}
 	// Do NOT destroy decoder here; keep it for ReadData
-	return state->got_info ? _OK : _FAIL;
+	return state->got_info ? true : false;
 }
 
-HRESULT CImageJXL::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth) {
+bool CImageJXL::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth) {
 	JxlState* state = (JxlState*)m_state;
 	if (!state || !state->got_info || !state->decoder)
-		return _FAIL;
+		return false;
 	JxlPixelFormat format = {};
 	format.num_channels = state->info.num_color_channels;
 	if (dataFormat == PF_GRAY32F) {
@@ -181,19 +181,19 @@ HRESULT CImageJXL::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, S
 				uint8_t* src = buffer;
 				for (Size j = 0; j < m_height; ++j, dst += lineWidth, src += m_width * m_stride)
 					if (!FilterFormat(dst, dataFormat, nStride, src, m_format, m_stride, m_width))
-						return _FAIL;
+						return false;
 			}
 			continue;
 		}
 		if (status == JXL_DEC_SUCCESS)
-			return _OK;
+			return true;
 	}
 	JxlDecoderDestroy(state->decoder);
 	state->decoder = nullptr;
-	return _FAIL;
+	return false;
 }
 
-HRESULT CImageJXL::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels) {
+bool CImageJXL::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels) {
 	m_width = width;
 	m_height = height;
 	m_dataWidth = width;
@@ -205,15 +205,15 @@ HRESULT CImageJXL::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height,
 	else
 		m_stride = 3;
 	m_lineWidth = m_width * m_stride;
-	return _OK;
+	return true;
 }
 
-HRESULT CImageJXL::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth) {
+bool CImageJXL::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth) {
 	if (!m_pStream)
-		return _FAIL;
+		return false;
 	JxlEncoder* enc = JxlEncoderCreate(NULL);
 	if (!enc)
-		return _FAIL;
+		return false;
 	JxlEncoderFrameSettings* frame_settings = JxlEncoderFrameSettingsCreate(enc, NULL);
 	JxlBasicInfo info;
 	JxlEncoderInitBasicInfo(&info);
@@ -234,7 +234,7 @@ HRESULT CImageJXL::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 	format.align = 0u;
 	if (JxlEncoderAddImageFrame(frame_settings, &format, pData, m_height * lineWidth) != JXL_ENC_SUCCESS) {
 		JxlEncoderDestroy(enc);
-		return _FAIL;
+		return false;
 	}
 	JxlEncoderCloseInput(enc);
 	std::vector<uint8_t> compressed(4096);
@@ -244,7 +244,7 @@ HRESULT CImageJXL::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 		JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
 		if (status == JXL_ENC_ERROR) {
 			JxlEncoderDestroy(enc);
-			return _FAIL;
+			return false;
 		}
 		if (status == JXL_ENC_NEED_MORE_OUTPUT) {
 			size_t offset = (size_t)(next_out - compressed.data());
@@ -260,7 +260,7 @@ HRESULT CImageJXL::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, 
 	m_pStream->getOutputStream()->setPos(0);
 	m_pStream->getOutputStream()->write(compressed.data(), out_size);
 	JxlEncoderDestroy(enc);
-	return _OK;
+	return true;
 }
 
 } // namespace SEACAVE

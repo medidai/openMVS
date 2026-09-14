@@ -48,7 +48,7 @@ namespace MVS {
 typedef uint32_t IIndex;
 typedef SEACAVE::cList<IIndex, IIndex, 0, 16, IIndex> IIndexArr;
 typedef _INTERFACE_NAMESPACE::Interface::Image::ViewScore ViewScore;
-typedef MVS_API CLISTDEF0IDX(ViewScore, IIndex) ViewScoreArr;
+typedef CLISTDEF0IDX(ViewScore, IIndex) ViewScoreArr;
 /*----------------------------------------------------------------*/
 
 // a view instance seeing the scene
@@ -73,9 +73,11 @@ public:
 	inline Image() : poseID(NO_ID), width(0), height(0), avgDepth(0) {}
 
 	inline bool IsValid() const { return poseID != NO_ID; }
+	inline String GetMaskFileName() const { return maskName.empty() ? Util::getFileFullName(name)+".mask.png" : maskName; }
 	inline bool HasResolution() const { return width > 0 && height > 0; }
 	inline cv::Size GetSize() const { return cv::Size(width, height); }
-	inline String GetMaskFileName() const { return maskName.empty() ? Util::getFileFullName(name)+".mask.png" : maskName; }
+	REAL GetSizeScale(unsigned nMaxResolution) const;
+	cv::Size GetSize(unsigned nMaxResolution) const;
 
 	// read image data from the file
 	static IMAGEPTR OpenImage(const String& fileName);
@@ -84,12 +86,16 @@ public:
 	static bool ReadImage(IMAGEPTR pImage, Image8U3& image);
 	bool LoadImage(const String& fileName, unsigned nMaxResolution=0);
 	bool ReloadImage(unsigned nMaxResolution=0, bool bLoadPixels=true);
+	// reload the pixels at the resolution the scene was prepared at: width/height
+	// are left at that resolution when the pixels are released, so the scale
+	// recomputation reproduces them exactly
+	bool ReloadImageAtPreparedResolution(bool bLoadPixels=true) { return ReloadImage(MAXF(width, height), bLoadPixels); }
 	void ReleaseImage();
 	float ResizeImage(unsigned nMaxResolution=0);
 	unsigned RecomputeMaxResolution(unsigned& level, unsigned minImageSize, unsigned maxImageSize=INT_MAX) const;
 
 	Image GetImage(const PlatformArr& platforms, double scale, bool bUseImage=true) const;
-	Camera GetCamera(const PlatformArr& platforms, const Image8U::Size& resolution) const;
+	Camera GetCamera(const PlatformArr& platforms, const cv::Size& resolution, bool forceAspect=false) const;
 	void UpdateCamera(const PlatformArr& platforms);
 	REAL ComputeFOV(int dir=0) const;
 
@@ -140,7 +146,11 @@ public:
 	BOOST_SERIALIZATION_SPLIT_MEMBER()
 	#endif
 };
-typedef MVS_API CLISTDEF2IDX(Image,IIndex) ImageArr;
+typedef CLISTDEF2IDX(Image,IIndex) ImageArr;
+
+static inline IIndex ImageID2Index(const ImageArr& images, IIndex ID) {
+	return images.FindFunc([&ID](const Image& image) { return image.ID == ID; });
+}
 /*----------------------------------------------------------------*/
 
 } // namespace MVS

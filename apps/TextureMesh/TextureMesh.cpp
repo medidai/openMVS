@@ -60,7 +60,6 @@ float fRatioDataSmoothness;
 bool bGlobalSeamLeveling;
 bool bLocalSeamLeveling;
 unsigned nTextureSizeMultiple;
-unsigned nRectPackingHeuristic;
 uint32_t nColEmpty;
 float fSharpnessWeight;
 int nIgnoreMaskLabel;
@@ -69,6 +68,7 @@ unsigned nArchiveType;
 int nProcessPriority;
 unsigned nMaxThreads;
 int nMaxTextureSize;
+bool bExportTextureLossless;
 String strExportType;
 String strConfigFileName;
 boost::program_options::variables_map vm;
@@ -109,9 +109,6 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 			#endif
 			), "verbosity level")
 		#endif
-		#ifdef _USE_CUDA
-		("cuda-device", boost::program_options::value(&SEACAVE::CUDA::desiredDeviceID)->default_value(-1), "CUDA device number to be used to texture the mesh (-2 - CPU processing, -1 - best GPU, >=0 - device index)")
-		#endif
 		;
 
 	// group of options allowed both on command line and in config file
@@ -130,12 +127,12 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("global-seam-leveling", boost::program_options::value(&OPT::bGlobalSeamLeveling)->default_value(true), "generate uniform texture patches using global seam leveling")
 		("local-seam-leveling", boost::program_options::value(&OPT::bLocalSeamLeveling)->default_value(true), "generate uniform texture patch borders using local seam leveling")
 		("texture-size-multiple", boost::program_options::value(&OPT::nTextureSizeMultiple)->default_value(0), "texture size should be a multiple of this value (0 - power of two)")
-		("patch-packing-heuristic", boost::program_options::value(&OPT::nRectPackingHeuristic)->default_value(3), "specify the heuristic used when deciding where to place a new patch (0 - best fit, 3 - good speed, 100 - best speed)")
 		("empty-color", boost::program_options::value(&OPT::nColEmpty)->default_value(0x00FF7F27), "color used for faces not covered by any image")
 		("sharpness-weight", boost::program_options::value(&OPT::fSharpnessWeight)->default_value(0.5f), "amount of sharpness to be applied on the texture (0 - disabled)")
 		("orthographic-image-resolution", boost::program_options::value(&OPT::nOrthoMapResolution)->default_value(0), "orthographic image resolution to be generated from the textured mesh - the mesh is expected to be already geo-referenced or at least properly oriented (0 - disabled)")
 		("ignore-mask-label", boost::program_options::value(&OPT::nIgnoreMaskLabel)->default_value(-1), "label value to ignore in the image mask, stored in the MVS scene or next to each image with '.mask.png' extension (-1 - auto estimate mask for lens distortion, -2 - disabled)")
 		("max-texture-size", boost::program_options::value(&OPT::nMaxTextureSize)->default_value(8192), "maximum texture size, split it in multiple textures of this size if needed (0 - unbounded)")
+		("export-texture-lossless", boost::program_options::value(&OPT::bExportTextureLossless)->default_value(true), "save the texture as PNG (lossless) or JPG (smaller, lossy) when exporting to PLY")
 		;
 
 	// hidden options, allowed both on command line and
@@ -261,7 +258,7 @@ IIndexArr ParseViewsFile(const String& filename, const Scene& scene) {
 int main(int argc, LPCTSTR* argv)
 {
 	#ifdef _DEBUGINFO
-	// set _crtBreakAlloc index to stop in <dbgheap.c> at allocation
+	// set _crtBreakAlloc index or use _CrtSetBreakAlloc() to stop in <dbgheap.c> at allocation
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);// | _CRTDBG_CHECK_ALWAYS_DF);
 	#endif
 
@@ -292,8 +289,7 @@ int main(int argc, LPCTSTR* argv)
 	// decimate to the desired resolution
 	if (OPT::fDecimateMesh < 1.f) {
 		ASSERT(OPT::fDecimateMesh > 0.f);
-		scene.mesh.Clean(OPT::fDecimateMesh, 0.f, false, OPT::nCloseHoles, 0u, 0.f, false);
-		scene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true); // extra cleaning to remove non-manifold problems created by closing holes
+		scene.mesh.Clean(OPT::fDecimateMesh, 0.f, false, OPT::nCloseHoles, 0u, 0.f);
 		#if TD_VERBOSE != TD_VERBOSE_OFF
 		if (VERBOSITY_LEVEL > 3)
 			scene.mesh.Save(baseFileName +_T("_decim")+OPT::strExportType);
@@ -307,13 +303,13 @@ int main(int argc, LPCTSTR* argv)
 	// compute mesh texture
 	TD_TIMER_START();
 	if (!scene.TextureMesh(OPT::nResolutionLevel, OPT::nMinResolution, OPT::minCommonCameras, OPT::fOutlierThreshold, OPT::fRatioDataSmoothness,
-						   OPT::bGlobalSeamLeveling, OPT::bLocalSeamLeveling, OPT::nTextureSizeMultiple, OPT::nRectPackingHeuristic, Pixel8U(OPT::nColEmpty),
+						   OPT::bGlobalSeamLeveling, OPT::bLocalSeamLeveling, OPT::nTextureSizeMultiple, Pixel8U(OPT::nColEmpty),
 						   OPT::fSharpnessWeight, OPT::nIgnoreMaskLabel, OPT::nMaxTextureSize, views))
 		return EXIT_FAILURE;
 	VERBOSE("Mesh texturing completed: %u vertices, %u faces (%s)", scene.mesh.vertices.GetSize(), scene.mesh.faces.GetSize(), TD_TIMER_GET_FMT().c_str());
 
 	// save the final mesh
-	scene.mesh.Save(baseFileName+OPT::strExportType);
+	scene.mesh.Save(baseFileName+OPT::strExportType, cList<String>(), true, OPT::bExportTextureLossless);
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	if (VERBOSITY_LEVEL > 2)
 		scene.ExportCamerasMLP(baseFileName+_T(".mlp"), baseFileName+OPT::strExportType);

@@ -29,7 +29,11 @@ namespace SEACAVE {
 // https://github.com/nmoehrle/mvs-texturing
 // Copyright(c) Michael Waechter
 // Licensed under the BSD 3-Clause license
-class MATH_API LBPInference
+// NOTE: deliberately NOT tagged with MATH_API at class level — every method
+// is defined inline in this header, so consumers can instantiate them locally.
+// Tagging would force MSVC to emit __declspec(dllimport) at call sites and
+// expect Math.dll to export them, but Math.dll has no out-of-line definitions.
+class LBPInference
 {
 public:
 	typedef unsigned NodeID;
@@ -48,9 +52,10 @@ protected:
 	struct DirectedEdge {
 		NodeID nodeID1;
 		NodeID nodeID2;
+		EnergyType weight;
 		std::vector<EnergyType> newMsgs;
 		std::vector<EnergyType> oldMsgs;
-		inline DirectedEdge(NodeID _nodeID1, NodeID _nodeID2) : nodeID1(_nodeID1), nodeID2(_nodeID2) {}
+		inline DirectedEdge(NodeID _nodeID1, NodeID _nodeID2, EnergyType _weight) : nodeID1(_nodeID1), nodeID2(_nodeID2), weight(_weight) {}
 	};
 
 	struct Node {
@@ -76,11 +81,11 @@ public:
 		return (NodeID)nodes.size();
 	}
 
-	inline void SetNeighbors(NodeID nodeID1, NodeID nodeID2) {
+	inline void SetNeighbors(NodeID nodeID1, NodeID nodeID2, EnergyType weight = 1) {
 		nodes[nodeID2].incomingEdges.push_back((EdgeID)edges.size());
-		edges.push_back(DirectedEdge(nodeID1, nodeID2));
+		edges.push_back(DirectedEdge(nodeID1, nodeID2, weight));
 		nodes[nodeID1].incomingEdges.push_back((EdgeID)edges.size());
-		edges.push_back(DirectedEdge(nodeID2, nodeID1));
+		edges.push_back(DirectedEdge(nodeID2, nodeID1, weight));
 	}
 
 	inline void SetDataCost(LabelID label, NodeID nodeID, EnergyType cost) {
@@ -122,7 +127,7 @@ public:
 		#endif
 		for (int_t edgeID = 0; edgeID < (int_t)edges.size(); ++edgeID) {
 			const DirectedEdge& edge = edges[edgeID];
-			energy += fncSmoothCost(edge.nodeID1, edge.nodeID2, nodes[edge.nodeID1].label, nodes[edge.nodeID2].label);
+			energy += fncSmoothCost(edge.nodeID1, edge.nodeID2, nodes[edge.nodeID1].label, nodes[edge.nodeID2].label) * edge.weight;
 		}
 		return energy;
 	}
@@ -141,7 +146,7 @@ public:
 					EnergyType minEnergy(std::numeric_limits<EnergyType>::max());
 					for (size_t k = 0; k < labels1.size(); ++k) {
 						const LabelID label1(labels1[k]);
-						EnergyType energy(nodes[edge.nodeID1].dataCosts[k] + fncSmoothCost(edge.nodeID1, edge.nodeID2, label1, label2));
+						EnergyType energy(nodes[edge.nodeID1].dataCosts[k] + fncSmoothCost(edge.nodeID1, edge.nodeID2, label1, label2) * edge.weight);
 						for (EdgeID idxIncomingEdge: nodes[edge.nodeID1].incomingEdges) {
 							const DirectedEdge& pre_edge = edges[idxIncomingEdge];
 							if (pre_edge.nodeID1 == edge.nodeID2)

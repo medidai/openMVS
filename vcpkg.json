@@ -1,14 +1,25 @@
 {
   "name": "openmvs",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "OpenMVS: open Multi-View Stereo reconstruction library",
   "homepage": "https://cdcseacave.github.io/openMVS",
   "dependencies": [
+    "boost-math",
     "boost-iostreams",
+    "boost-graph",
+    "boost-math",
     "boost-program-options",
     "boost-serialization",
     "boost-system",
     "boost-throw-exception",
+    {
+      "name": "ceres",
+      "features": [
+          "lapack",
+          "schur",
+          "suitesparse"
+      ]
+    },
     {
       "name": "cgal",
       "default-features": false
@@ -24,9 +35,12 @@
         "openexr"
       ]
     },
+    "nanoflann",
     "pkgconf",
+    "poselib",
     "tiff",
-    "vcglib",
+    "tinyexif",
+    "tinynpy",
     "zlib"
   ],
   "features": {
@@ -34,13 +48,46 @@
       "description": "Viewer support in OpenMVS",
       "dependencies": [
         "glad",
-        "glfw3"
+        "glfw3",
+        {
+          "name": "imgui",
+          "features": [
+            "glfw-binding",
+            "opengl3-binding"
+          ]
+        },
+        "portable-file-dialogs"
+      ]
+    },
+    "siftgpu": {
+      "description": "SiftGPU support in OpenMVS",
+      "dependencies": [
+        "siftgpu",
+        {
+          "name": "siftgpu",
+          "features": [
+            "egl"
+          ],
+          "platform": "!windows & !osx"
+        }
       ]
     },
     "cuda": {
       "description": "CUDA support for OpenMVS",
       "dependencies": [
-        "cuda"
+        "cuda",
+        {
+          "name": "ceres",
+          "features": [
+            "cuda"
+          ]
+        },
+        {
+          "name": "siftgpu",
+          "features": [
+            "cuda"
+          ]
+        }
       ]
     },
     "python": {
