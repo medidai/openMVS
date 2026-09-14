@@ -122,7 +122,7 @@ DEFVAR_OPTDENSE_bool(bEstimateConfidenceCUDA, "Estimate Confidence CUDA", "when 
 DEFVAR_OPTDENSE_uint32(nEstimationIters, "Estimation Iters", "Number of patch-match iterations", "3")
 DEFVAR_OPTDENSE_uint32(nEstimationGeometricIters, "Estimation Geometric Iters", "Number of geometric consistent patch-match iterations (0 - disabled)", "2")
 DEFVAR_OPTDENSE_uint32(nPatchMatchCUDAInstances, "PatchMatch CUDA Instances", "Number of parallel CUDA PatchMatch worker instances (clamped to nMaxThreads)", "4")
-DEFVAR_OPTDENSE_uint32(nPatchMatchCUDAAPD, "PatchMatch CUDA APD", "Adaptive Patch Deformation mode (0 - disabled, 1 - full paper mechanics, 2 - deformation-only ablation)", "0")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDAAPD, "PatchMatch CUDA APD", "Experimental Adaptive Patch Deformation (0 - disabled, 1 - adaptive support, 2 - deformation-only ablation)", "0")
 DEFVAR_OPTDENSE_uint32(nPatchMatchCUDADVPEpipolarFamily, "PatchMatch CUDA DVP Epipolar Family", "DVP epipolar proposal family (0 - disabled, 1 - historical global v0, 2 - gated global v1, 3 - historical midpoint v1, 4 - paper Eq. 11 interval v1)", "0")
 DEFVAR_OPTDENSE_float(fPatchMatchCUDADVPEpipolarAlpha, "PatchMatch CUDA DVP Epipolar Alpha", "inner source-image epipolar offset in pixels", "1")
 DEFVAR_OPTDENSE_float(fPatchMatchCUDADVPEpipolarBeta, "PatchMatch CUDA DVP Epipolar Beta", "additional source-image epipolar interval width in pixels", "4")

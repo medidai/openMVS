@@ -211,6 +211,40 @@ class DMapWrapperTests(unittest.TestCase):
         source = WRAPPER.read_text(encoding="utf-8")
         self.assertIn('for item in git cmake ninja pandoc "${python_bin}"', source)
 
+    def test_doctor_uses_real_publication_checker_on_algorithm_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = self.make_fake_doctor_environment(root, missing_modules=())
+            # Mock only machine prerequisites; Git and the publication checker
+            # run for real, including profile selection and failure propagation.
+            git = shutil.which("git")
+            self.assertIsNotNone(git)
+            (root / "doctor-bin/git").write_text(
+                f"#!{sys.executable}\nimport os, sys\nos.execv({git!r}, [{git!r}, *sys.argv[1:]])\n"
+            )
+            Path(env["PYTHON"]).write_text(
+                f"#!{sys.executable}\nimport os, sys\n"
+                "if len(sys.argv) > 1 and sys.argv[1].endswith('check_dmap_observability_public_tree.py'):\n"
+                "    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+                "raise SystemExit(0)\n"
+            )
+            env.pop("DMAP_PUBLIC_BASE", None)
+            env.pop("DMAP_PUBLIC_PROFILE", None)
+            result = run_wrapper("doctor", env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("ok: public-tree publication guard", result.stdout)
+            observer = run_wrapper("doctor", "--public-profile", "observer", "--public-base", "b522455b5081da778ae723af3db30afb58459158", env=env)
+            self.assertNotEqual(observer.returncode, 0)
+            self.assertIn("outside the public allowlist", observer.stderr)
+            missing = run_wrapper("doctor", "--public-base", "refs/heads/missing-publication-reference", env=env)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("missing: publication base ref", missing.stderr)
+
+    def test_doctor_rejects_unknown_publication_profile(self) -> None:
+        result = run_wrapper("doctor", "--public-profile", "unknown")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown publication profile", result.stderr)
+
     def test_doctor_warns_but_succeeds_when_optional_python_modules_are_missing(self) -> None:
         optional = ("pyarrow", "plotly", "jinja2", "zarr", "numcodecs")
         with tempfile.TemporaryDirectory() as temporary:

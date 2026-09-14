@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -20,6 +21,52 @@ SPEC.loader.exec_module(CHECKER)
 
 
 class PublicTreePolicyTests(unittest.TestCase):
+	def test_apd_profile_has_explicit_additional_source_scope(self) -> None:
+		for path in CHECKER.APD_DVP_PATHS:
+			self.assertTrue(CHECKER._is_allowed_path(path, "apd-dvp"), path)
+			self.assertFalse(CHECKER._is_allowed_path(path), path)
+		self.assertFalse(CHECKER._is_allowed_path("docs/experimental/results.json", "apd-dvp"))
+
+	def test_apd_publication_tree_and_negative_cases(self) -> None:
+		# Exercise the actual branch contents, not a mocked successful checker.
+		# Mutations are confined to a disposable clone; preserve the working tree.
+		with tempfile.TemporaryDirectory() as temporary:
+			repo = Path(temporary) / "repo"
+			subprocess.run(["git", "clone", "--quiet", "--shared", str(REPO_ROOT), str(repo)], check=True)
+			changed = CHECKER._changed_paths(REPO_ROOT, "HEAD")
+			for path in changed:
+				source = REPO_ROOT / path
+				if source.is_file():
+					(repo / path).parent.mkdir(parents=True, exist_ok=True)
+					shutil.copyfile(source, repo / path)
+				elif (repo / path).is_file():
+					(repo / path).unlink()
+
+			def errors() -> list[str]:
+				return CHECKER.check(repo, CHECKER.APD_DVP_PUBLIC_BASE, [], 1024 * 1024, profile="apd-dvp")
+
+			self.assertEqual(errors(), [])
+			for path, addition, expected in (
+				("docs/experimental/results.json", '{}\n', "outside the public allowlist"),
+				("docs/experimental/01_apd_dvp.md", '\ninput: /home/developer/private/scene.mvs\n', "concrete absolute path"),
+				("scripts/python/generate_dvp_depth_edge_prior.py", '\n# -----BEGIN ' + 'PRIVATE KEY-----\n', "private key"),
+				("libs/MVS/PatchMatchAPDCUDA.h", '\nint unexpected_algorithm_change;\n', "source outside disabled observer guards differs"),
+				("libs/Common/Util.cpp", '\nint unexpected_memory_change;\n', "source outside disabled observer guards differs"),
+			):
+				with self.subTest(path=path):
+					file = repo / path
+					original = file.read_text() if file.exists() else None
+					file.write_text((original or "") + addition)
+					try:
+						self.assertTrue(any(expected in error for error in errors()))
+					finally:
+						if original is None:
+							file.unlink()
+						else:
+							file.write_text(original)
+			# A missing frozen reference must fail, not silently skip source checks.
+			self.assertTrue(CHECKER._check_off_source_parity(repo, "refs/heads/missing-publication-reference", profile="apd-dvp"))
+
 	def test_observability_sources_are_allowlisted(self) -> None:
 		self.assertTrue(CHECKER._is_allowed_path("libs/MVS/PatchMatchCUDA.cu"))
 		self.assertTrue(CHECKER._is_allowed_path("scripts/python/test_dmap_example.py"))

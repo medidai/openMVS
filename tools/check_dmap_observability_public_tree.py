@@ -50,6 +50,30 @@ EXACT_PATHS = {
 	"tools/dmap_observability.sh",
 }
 
+# The algorithm branch has a different source contract from observer-only work.
+# Freeze both references: comparing core code to moving HEAD would hide drift.
+APD_DVP_PUBLIC_BASE = "b522455b5081da778ae723af3db30afb58459158"
+APD_DVP_SOURCE_BASE = "14cd4916104fc54d00d4aa556d4b517289843b8b"
+APD_DVP_PATHS = {
+	"apps/Tests/Tests.cpp",
+	"apps/Tests/TestsMVS.cpp",
+	"apps/Tests/TestsMVS.h",
+	"apps/Tests/TestsMVSOnly.cpp",
+	"docs/experimental/01_apd_dvp.md",
+	"libs/MVS/PatchMatchAPDCUDA.h",
+	"libs/MVS/PatchMatchCUDA.h",
+	"libs/MVS/PatchMatchDVPCUDA.h",
+	"libs/MVS/PatchMatchDVPDepthEdgeCUDA.h",
+	"libs/MVS/PatchMatchDVPVisibilityCUDA.h",
+	"libs/MVS/PatchMatchDVPVisibleNormalCUDA.h",
+	"scripts/python/generate_dvp_depth_edge_prior.py",
+	"scripts/python/test_apd_dvp_release_defaults.py",
+	"scripts/python/test_generate_dvp_depth_edge_prior.py",
+	"scripts/python/test_validate_dvp_depth_edge_prior.py",
+	"scripts/python/test_validate_dvp_visibility_observability.py",
+	"scripts/python/validate_dvp_depth_edge_prior.py",
+}
+
 SCANNED_PREFIXES = (
 	"docs/dmap_observability/",
 	"examples/dmap_observability/",
@@ -229,7 +253,9 @@ def _git_added_text(repo: Path, base: str, path: str) -> str:
 	)
 
 
-def _is_allowed_path(path: str) -> bool:
+def _is_allowed_path(path: str, profile: str = "observer") -> bool:
+	if profile == "apd-dvp" and path in APD_DVP_PATHS:
+		return True
 	if path in EXACT_PATHS or path in PREFIX_SOURCE_PATHS:
 		return True
 	if path.startswith("scripts/python/test_dmap_") and path.endswith(".py"):
@@ -245,12 +271,14 @@ def _is_python_cache(path: str) -> bool:
 	return "__pycache__" in Path(path).parts or path.endswith((".pyc", ".pyo"))
 
 
-def _surface_paths(repo: Path) -> set[str]:
+def _surface_paths(repo: Path, profile: str = "observer") -> set[str]:
+	exact_paths = EXACT_PATHS | (APD_DVP_PATHS if profile == "apd-dvp" else set())
 	paths = {
-		path for path in EXACT_PATHS
+		path for path in exact_paths
 		if (repo / path).exists() or (repo / path).is_symlink()
 	}
-	for prefix in SCANNED_PREFIXES:
+	prefixes = SCANNED_PREFIXES + (("docs/experimental/",) if profile == "apd-dvp" else ())
+	for prefix in prefixes:
 		root = repo / prefix
 		if not root.exists():
 			continue
@@ -392,11 +420,21 @@ def _apply_patchmatch_cuda_compatibility(text: str) -> str:
 	return text
 
 
-def _check_off_source_parity(repo: Path, base: str) -> list[str]:
+def _check_off_source_parity(repo: Path, base: str, *, profile: str = "observer") -> list[str]:
 	errors: list[str] = []
-	for path in OFF_SOURCE_PARITY_PATHS:
+	paths = set(OFF_SOURCE_PARITY_PATHS)
+	if profile == "apd-dvp":
+		paths.update(path for path in APD_DVP_PATHS if path.startswith(("libs/", "apps/")))
+		paths.add("libs/Common/Util.cpp")
+	for path in sorted(paths):
 		try:
 			baseline_text = _git_text(repo, base, path)
+			if profile == "apd-dvp" and path == "libs/MVS/DepthMap.cpp":
+				# Reviewed description-only correction; do not normalize actual code.
+				baseline_text = baseline_text.replace(
+					'"Adaptive Patch Deformation mode (0 - disabled, 1 - full paper mechanics, 2 - deformation-only ablation)"',
+					'"Experimental Adaptive Patch Deformation (0 - disabled, 1 - adaptive support, 2 - deformation-only ablation)"',
+				)
 			if path == PATCHMATCH_CUDA_COMPATIBILITY_PATH:
 				baseline_text = _apply_patchmatch_cuda_compatibility(baseline_text)
 			baseline = _without_disabled_observer_blocks(baseline_text, path)
@@ -424,13 +462,18 @@ def check(
 	max_bytes: int,
 	*,
 	check_off_source_parity: bool = True,
+	profile: str = "observer",
 ) -> list[str]:
+	if profile not in {"observer", "apd-dvp"}:
+		raise ValueError(f"Unknown publication profile: {profile}")
 	errors: list[str] = []
 	for path in sorted(_changed_paths(repo, base)):
-		if not _is_allowed_path(path):
+		if not _is_allowed_path(path, profile):
 			errors.append(f"{path}: changed path is outside the public allowlist")
 
-	for path in sorted(_surface_paths(repo)):
+	for path in sorted(_surface_paths(repo, profile)):
+		if not _is_allowed_path(path, profile):
+			errors.append(f"{path}: source surface path is outside the public allowlist")
 		full_path = repo / path
 		if full_path.is_symlink():
 			errors.append(f"{path}: symlinks are not allowed in the public surface")
@@ -473,7 +516,8 @@ def check(
 	if wrapper.exists() and not os.access(wrapper, os.X_OK):
 		errors.append("tools/dmap_observability.sh: wrapper is not executable")
 	if check_off_source_parity:
-		errors.extend(_check_off_source_parity(repo, base))
+		parity_base = APD_DVP_SOURCE_BASE if profile == "apd-dvp" else base
+		errors.extend(_check_off_source_parity(repo, parity_base, profile=profile))
 	return errors
 
 
@@ -482,7 +526,8 @@ def main() -> int:
 		description="Validate that the DMAP observability publication surface contains only portable source and documentation."
 	)
 	parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
-	parser.add_argument("--base", default="origin/develop", help="Git base used to enforce the changed-path allowlist")
+	parser.add_argument("--profile", choices=("observer", "apd-dvp"), default="observer")
+	parser.add_argument("--base", help="Publication base (default: origin/develop for observer; frozen stabilization base for apd-dvp)")
 	parser.add_argument(
 		"--forbid", action="append", default=[], metavar="TEXT",
 		help="additional case-insensitive organization, host, user, dataset, or path marker to reject",
@@ -495,9 +540,11 @@ def main() -> int:
 	args = parser.parse_args()
 
 	repo = args.repo.resolve()
+	base = args.base or (APD_DVP_PUBLIC_BASE if args.profile == "apd-dvp" else "origin/develop")
 	errors = check(
-		repo, args.base, args.forbid, args.max_source_bytes,
+		repo, base, args.forbid, args.max_source_bytes,
 		check_off_source_parity=not args.skip_off_source_parity,
+		profile=args.profile,
 	)
 	if errors:
 		for error in errors:

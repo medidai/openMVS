@@ -25,8 +25,11 @@ class ExperimentalDefaultsTest(unittest.TestCase):
         self.assertRegex(source, r'OPTION\(OpenMVS_DMAP_INSTRUMENTATION\s+"[^"\n]*"\s+OFF\)')
 
     def test_help_does_not_claim_full_paper_reproduction(self):
-        source = (ROOT / "apps/DensifyPointCloud/DensifyPointCloud.cpp").read_text()
-        self.assertNotIn("full paper mechanics", source)
+        for path in ("apps/DensifyPointCloud/DensifyPointCloud.cpp", "libs/MVS/DepthMap.cpp"):
+            with self.subTest(path=path):
+                source = (ROOT / path).read_text()
+                self.assertNotIn("full paper mechanics", source)
+                self.assertIn("1 - adaptive support, 2 - deformation-only ablation", source)
 
 
 if __name__ == "__main__":

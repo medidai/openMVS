@@ -35,6 +35,7 @@ Common environment:
   DMAP_PRODUCTION_BIN    Production DensifyPointCloud path.
   DMAP_OBSERVER_BIN      DensifyPointCloudDMapObserve path.
   DMAP_PUBLIC_BASE       Git ref used by the publication guard.
+  DMAP_PUBLIC_PROFILE    Publication contract (default: apd-dvp).
 
 Run `tools/dmap_observability.sh COMMAND --help` for command details.
 EOF
@@ -108,7 +109,8 @@ canonical_report() {
 }
 
 command_doctor() {
-  local public_base="${DMAP_PUBLIC_BASE:-origin/develop}"
+  local public_base="${DMAP_PUBLIC_BASE:-}"
+  local public_profile="${DMAP_PUBLIC_PROFILE:-apd-dvp}"
   if (($#)) && [[ "$1" == "--help" ]]; then
     cat <<'EOF'
 Usage: tools/dmap_observability.sh doctor [OPTIONS]
@@ -117,7 +119,8 @@ Options:
   --python PATH          Python interpreter.
   --production-bin PATH Production DensifyPointCloud binary.
   --observer-bin PATH   Observer DensifyPointCloudDMapObserve binary.
-  --public-base REF     Git base for publication and disabled-source checks.
+  --public-base REF     Publication base; profile selects the core-source reference.
+  --public-profile NAME Publication contract: apd-dvp (default) or observer.
 EOF
     return 0
   fi
@@ -127,9 +130,16 @@ EOF
       --production-bin) need_value "$1" "$#"; production_bin="$2"; shift 2 ;;
       --observer-bin) need_value "$1" "$#"; observer_bin="$2"; shift 2 ;;
       --public-base) need_value "$1" "$#"; public_base="$2"; shift 2 ;;
+      --public-profile) need_value "$1" "$#"; public_profile="$2"; shift 2 ;;
       *) fail "unknown doctor option: $1" ;;
     esac
   done
+
+  case "${public_profile}" in
+    apd-dvp) public_base="${public_base:-b522455b5081da778ae723af3db30afb58459158}" ;;
+    observer) public_base="${public_base:-origin/develop}" ;;
+    *) fail "unknown publication profile: ${public_profile}" ;;
+  esac
 
   local status=0
   local item
@@ -212,7 +222,7 @@ EOF
         "${public_base}" >&2
       status=1
     elif "${python_bin}" "${repo_root}/tools/check_dmap_observability_public_tree.py" \
-      --repo "${repo_root}" --base "${public_base}"; then
+      --repo "${repo_root}" --base "${public_base}" --profile "${public_profile}"; then
       printf 'ok: public-tree publication guard against %s\n' "${public_base}"
     else
       printf 'failed: public-tree publication guard\n' >&2

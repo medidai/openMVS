@@ -61,6 +61,29 @@ Python dependencies, publication checks, or an explicitly selected publication
 base cause a nonzero exit. Missing optional Python modules only emit warnings.
 Doctor does not modify the repository.
 
+On this algorithm branch, `doctor` selects the `apd-dvp` publication profile.
+It checks source-only contents against the frozen stabilization base
+`b522455b5081da778ae723af3db30afb58459158`, and compares observer-disabled core
+source against the reviewed APD/DVP snapshot
+`14cd4916104fc54d00d4aa556d4b517289843b8b`. The only additional accepted core
+delta is the APD configuration-description correction. Both commits must be
+available locally; use a full Git clone or fetch the missing history if a
+shallow checkout reports missing references. The comparison is not against
+moving `HEAD` and does not certify runtime or reconstruction quality.
+
+The standalone equivalent is:
+
+```bash
+python3 tools/check_dmap_observability_public_tree.py --profile apd-dvp
+```
+
+The standalone checker's default remains `observer` for observer-only work.
+Use `doctor --public-profile observer --public-base REF` for that contract.
+`DMAP_PUBLIC_PROFILE` and `DMAP_PUBLIC_BASE` provide equivalent environment
+defaults. `--public-base` changes the publication comparison, not the frozen
+APD/DVP core-source reference. Future algorithm edits need review and validation
+before updating that reference; do not skip parity checking to make them pass.
+
 ## Build both boundaries
 
 ```bash
