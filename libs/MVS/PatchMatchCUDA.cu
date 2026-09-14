@@ -611,7 +611,8 @@ __device__ void ProcessPixel(const ImagePixels* images, const ImagePixels* depth
 				if (costArray[posId][imgId] < thCost) {
 					sumW += __expf(Square(costArray[posId][imgId]) / (-2.f * 0.3f*0.3f));
 					++count;
-				} else if (costArray[posId][imgId] >= fBadCost) {
+				// Exact fBadCost marks an unavailable evaluation and remains neutral here.
+				} else if (costArray[posId][imgId] > fBadCost) {
 					++countBad;
 				}
 			}
