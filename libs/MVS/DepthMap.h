@@ -36,6 +36,9 @@
 // I N C L U D E S /////////////////////////////////////////////////
 
 #include "PointCloud.h"
+#ifdef _USE_CUDA
+#include "PatchMatchAPDCUDA.h"
+#endif
 
 
 // D E F I N E S ///////////////////////////////////////////////////
@@ -79,6 +82,37 @@ namespace MVS {
 DEFINE_CVDATATYPE(MVS::ViewsID)
 
 namespace MVS {
+
+#ifdef _USE_CUDA
+// Runtime-only APD state carried between pyramid levels and the later
+// geometric-consistency passes. It is deliberately separate from the stable
+// DMAP serialization contract and remains empty when APD is disabled.
+struct APDMultiscaleDepthState {
+	CUDA::APDMultiscaleStateHeader header;
+	Image8U reliabilityMap;
+	Image8U anchorCountMap;
+	Image8U deformableEligibleMap;
+
+	bool IsValid() const {
+		const cv::Size expectedSize((int)header.width, (int)header.height);
+		return header.version == CUDA::APD_MULTISCALE_STATE_VERSION &&
+			header.width > 0u && header.height > 0u &&
+			reliabilityMap.size() == expectedSize &&
+			anchorCountMap.size() == expectedSize &&
+			deformableEligibleMap.size() == expectedSize;
+	}
+	void Release() {
+		header = CUDA::APDMultiscaleStateHeader{};
+		reliabilityMap.release();
+		anchorCountMap.release();
+		deformableEligibleMap.release();
+	}
+	size_t GetMemorySize() const {
+		return reliabilityMap.memory_size()+anchorCountMap.memory_size()+
+			deformableEligibleMap.memory_size();
+	}
+};
+#endif
 
 DECOPT_SPACE(OPTDENSE)
 
@@ -164,6 +198,39 @@ extern MVS_API bool bEstimateConfidenceCUDA; // when CUDA estimation is used, ru
 extern MVS_API unsigned nEstimationIters;
 extern MVS_API unsigned nEstimationGeometricIters;
 extern MVS_API unsigned nPatchMatchCUDAInstances;
+// Adaptive Patch Deformation for CUDA PatchMatch (0 - disabled/default,
+// 1 - paper deformable cost). Later APD stages extend this mode deliberately.
+extern MVS_API unsigned nPatchMatchCUDAAPD;
+extern MVS_API unsigned nPatchMatchCUDADVPEpipolarFamily;
+extern MVS_API float fPatchMatchCUDADVPEpipolarAlpha;
+extern MVS_API float fPatchMatchCUDADVPEpipolarBeta;
+extern MVS_API unsigned nPatchMatchCUDADVPEpipolarMu;
+extern MVS_API unsigned nPatchMatchCUDADVPGlobalSearchRadius;
+extern MVS_API float fPatchMatchCUDADVPReprojectionThreshold;
+extern MVS_API float fPatchMatchCUDADVPRelativeDepthThreshold;
+extern MVS_API unsigned nPatchMatchCUDADVPDepthEdgeMode;
+extern MVS_API String strPatchMatchCUDADVPDepthEdgePriorDir;
+extern MVS_API unsigned nPatchMatchCUDADVPVisibilityMode;
+extern MVS_API float fPatchMatchCUDADVPVisibilityReprojectionThreshold;
+extern MVS_API float fPatchMatchCUDADVPVisibilityRelativeDepthThreshold;
+extern MVS_API unsigned nPatchMatchCUDADVPVisibleNormalMode;
+extern MVS_API float fPatchMatchCUDADVPVisibleNormalDotTolerance;
+extern MVS_API unsigned nPatchMatchCUDADVPVisibleNormalAttempts;
+#ifdef _USE_DMAP_INSTRUMENTATION
+extern MVS_API unsigned nPatchMatchInstrumentLevel;
+extern MVS_API String strPatchMatchInstrumentConfig;
+extern MVS_API String strPatchMatchInstrumentOutput;
+extern MVS_API String strDMapInstrumentationDir;
+extern MVS_API String strDMapInstrumentationLevel;
+extern MVS_API float fDMapInstrumentationSampleRate;
+extern MVS_API unsigned nDMapInstrumentationSampleSeed;
+extern MVS_API String strDMapInstrumentationImageList;
+extern MVS_API bool bDMapInstrumentationWriteMaps;
+extern MVS_API unsigned nDMapInstrumentationMaxDeviceMB;
+extern MVS_API unsigned nDMapInstrumentationMaxHostMB;
+extern MVS_API unsigned nDMapInstrumentationMaxFrameStorageMB;
+extern MVS_API String strDMapInstrumentationBudgetPolicy;
+#endif
 extern MVS_API unsigned nDMapIntermediateFloatComponents;
 extern MVS_API bool bPatchMatchCUDACompat23;
 extern MVS_API bool bROICompat23;
@@ -280,6 +347,11 @@ struct MVS_API DepthData {
 	DepthMap depthMap; // depth-map
 	NormalMap normalMap; // normal-map in camera space
 	ConfidenceMap confMap; // confidence-map
+	#ifdef _USE_DMAP_INSTRUMENTATION
+	ConfidenceMap confMapBeforeAdjustmentInstrument; // exact raw confidence consumed by the fused
+		// confidence-adjustment epilogue; retained only until its observer sidecar is written
+		// and compiled out of the production boundary
+	#endif
 	ConfidenceMap confMapAdjusted; // recalibrated confidence-map computed by a standalone adjust, held
 		// in memory until the deferred EVT_ADJUSTDEPTHMAP swap (confMap = move(confMapAdjusted));
 		// intentionally NOT cleared by Release() so it survives a cache eviction/reload of this
@@ -290,6 +362,10 @@ struct MVS_API DepthData {
 		// confMapAdjusted this IS cleared by Release() -- it is a cheap, recomputable derived cache
 		// with no cross-event delivery obligation, so it simply follows the DepthData's own lifetime
 	ViewsMap viewsMap; // view-IDs map (indexing images vector starting after first view)
+	#ifdef _USE_CUDA
+	APDMultiscaleDepthState apdMultiscaleState; // retained across Release() only while later
+		// APD stages still need the previous stage's reliability/anchor provenance
+	#endif
 	float dMin, dMax; // global depth range for this image
 	cv::Size size; // image size used to estimate this depth-map
 	bool bConfAdjusted; // the confidence recalibration already ran for this view -- either fused
@@ -315,6 +391,9 @@ struct MVS_API DepthData {
 		depthMap.release();
 		normalMap.release();
 		confMap.release();
+		#ifdef _USE_DMAP_INSTRUMENTATION
+		confMapBeforeAdjustmentInstrument.release();
+		#endif
 		priorMap.release();
 		viewsMap.release();
 	}

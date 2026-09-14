@@ -95,6 +95,26 @@ bool UnitTests()
 		VERBOSE("ERROR: TestConfidenceInterval failed!");
 		return false;
 	}
+	if (!MVS::AdaptivePatchDeformationContractTest()) {
+		VERBOSE("ERROR: AdaptivePatchDeformationContractTest failed!");
+		return false;
+	}
+	if (!MVS::DepthVariationProposalContractTest()) {
+		VERBOSE("ERROR: DepthVariationProposalContractTest failed!");
+		return false;
+	}
+	if (!MVS::DVPDepthEdgePriorContractTest()) {
+		VERBOSE("ERROR: DVPDepthEdgePriorContractTest failed!");
+		return false;
+	}
+	if (!MVS::DVPVisibilityContractTest()) {
+		VERBOSE("ERROR: DVPVisibilityContractTest failed!");
+		return false;
+	}
+	if (!MVS::DVPVisibleNormalContractTest()) {
+		VERBOSE("ERROR: DVPVisibleNormalContractTest failed!");
+		return false;
+	}
 	VERBOSE("All unit tests passed (%s)", TD_TIMER_GET_FMT().c_str());
 	return true;
 }

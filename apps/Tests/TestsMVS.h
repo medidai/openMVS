@@ -42,6 +42,26 @@ bool ConfidenceCompat23Test();
 // verify the explicit OpenMVS 2.3 float32 DMap compatibility contract
 bool DMapCompat23Test();
 
+// test the host/device APD paper-mechanics contract
+bool AdaptivePatchDeformationContractTest();
+/*----------------------------------------------------------------*/
+
+// test the host/device DVP epipolar proposal contract
+bool DepthVariationProposalContractTest();
+/*----------------------------------------------------------------*/
+
+// test the host/device DVP depth-edge topology and anchor-filter contract
+bool DVPDepthEdgePriorContractTest();
+/*----------------------------------------------------------------*/
+
+// test immutable DVP visibility weights and 2D/depth-gated classification
+bool DVPVisibilityContractTest();
+/*----------------------------------------------------------------*/
+
+// test reference-frame DVP visible-normal hemispheres and deterministic fallbacks
+bool DVPVisibleNormalContractTest();
+/*----------------------------------------------------------------*/
+
 // test MVS stages on a small sample dataset
 bool PipelineTest(bool forceCPU = false, bool verbose = false);
 /*----------------------------------------------------------------*/

@@ -1,0 +1,100 @@
+schema_version: 2
+experiment_id: REPLACE_WITH_UNIQUE_EXPERIMENT_ID
+hypothesis: >-
+  REPLACE_WITH_ONE_TESTABLE_MECHANISM_HYPOTHESIS_AND_EXPECTED_METRIC_EFFECT
+
+# Generated evidence must live outside the repository.
+output_root: REPLACE_WITH_EXTERNAL_OUTPUT_ROOT
+densify_bin: REPLACE_WITH_PRODUCTION_DENSIFY_BINARY
+densify_observe_bin: REPLACE_WITH_OBSERVER_DENSIFY_BINARY
+
+capture_profiles:
+  - endpoint
+  - summary
+  - prefilter
+
+suite:
+  name: smoke
+  scan_ids:
+    - scene-a
+
+instrumentation:
+  # Deterministic per-reference-image observer sampling in (0, 1]. Keep 1.0
+  # when --dmap-instrumentation-image-list already bounds the selected frames.
+  sample_rate: 1.0
+  expected_width: 1920
+  expected_height: 1080
+  expected_frames_per_scene: 1
+  estimated_compression_ratio: 1.0
+  max_artifact_gb: 4
+  maps_capability: true
+
+evaluation:
+  annotation_space: final
+  ransac_threshold_m: 0.02
+  ransac_thresholds_m:
+    - 0.005
+    - 0.01
+    - 0.02
+    - 0.05
+  edge_ribbon_source_px: 5.0
+  max_ransac_points: 50000
+  ransac_trials: 2000
+  seed: 0
+  plane_grid: 32
+  line_bins: 100
+  max_visual_points: 6000
+
+scenes:
+  - scan_id: scene-a
+    name: REPLACE_WITH_SCENE_LABEL
+    working_folder: REPLACE_WITH_FROZEN_SCENE_WORKING_FOLDER
+    mvs_file: REPLACE_WITH_FROZEN_SCENE_MVS_FILE
+    annotation_sidecar: REPLACE_WITH_OPTIONAL_ANNOTATION_SIDECAR_OR_REMOVE_FIELD
+
+default_densify_args:
+  - --gpu-device
+  - "0"
+  - --fusion-mode
+  - "1"
+  - --resolution-level
+  - "1"
+  - --sub-resolution-levels
+  - "0"
+  - --number-views
+  - "3"
+  - --number-views-fuse
+  - "2"
+  - --patch-match-cuda-instances
+  - "1"
+  - --dmap-instrumentation-image-list
+  - "0"
+  - --dmap-instrumentation-sample-seed
+  - "0"
+  - --dmap-instrumentation-max-device-mb
+  - "2048"
+  - --dmap-instrumentation-max-host-mb
+  - "4096"
+  - --dmap-instrumentation-max-frame-storage-mb
+  - "4096"
+  - --dmap-instrumentation-budget-policy
+  - error
+
+runs:
+  - label: baseline
+    role: baseline
+    repeats: 2
+    densify_args:
+      - --iters
+      - "3"
+      - --geometric-iters
+      - "0"
+  - label: candidate
+    role: variant
+    repeats: 2
+    densify_args:
+      # Replace this illustrative delta with the mechanism under test.
+      - --iters
+      - "4"
+      - --geometric-iters
+      - "0"

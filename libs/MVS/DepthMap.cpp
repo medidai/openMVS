@@ -122,6 +122,37 @@ DEFVAR_OPTDENSE_bool(bEstimateConfidenceCUDA, "Estimate Confidence CUDA", "when 
 DEFVAR_OPTDENSE_uint32(nEstimationIters, "Estimation Iters", "Number of patch-match iterations", "3")
 DEFVAR_OPTDENSE_uint32(nEstimationGeometricIters, "Estimation Geometric Iters", "Number of geometric consistent patch-match iterations (0 - disabled)", "2")
 DEFVAR_OPTDENSE_uint32(nPatchMatchCUDAInstances, "PatchMatch CUDA Instances", "Number of parallel CUDA PatchMatch worker instances (clamped to nMaxThreads)", "4")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDAAPD, "PatchMatch CUDA APD", "Adaptive Patch Deformation mode (0 - disabled, 1 - full paper mechanics, 2 - deformation-only ablation)", "0")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDADVPEpipolarFamily, "PatchMatch CUDA DVP Epipolar Family", "DVP epipolar proposal family (0 - disabled, 1 - historical global v0, 2 - gated global v1, 3 - historical midpoint v1, 4 - paper Eq. 11 interval v1)", "0")
+DEFVAR_OPTDENSE_float(fPatchMatchCUDADVPEpipolarAlpha, "PatchMatch CUDA DVP Epipolar Alpha", "inner source-image epipolar offset in pixels", "1")
+DEFVAR_OPTDENSE_float(fPatchMatchCUDADVPEpipolarBeta, "PatchMatch CUDA DVP Epipolar Beta", "additional source-image epipolar interval width in pixels", "4")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDADVPEpipolarMu, "PatchMatch CUDA DVP Epipolar Mu", "minimum endpoint support and paper order statistic", "3")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDADVPGlobalSearchRadius, "PatchMatch CUDA DVP Global Search Radius", "bounded source-image epipolar search radius in pixels for global proposal families", "160")
+DEFVAR_OPTDENSE_float(fPatchMatchCUDADVPReprojectionThreshold, "PatchMatch CUDA DVP Reprojection Threshold", "maximum reference round-trip error in pixels for the gated global proposal", "2")
+DEFVAR_OPTDENSE_float(fPatchMatchCUDADVPRelativeDepthThreshold, "PatchMatch CUDA DVP Relative Depth Threshold", "maximum relative source-depth disagreement for gated global support and occlusion checks", "0.01")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDADVPDepthEdgeMode, "PatchMatch CUDA DVP Depth Edge Mode", "depth-edge topology stage used to constrain APD anchors (0 - disabled, 1 - Roberts regions, 2 - DAV2 planarized, 3 - eroded, 4 - dilated, 5 - pixel reassigned)", "0")
+DEFVAR_OPTDENSE_string(strPatchMatchCUDADVPDepthEdgePriorDir, "PatchMatch CUDA DVP Depth Edge Prior Dir", "versioned offline DVP depth-edge prior bundle (empty - disabled)", "")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDADVPVisibilityMode, "PatchMatch CUDA DVP Visibility Mode", "persistent visibility mode (0 - disabled, 1 - paper 2D round-trip restoration, 2 - depth-gated restoration)", "0")
+DEFVAR_OPTDENSE_float(fPatchMatchCUDADVPVisibilityReprojectionThreshold, "PatchMatch CUDA DVP Visibility Reprojection Threshold", "maximum reference round-trip error in pixels for persistent visibility restoration", "2")
+DEFVAR_OPTDENSE_float(fPatchMatchCUDADVPVisibilityRelativeDepthThreshold, "PatchMatch CUDA DVP Visibility Relative Depth Threshold", "maximum relative source-depth disagreement for depth-gated persistent visibility", "0.01")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDADVPVisibleNormalMode, "PatchMatch CUDA DVP Visible Normal Mode", "selected-view visible-normal constraint (0 - disabled, 1 - shadow, 2 - refinement, 3 - propagation, 4 - full)", "0")
+DEFVAR_OPTDENSE_float(fPatchMatchCUDADVPVisibleNormalDotTolerance, "PatchMatch CUDA DVP Visible Normal Dot Tolerance", "maximum camera-to-point direction dot normal for a feasible visible normal", "0")
+DEFVAR_OPTDENSE_uint32(nPatchMatchCUDADVPVisibleNormalAttempts, "PatchMatch CUDA DVP Visible Normal Attempts", "maximum local-RNG retries for each constrained stochastic normal proposal", "200")
+#ifdef _USE_DMAP_INSTRUMENTATION
+DEFVAR_OPTDENSE_uint32(nPatchMatchInstrumentLevel, "PatchMatch Instrument Level", "CUDA PatchMatch instrumentation level (0 - off, 1 - counters, 2 - sampled traces)", "0")
+DEFVAR_OPTDENSE_string(strPatchMatchInstrumentConfig, "PatchMatch Instrument Config", "JSON configuration file for CUDA PatchMatch instrumentation", "")
+DEFVAR_OPTDENSE_string(strPatchMatchInstrumentOutput, "PatchMatch Instrument Output", "output directory for CUDA PatchMatch instrumentation artifacts", "")
+DEFVAR_OPTDENSE_string(strDMapInstrumentationDir, "DMap Instrumentation Dir", "output directory for depth-map instrumentation artifacts", "")
+DEFVAR_OPTDENSE_string(strDMapInstrumentationLevel, "DMap Instrumentation Level", "depth-map instrumentation level: summary, prefilter, debug, maps", "summary")
+DEFVAR_OPTDENSE_float(fDMapInstrumentationSampleRate, "DMap Instrumentation Sample Rate", "deterministic per-reference-image sampling rate for depth-map instrumentation", "1")
+DEFVAR_OPTDENSE_uint32(nDMapInstrumentationSampleSeed, "DMap Instrumentation Sample Seed", "seed for deterministic per-reference-image depth-map instrumentation sampling", "0")
+DEFVAR_OPTDENSE_string(strDMapInstrumentationImageList, "DMap Instrumentation Image List", "comma-separated reference image IDs or names to instrument", "")
+DEFVAR_OPTDENSE_bool(bDMapInstrumentationWriteMaps, "DMap Instrumentation Write Maps", "write per-pixel depth-map instrumentation maps", "0")
+DEFVAR_OPTDENSE_uint32(nDMapInstrumentationMaxDeviceMB, "DMap Instrumentation Max Device MB", "maximum additional CUDA device memory per instrumented frame in MiB (0 - unlimited)", "2048")
+DEFVAR_OPTDENSE_uint32(nDMapInstrumentationMaxHostMB, "DMap Instrumentation Max Host MB", "maximum retained host memory per instrumented frame in MiB (0 - unlimited)", "4096")
+DEFVAR_OPTDENSE_uint32(nDMapInstrumentationMaxFrameStorageMB, "DMap Instrumentation Max Frame Storage MB", "maximum estimated uncompressed map storage per instrumented frame in MiB (0 - unlimited)", "4096")
+DEFVAR_OPTDENSE_string(strDMapInstrumentationBudgetPolicy, "DMap Instrumentation Budget Policy", "behavior when an instrumentation resource budget is exceeded: degrade or error", "degrade")
+#endif
 MDEFVAR_OPTDENSE_uint32(nDMapIntermediateFloatComponents, "Intermediate DMap Float Components", "bit mask selecting float32 fields in initial and non-final PatchMatch handoffs: 1 depth, 2 normals", "0")
 MDEFVAR_OPTDENSE_bool(bPatchMatchCUDACompat23, "PatchMatch CUDA 2.3 Compatibility", "restore the OpenMVS 2.3 CUDA proposal and coarse-to-fine prior behavior", "0")
 MDEFVAR_OPTDENSE_float(fEstimationGeometricWeight, "Estimation Geometric Weight", "pairwise geometric consistency cost weight", "0.1")
@@ -154,6 +185,9 @@ DepthData::DepthData(const DepthData& srcDepthData) :
 	depthMap(srcDepthData.depthMap),
 	normalMap(srcDepthData.normalMap),
 	confMap(srcDepthData.confMap),
+	#ifdef _USE_CUDA
+	apdMultiscaleState(srcDepthData.apdMultiscaleState),
+	#endif
 	dMin(srcDepthData.dMin),
 	dMax(srcDepthData.dMax),
 	size(srcDepthData.size),
@@ -323,9 +357,13 @@ unsigned DepthData::DecRef()
 // Compute the memory size occupied by the depth-data images (in bytes)
 size_t MVS::DepthData::GetMemorySize() const
 {
+	size_t nBytes = 0;
+	#ifdef _USE_CUDA
+	nBytes += apdMultiscaleState.GetMemorySize();
+	#endif
 	if (IsEmpty())
-		return 0;
-	size_t nBytes = depthMap.memory_size();
+		return nBytes;
+	nBytes += depthMap.memory_size();
 	if (!normalMap.empty())
 		nBytes += normalMap.memory_size();
 	if (!confMap.empty())

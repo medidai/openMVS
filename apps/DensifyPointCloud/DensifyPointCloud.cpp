@@ -31,6 +31,11 @@
 
 #include "../../libs/MVS/Common.h"
 #include "../../libs/MVS/Scene.h"
+#include "../../libs/MVS/PatchMatchAPDCUDA.h"
+#include "../../libs/MVS/PatchMatchDVPCUDA.h"
+#include "../../libs/MVS/PatchMatchDVPDepthEdgeCUDA.h"
+#include "../../libs/MVS/PatchMatchDVPVisibilityCUDA.h"
+#include "../../libs/MVS/PatchMatchDVPVisibleNormalCUDA.h"
 #include <boost/program_options.hpp>
 
 using namespace MVS;
@@ -38,7 +43,11 @@ using namespace MVS;
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+#ifdef _USE_DMAP_INSTRUMENTATION
+#define APPNAME _T("DensifyPointCloudDMapObserve")
+#else
 #define APPNAME _T("DensifyPointCloud")
+#endif
 
 
 // S T R U C T S ///////////////////////////////////////////////////
@@ -59,6 +68,19 @@ String strCropROIFileName;
 String strExportDMAPSPathName;
 String strDenseConfigFileName;
 String strExportDepthMapsName;
+#ifdef _USE_DMAP_INSTRUMENTATION
+String strDMapInstrumentationDir;
+String strDMapInstrumentationConfig;
+String strDMapInstrumentationLevel;
+float fDMapInstrumentationSampleRate;
+unsigned nDMapInstrumentationSampleSeed;
+String strDMapInstrumentationImageList;
+bool bDMapInstrumentationWriteMaps;
+unsigned nDMapInstrumentationMaxDeviceMB;
+unsigned nDMapInstrumentationMaxHostMB;
+unsigned nDMapInstrumentationMaxFrameStorageMB;
+String strDMapInstrumentationBudgetPolicy;
+#endif
 String strMaskPath;
 float fMaxSubsceneArea;
 float fSampleMesh;
@@ -139,6 +161,22 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	unsigned nEstimationIters;
 	unsigned nEstimationGeometricIters;
 	unsigned nPatchMatchCUDAInstances;
+	unsigned nPatchMatchCUDAAPD;
+	unsigned nPatchMatchCUDADVPEpipolarFamily;
+	float fPatchMatchCUDADVPEpipolarAlpha;
+	float fPatchMatchCUDADVPEpipolarBeta;
+	unsigned nPatchMatchCUDADVPEpipolarMu;
+	unsigned nPatchMatchCUDADVPGlobalSearchRadius;
+	float fPatchMatchCUDADVPReprojectionThreshold;
+	float fPatchMatchCUDADVPRelativeDepthThreshold;
+	unsigned nPatchMatchCUDADVPDepthEdgeMode;
+	String strPatchMatchCUDADVPDepthEdgePriorDir;
+	unsigned nPatchMatchCUDADVPVisibilityMode;
+	float fPatchMatchCUDADVPVisibilityReprojectionThreshold;
+	float fPatchMatchCUDADVPVisibilityRelativeDepthThreshold;
+	unsigned nPatchMatchCUDADVPVisibleNormalMode;
+	float fPatchMatchCUDADVPVisibleNormalDotTolerance;
+	unsigned nPatchMatchCUDADVPVisibleNormalAttempts;
 	unsigned nDMapIntermediateFloatComponents;
 	bool bPatchMatchCUDACompat23;
 	float fWeightPointInsideROI;
@@ -169,6 +207,22 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("iters", boost::program_options::value(&nEstimationIters)->default_value(numIters), "number of patch-match iterations")
 		("geometric-iters", boost::program_options::value(&nEstimationGeometricIters)->default_value(2), "number of geometric consistent patch-match iterations (0 - disabled)")
 		("patch-match-cuda-instances", boost::program_options::value(&nPatchMatchCUDAInstances)->default_value(4), "number of parallel CUDA PatchMatch worker instances (clamped to nMaxThreads)")
+		("patch-match-cuda-apd", boost::program_options::value(&nPatchMatchCUDAAPD)->default_value(0), "Experimental Adaptive Patch Deformation for CUDA PatchMatch (0 - disabled, 1 - adaptive support, 2 - deformation-only ablation)")
+		("patch-match-cuda-dvp-epipolar-family", boost::program_options::value(&nPatchMatchCUDADVPEpipolarFamily)->default_value(0), "DVP epipolar proposal family (0 - disabled, 1 - historical global v0, 2 - gated global v1, 3 - historical midpoint v1, 4 - paper Eq. 11 interval v1)")
+		("patch-match-cuda-dvp-epipolar-alpha", boost::program_options::value(&fPatchMatchCUDADVPEpipolarAlpha)->default_value(1.f), "inner source-image epipolar offset in pixels")
+		("patch-match-cuda-dvp-epipolar-beta", boost::program_options::value(&fPatchMatchCUDADVPEpipolarBeta)->default_value(4.f), "additional source-image epipolar interval width in pixels")
+		("patch-match-cuda-dvp-epipolar-mu", boost::program_options::value(&nPatchMatchCUDADVPEpipolarMu)->default_value(3), "minimum endpoint support and paper order statistic")
+		("patch-match-cuda-dvp-global-search-radius", boost::program_options::value(&nPatchMatchCUDADVPGlobalSearchRadius)->default_value(160), "source-image epipolar search radius in pixels for global proposal families")
+		("patch-match-cuda-dvp-reprojection-threshold", boost::program_options::value(&fPatchMatchCUDADVPReprojectionThreshold)->default_value(2.f), "maximum reference round-trip error in pixels for gated global proposals")
+		("patch-match-cuda-dvp-relative-depth-threshold", boost::program_options::value(&fPatchMatchCUDADVPRelativeDepthThreshold)->default_value(0.01f), "maximum relative source-depth disagreement for gated global support and occlusion checks")
+		("patch-match-cuda-dvp-depth-edge-mode", boost::program_options::value(&nPatchMatchCUDADVPDepthEdgeMode)->default_value(0), "DVP depth-edge topology stage constraining APD anchors (0 - disabled, 1 - Roberts regions, 2 - DAV2 planarized, 3 - eroded, 4 - dilated, 5 - pixel reassigned)")
+		("patch-match-cuda-dvp-depth-edge-prior-dir", boost::program_options::value<std::string>(&strPatchMatchCUDADVPDepthEdgePriorDir)->default_value(""), "versioned offline DVP depth-edge prior bundle (required for active depth-edge modes)")
+		("patch-match-cuda-dvp-visibility-mode", boost::program_options::value(&nPatchMatchCUDADVPVisibilityMode)->default_value(0), "persistent visibility mode (0 - disabled, 1 - paper 2D round-trip restoration, 2 - depth-gated restoration)")
+		("patch-match-cuda-dvp-visibility-reprojection-threshold", boost::program_options::value(&fPatchMatchCUDADVPVisibilityReprojectionThreshold)->default_value(2.f), "maximum reference round-trip error in pixels for persistent visibility restoration")
+		("patch-match-cuda-dvp-visibility-relative-depth-threshold", boost::program_options::value(&fPatchMatchCUDADVPVisibilityRelativeDepthThreshold)->default_value(0.01f), "maximum relative source-depth disagreement for depth-gated persistent visibility")
+		("patch-match-cuda-dvp-visible-normal-mode", boost::program_options::value(&nPatchMatchCUDADVPVisibleNormalMode)->default_value(0), "selected-view visible-normal constraint (0 - disabled, 1 - shadow, 2 - refinement, 3 - propagation, 4 - full)")
+		("patch-match-cuda-dvp-visible-normal-dot-tolerance", boost::program_options::value(&fPatchMatchCUDADVPVisibleNormalDotTolerance)->default_value(0.f), "maximum camera-to-point direction dot normal for a feasible visible normal")
+		("patch-match-cuda-dvp-visible-normal-attempts", boost::program_options::value(&nPatchMatchCUDADVPVisibleNormalAttempts)->default_value(MVS::CUDA::DVP_VISIBLE_NORMAL_DEFAULT_ATTEMPTS), "maximum local-RNG retries for each constrained stochastic normal proposal")
 		("dmap-intermediate-float-components", boost::program_options::value(&nDMapIntermediateFloatComponents)->default_value(0), "bit mask selecting float32 fields in initial and non-final PatchMatch handoffs: 1 depth, 2 normals; other fields use D2 quantization and final depth-maps remain D2")
 		("patch-match-cuda-compat-23", boost::program_options::value(&bPatchMatchCUDACompat23)->default_value(false), "restore OpenMVS 2.3 CUDA proposal and coarse-to-fine prior behavior")
 		("weight-point-inside-roi", boost::program_options::value(&fWeightPointInsideROI)->default_value(0.7f), "weight a point inside ROI when estimating neighbor views")
@@ -186,6 +240,19 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("postprocess-dmaps", boost::program_options::value(&nOptimize)->default_value(4), "flags used to filter the depth-maps after estimation (0 - disabled, 1 - remove-speckles, 2 - fill-gaps, 4 - adaptive adjust-confidence only when the depth-maps are estimated on CUDA, where it runs fused into the last estimation iteration and costs almost nothing, 8 - adaptive adjust-confidence, 16 - exact OpenMVS 2.3 fast-confidence compatibility; the default 4 enables adaptive adjustment on GPU and skips it on CPU; 16 cannot be combined with 4 or 8)")
 		("filter-point-cloud", boost::program_options::value(&OPT::thFilterPointCloud)->default_value(0), "filter dense point-cloud based on visibility (0 - disabled)")
 		("export-number-views", boost::program_options::value(&OPT::nExportNumViews)->default_value(0), "export points with >= number of views (0 - disabled, <0 - save MVS project too)")
+#ifdef _USE_DMAP_INSTRUMENTATION
+		("dmap-instrumentation-dir", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationDir), "output directory for optional depth-map instrumentation (empty - disabled)")
+		("dmap-instrumentation-config", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationConfig), "JSON configuration for depth-map trace pixels and map output")
+		("dmap-instrumentation-level", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationLevel)->default_value("summary"), "depth-map instrumentation level: summary, prefilter, debug, maps")
+		("dmap-instrumentation-sample-rate", boost::program_options::value(&OPT::fDMapInstrumentationSampleRate)->default_value(1.f), "deterministic per-reference-image instrumentation sample rate in [0,1]")
+		("dmap-instrumentation-sample-seed", boost::program_options::value(&OPT::nDMapInstrumentationSampleSeed)->default_value(0), "seed for deterministic per-reference-image instrumentation sampling")
+		("dmap-instrumentation-image-list", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationImageList), "comma-separated reference image IDs or image names to instrument")
+		("dmap-instrumentation-write-maps", boost::program_options::value(&OPT::bDMapInstrumentationWriteMaps)->default_value(false), "write per-pixel diagnostic maps (0 - disabled, 1 - enabled)")
+		("dmap-instrumentation-max-device-mb", boost::program_options::value(&OPT::nDMapInstrumentationMaxDeviceMB)->default_value(2048), "maximum additional CUDA device memory per instrumented frame (MiB, 0 - unlimited)")
+		("dmap-instrumentation-max-host-mb", boost::program_options::value(&OPT::nDMapInstrumentationMaxHostMB)->default_value(4096), "maximum retained host memory per instrumented frame (MiB, 0 - unlimited)")
+		("dmap-instrumentation-max-frame-storage-mb", boost::program_options::value(&OPT::nDMapInstrumentationMaxFrameStorageMB)->default_value(4096), "maximum estimated uncompressed map storage per instrumented frame and producer (PatchMatch pyramid or later filter sidecars; MiB, 0 - unlimited)")
+		("dmap-instrumentation-budget-policy", boost::program_options::value<std::string>(&OPT::strDMapInstrumentationBudgetPolicy)->default_value("degrade"), "behavior when an instrumentation budget is exceeded: degrade or error")
+#endif
 		("roi-border", boost::program_options::value(&OPT::fBorderROI)->default_value(0), "add a border to the region-of-interest when cropping the scene (0 - disabled, >0 - percentage, <0 - absolute)")
 		("estimate-roi", boost::program_options::value(&OPT::fScaleROI)->default_value(1.1f), "estimate and set region-of-interest, scale factor applied to the estimated extents (0 - disabled, <1 - shrink, >1 - expand)")
 		("roi-compat-23", boost::program_options::value(&OPT::bROICompat23)->default_value(false), "restore OpenMVS 2.3 adaptive ROI estimation and exact 1.0/0.7 neighbor weights")
@@ -254,6 +321,116 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	}
 	if (OPT::strInputFileName.empty())
 		return false;
+	if (nPatchMatchCUDAAPD > 2u) {
+		VERBOSE("error: --patch-match-cuda-apd must be 0, 1, or 2 (got %u)", nPatchMatchCUDAAPD);
+		return false;
+	}
+	MVS::CUDA::DVPConfig dvpConfig;
+	dvpConfig.family = nPatchMatchCUDADVPEpipolarFamily;
+	dvpConfig.alpha = fPatchMatchCUDADVPEpipolarAlpha;
+	dvpConfig.beta = fPatchMatchCUDADVPEpipolarBeta;
+	dvpConfig.mu = nPatchMatchCUDADVPEpipolarMu;
+	dvpConfig.searchRadius = nPatchMatchCUDADVPGlobalSearchRadius;
+	dvpConfig.reprojectionThreshold = fPatchMatchCUDADVPReprojectionThreshold;
+	dvpConfig.relativeDepthThreshold = fPatchMatchCUDADVPRelativeDepthThreshold;
+	const MVS::CUDA::DVPConfigStatus dvpStatus(MVS::CUDA::ValidateDVPConfig(dvpConfig));
+	if (dvpStatus != MVS::CUDA::DVPConfigStatus::VALID) {
+		VERBOSE("error: invalid CUDA DVP epipolar configuration (status %u)",
+			static_cast<unsigned>(dvpStatus));
+		return false;
+	}
+	if (MVS::CUDA::DVPEpipolarFamilyEnabled(dvpConfig.family) && nEstimationGeometricIters == 0u) {
+		VERBOSE("error: CUDA DVP epipolar proposals require --geometric-iters greater than zero");
+		return false;
+	}
+	const MVS::CUDA::DVPDepthEdgeConfig depthEdgeConfig{
+		nPatchMatchCUDADVPDepthEdgeMode,
+		nPatchMatchCUDAAPD != 0u,
+		!strPatchMatchCUDADVPDepthEdgePriorDir.empty(),
+	};
+	const MVS::CUDA::DVPDepthEdgeConfigStatus depthEdgeStatus(
+		MVS::CUDA::ValidateDVPDepthEdgeConfig(depthEdgeConfig));
+	if (depthEdgeStatus != MVS::CUDA::DVPDepthEdgeConfigStatus::VALID) {
+		VERBOSE("error: invalid CUDA DVP depth-edge configuration (status %u)",
+			static_cast<unsigned>(depthEdgeStatus));
+		return false;
+	}
+	if (MVS::CUDA::DVPDepthEdgeModeEnabled(nPatchMatchCUDADVPDepthEdgeMode) &&
+		!File::access(strPatchMatchCUDADVPDepthEdgePriorDir))
+	{
+		VERBOSE("error: CUDA DVP depth-edge prior directory does not exist: '%s'",
+			strPatchMatchCUDADVPDepthEdgePriorDir.c_str());
+		return false;
+	}
+	const MVS::CUDA::DVPVisibilityConfig visibilityConfig{
+		nPatchMatchCUDADVPVisibilityMode,
+		fPatchMatchCUDADVPVisibilityReprojectionThreshold,
+		fPatchMatchCUDADVPVisibilityRelativeDepthThreshold,
+		nPatchMatchCUDAAPD == static_cast<unsigned>(MVS::CUDA::APDMode::FULL),
+		nEstimationGeometricIters > 0u,
+	};
+	const MVS::CUDA::DVPVisibilityConfigStatus visibilityStatus(
+		MVS::CUDA::ValidateDVPVisibilityConfig(visibilityConfig));
+	if (visibilityStatus != MVS::CUDA::DVPVisibilityConfigStatus::VALID) {
+		VERBOSE("error: invalid CUDA DVP visibility configuration (status %u)",
+			static_cast<unsigned>(visibilityStatus));
+		return false;
+	}
+	const MVS::CUDA::DVPVisibleNormalConfig visibleNormalConfig{
+		nPatchMatchCUDADVPVisibleNormalMode,
+		fPatchMatchCUDADVPVisibleNormalDotTolerance,
+		nPatchMatchCUDADVPVisibleNormalAttempts,
+		nPatchMatchCUDAAPD == static_cast<unsigned>(MVS::CUDA::APDMode::FULL),
+	};
+	const MVS::CUDA::DVPVisibleNormalConfigStatus visibleNormalStatus(
+		MVS::CUDA::ValidateDVPVisibleNormalConfig(visibleNormalConfig));
+	if (visibleNormalStatus != MVS::CUDA::DVPVisibleNormalConfigStatus::VALID) {
+		VERBOSE("error: invalid CUDA DVP visible-normal configuration (status %u)",
+			static_cast<unsigned>(visibleNormalStatus));
+		return false;
+	}
+#ifdef _USE_DMAP_INSTRUMENTATION
+	{
+		const bool bDMapInstrumentation(!OPT::strDMapInstrumentationDir.empty());
+		const String level(OPT::strDMapInstrumentationLevel.ToLower());
+		if (bDMapInstrumentation && level != _T("summary") && level != _T("prefilter") && level != _T("debug") && level != _T("maps")) {
+			VERBOSE("error: invalid --dmap-instrumentation-level '%s' (expected summary, prefilter, debug, or maps)", OPT::strDMapInstrumentationLevel.c_str());
+			return false;
+		}
+		if (bDMapInstrumentation && level == _T("prefilter") && OPT::bDMapInstrumentationWriteMaps) {
+			VERBOSE("error: --dmap-instrumentation-level prefilter cannot be combined with --dmap-instrumentation-write-maps=1");
+			return false;
+		}
+		if (bDMapInstrumentation && (
+			!std::isfinite(OPT::fDMapInstrumentationSampleRate) ||
+			OPT::fDMapInstrumentationSampleRate < 0.f ||
+			OPT::fDMapInstrumentationSampleRate > 1.f))
+		{
+			VERBOSE("error: --dmap-instrumentation-sample-rate must be in [0,1] (got %.6f)", OPT::fDMapInstrumentationSampleRate);
+			return false;
+		}
+		const String budgetPolicy(OPT::strDMapInstrumentationBudgetPolicy.ToLower());
+		if (bDMapInstrumentation && budgetPolicy != _T("degrade") && budgetPolicy != _T("error")) {
+			VERBOSE("error: invalid --dmap-instrumentation-budget-policy '%s' (expected degrade or error)", OPT::strDMapInstrumentationBudgetPolicy.c_str());
+			return false;
+		}
+		if (!bDMapInstrumentation && (
+			!OPT::strDMapInstrumentationConfig.empty() ||
+			OPT::bDMapInstrumentationWriteMaps ||
+			!OPT::strDMapInstrumentationImageList.empty() ||
+			OPT::fDMapInstrumentationSampleRate != 1.f ||
+			OPT::nDMapInstrumentationSampleSeed != 0 ||
+			OPT::nDMapInstrumentationMaxDeviceMB != 2048 ||
+			OPT::nDMapInstrumentationMaxHostMB != 4096 ||
+			OPT::nDMapInstrumentationMaxFrameStorageMB != 4096 ||
+			budgetPolicy != _T("degrade") ||
+			level != _T("summary")))
+		{
+			VERBOSE("error: --dmap-instrumentation-dir is required when using depth-map instrumentation options");
+			return false;
+		}
+	}
+#endif
 
 	// initialize optional options
 	Util::ensureValidPath(OPT::strPointCloudFileName);
@@ -265,6 +442,10 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	Util::ensureValidPath(OPT::strExportROIFileName);
 	Util::ensureValidPath(OPT::strImportROIFileName);
 	Util::ensureValidPath(OPT::strCropROIFileName);
+#ifdef _USE_DMAP_INSTRUMENTATION
+	Util::ensureValidPath(OPT::strDMapInstrumentationConfig);
+	Util::ensureValidFolderPath(OPT::strDMapInstrumentationDir);
+#endif
 	if (OPT::strOutputFileName.empty())
 		OPT::strOutputFileName = Util::getFileFullName(OPT::strInputFileName) + _T("_dense.mvs");
 
@@ -283,6 +464,46 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	OPTDENSE::nEstimationIters = nEstimationIters;
 	OPTDENSE::nEstimationGeometricIters = nEstimationGeometricIters;
 	OPTDENSE::nPatchMatchCUDAInstances = nPatchMatchCUDAInstances;
+	OPTDENSE::nPatchMatchCUDAAPD = nPatchMatchCUDAAPD;
+	OPTDENSE::nPatchMatchCUDADVPEpipolarFamily = nPatchMatchCUDADVPEpipolarFamily;
+	OPTDENSE::fPatchMatchCUDADVPEpipolarAlpha = fPatchMatchCUDADVPEpipolarAlpha;
+	OPTDENSE::fPatchMatchCUDADVPEpipolarBeta = fPatchMatchCUDADVPEpipolarBeta;
+	OPTDENSE::nPatchMatchCUDADVPEpipolarMu = nPatchMatchCUDADVPEpipolarMu;
+	OPTDENSE::nPatchMatchCUDADVPGlobalSearchRadius = nPatchMatchCUDADVPGlobalSearchRadius;
+	OPTDENSE::fPatchMatchCUDADVPReprojectionThreshold = fPatchMatchCUDADVPReprojectionThreshold;
+	OPTDENSE::fPatchMatchCUDADVPRelativeDepthThreshold = fPatchMatchCUDADVPRelativeDepthThreshold;
+	OPTDENSE::nPatchMatchCUDADVPDepthEdgeMode = nPatchMatchCUDADVPDepthEdgeMode;
+	OPTDENSE::strPatchMatchCUDADVPDepthEdgePriorDir = strPatchMatchCUDADVPDepthEdgePriorDir;
+	OPTDENSE::nPatchMatchCUDADVPVisibilityMode = nPatchMatchCUDADVPVisibilityMode;
+	OPTDENSE::fPatchMatchCUDADVPVisibilityReprojectionThreshold =
+		fPatchMatchCUDADVPVisibilityReprojectionThreshold;
+	OPTDENSE::fPatchMatchCUDADVPVisibilityRelativeDepthThreshold =
+		fPatchMatchCUDADVPVisibilityRelativeDepthThreshold;
+	OPTDENSE::nPatchMatchCUDADVPVisibleNormalMode = nPatchMatchCUDADVPVisibleNormalMode;
+	OPTDENSE::fPatchMatchCUDADVPVisibleNormalDotTolerance =
+		fPatchMatchCUDADVPVisibleNormalDotTolerance;
+	OPTDENSE::nPatchMatchCUDADVPVisibleNormalAttempts = nPatchMatchCUDADVPVisibleNormalAttempts;
+#ifdef _USE_DMAP_INSTRUMENTATION
+	{
+		const bool bDMapInstrumentation(!OPT::strDMapInstrumentationDir.empty());
+		const String level(OPT::strDMapInstrumentationLevel.ToLower());
+		OPTDENSE::nPatchMatchInstrumentLevel = !bDMapInstrumentation ? 0u :
+			(level == _T("maps") || level == _T("debug")) ? 2u : 1u;
+		OPTDENSE::strPatchMatchInstrumentConfig = OPT::strDMapInstrumentationConfig;
+		OPTDENSE::strPatchMatchInstrumentOutput = OPT::strDMapInstrumentationDir;
+		OPTDENSE::strDMapInstrumentationDir = OPT::strDMapInstrumentationDir;
+		OPTDENSE::strDMapInstrumentationLevel = OPT::strDMapInstrumentationLevel;
+		OPTDENSE::fDMapInstrumentationSampleRate = OPT::fDMapInstrumentationSampleRate;
+		OPTDENSE::nDMapInstrumentationSampleSeed = OPT::nDMapInstrumentationSampleSeed;
+		OPTDENSE::strDMapInstrumentationImageList = OPT::strDMapInstrumentationImageList;
+		OPTDENSE::bDMapInstrumentationWriteMaps =
+			bDMapInstrumentation && (OPT::bDMapInstrumentationWriteMaps || level == _T("maps"));
+		OPTDENSE::nDMapInstrumentationMaxDeviceMB = OPT::nDMapInstrumentationMaxDeviceMB;
+		OPTDENSE::nDMapInstrumentationMaxHostMB = OPT::nDMapInstrumentationMaxHostMB;
+		OPTDENSE::nDMapInstrumentationMaxFrameStorageMB = OPT::nDMapInstrumentationMaxFrameStorageMB;
+		OPTDENSE::strDMapInstrumentationBudgetPolicy = OPT::strDMapInstrumentationBudgetPolicy;
+	}
+#endif
 	if (nDMapIntermediateFloatComponents > 3) {
 		VERBOSE("error: invalid --dmap-intermediate-float-components %u (expected 0..3)", nDMapIntermediateFloatComponents);
 		return false;

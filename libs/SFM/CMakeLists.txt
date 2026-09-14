@@ -17,7 +17,13 @@ ENDIF()
 
 IF(TinyNPY_FOUND)
 	MESSAGE(STATUS "TinyNPY found via CMake config")
-	LIST(APPEND SFM_EXTRA_LIBS TinyNPY::TinyNPY)
+	IF(TARGET TinyNPY::TinyNPY)
+		LIST(APPEND SFM_EXTRA_LIBS TinyNPY::TinyNPY)
+	ELSEIF(TARGET TinyNPYstatic)
+		LIST(APPEND SFM_EXTRA_LIBS TinyNPYstatic)
+	ELSE()
+		MESSAGE(FATAL_ERROR "TinyNPY config was found but no known TinyNPY target was exported.")
+	ENDIF()
 ELSE()
 	MESSAGE(FATAL_ERROR "TinyNPY not found. Install tinynpy via vcpkg (it's listed in vcpkg.json).")
 ENDIF()
@@ -80,4 +86,3 @@ INSTALL(TARGETS SFM
 	ARCHIVE DESTINATION "${INSTALL_LIB_DIR}"
 	RUNTIME DESTINATION "${INSTALL_BIN_DIR}"
 	PUBLIC_HEADER DESTINATION "${INSTALL_INCLUDE_DIR}/SFM")
-

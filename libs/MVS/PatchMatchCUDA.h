@@ -48,6 +48,13 @@
 
 namespace MVS {
 
+namespace CUDA {
+
+// Load a DVP region-label image without losing the 16-bit label identity.
+MVS_API bool LoadDVPDepthEdgeLabelMap(const String& fileName, Image16U& labels);
+
+} // namespace CUDA
+
 /**
  * @brief Propagate and refine the depth/normal estimate for a single pixel.
  *

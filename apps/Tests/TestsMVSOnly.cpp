@@ -28,7 +28,12 @@ int main()
 	OPEN_LOG();
 	OPEN_LOGCONSOLE();
 	Initialize(APPNAME);
-	const bool success = MVS::ConfidenceCompat23Test() && MVS::DMapCompat23Test();
+	const bool success = MVS::ConfidenceCompat23Test() && MVS::DMapCompat23Test()
+		&& MVS::AdaptivePatchDeformationContractTest()
+		&& MVS::DepthVariationProposalContractTest()
+		&& MVS::DVPDepthEdgePriorContractTest()
+		&& MVS::DVPVisibilityContractTest()
+		&& MVS::DVPVisibleNormalContractTest();
 	Finalize();
 	CLOSE_LOGCONSOLE();
 	CLOSE_LOG();
