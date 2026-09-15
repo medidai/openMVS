@@ -21,6 +21,12 @@ SPEC.loader.exec_module(CHECKER)
 
 
 class PublicTreePolicyTests(unittest.TestCase):
+	def test_frozen_apd_references_are_reachable_in_branch_history(self) -> None:
+		for ref in (CHECKER.APD_DVP_PUBLIC_BASE, CHECKER.APD_DVP_SOURCE_BASE):
+			with self.subTest(ref=ref):
+				result = subprocess.run(["git", "merge-base", "--is-ancestor", ref, "HEAD"], cwd=REPO_ROOT)
+				self.assertEqual(result.returncode, 0, "Publication references must survive a full clone of this branch")
+
 	def test_apd_profile_has_explicit_additional_source_scope(self) -> None:
 		for path in CHECKER.APD_DVP_PATHS:
 			self.assertTrue(CHECKER._is_allowed_path(path, "apd-dvp"), path)

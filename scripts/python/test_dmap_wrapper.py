@@ -233,7 +233,7 @@ class DMapWrapperTests(unittest.TestCase):
             result = run_wrapper("doctor", env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("ok: public-tree publication guard", result.stdout)
-            observer = run_wrapper("doctor", "--public-profile", "observer", "--public-base", "b522455b5081da778ae723af3db30afb58459158", env=env)
+            observer = run_wrapper("doctor", "--public-profile", "observer", "--public-base", "24c48266e1f4770feaa1b7e89186cd9f816e927d", env=env)
             self.assertNotEqual(observer.returncode, 0)
             self.assertIn("outside the public allowlist", observer.stderr)
             missing = run_wrapper("doctor", "--public-base", "refs/heads/missing-publication-reference", env=env)

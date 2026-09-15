@@ -52,8 +52,8 @@ EXACT_PATHS = {
 
 # The algorithm branch has a different source contract from observer-only work.
 # Freeze both references: comparing core code to moving HEAD would hide drift.
-APD_DVP_PUBLIC_BASE = "b522455b5081da778ae723af3db30afb58459158"
-APD_DVP_SOURCE_BASE = "14cd4916104fc54d00d4aa556d4b517289843b8b"
+APD_DVP_PUBLIC_BASE = "24c48266e1f4770feaa1b7e89186cd9f816e927d"
+APD_DVP_SOURCE_BASE = "a36980e874b6f067b1df3f13411c13c8bb338151"
 APD_DVP_PATHS = {
 	"apps/Tests/Tests.cpp",
 	"apps/Tests/TestsMVS.cpp",

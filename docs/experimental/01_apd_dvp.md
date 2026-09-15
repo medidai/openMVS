@@ -80,8 +80,11 @@ or image support and attribute the difference solely to APD/DVP.
 - The comparison measures APD plus retained DVP against native, not the isolated
   contribution of DVP. Private inputs, measurements, generated evidence and
   binaries are intentionally not distributed in this source branch.
-- Source ancestry is the tested stabilization tip, not the newest develop.
-  Integrating subsequent upstream changes requires separate validation.
+- History was rebased onto Medida `develop` at
+  `610eae6933a6c4908ac507e9acab494a44330923` on September 15, 2026, retaining the
+  newer upstream OpenMVS 2.4 commits and stabilized feature base. The rebase
+  preserves the published CUDA/C++ algorithm source; it is not a new quality
+  experiment. Integrating subsequent changes requires separate validation.
 - Publication preserves the base's container-memory-limit handling, which was
   absent from the development source snapshot. APD/DVP numerical code is
   unchanged; the published build has not received a new full-scene GPU run.

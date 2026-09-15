@@ -43,8 +43,6 @@ __pycache__/
 out/
 bin*/
 make*/
-tmp/
-build/
 build-*/
 bench*/
 tmp/

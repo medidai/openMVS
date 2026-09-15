@@ -136,7 +136,7 @@ EOF
   done
 
   case "${public_profile}" in
-    apd-dvp) public_base="${public_base:-b522455b5081da778ae723af3db30afb58459158}" ;;
+    apd-dvp) public_base="${public_base:-24c48266e1f4770feaa1b7e89186cd9f816e927d}" ;;
     observer) public_base="${public_base:-origin/develop}" ;;
     *) fail "unknown publication profile: ${public_profile}" ;;
   esac

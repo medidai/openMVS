@@ -63,9 +63,10 @@ Doctor does not modify the repository.
 
 On this algorithm branch, `doctor` selects the `apd-dvp` publication profile.
 It checks source-only contents against the frozen stabilization base
-`b522455b5081da778ae723af3db30afb58459158`, and compares observer-disabled core
+`24c48266e1f4770feaa1b7e89186cd9f816e927d`, and compares observer-disabled core
 source against the reviewed APD/DVP snapshot
-`14cd4916104fc54d00d4aa556d4b517289843b8b`. The only additional accepted core
+`a36980e874b6f067b1df3f13411c13c8bb338151`. These are the corresponding frozen
+references after rebasing onto Medida develop on September 15, 2026. The only additional accepted core
 delta is the APD configuration-description correction. Both commits must be
 available locally; use a full Git clone or fetch the missing history if a
 shallow checkout reports missing references. The comparison is not against
