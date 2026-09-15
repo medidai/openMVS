@@ -228,95 +228,6 @@ Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5&
 #define CV_WRAP_SAME_PROPERTY_S(type, name, internal_obj) CV_WRAP_PROPERTY_S(type, name, name, internal_obj)
 #endif
 
-//! copy every second source image element to the destination image
-inline void downsample2x(InputArray _src, OutputArray _dst)
-{
-	Mat src(_src.getMat());
-	#if 1
-	_dst.create((src.rows+1)/2, (src.cols+1)/2, src.type());
-	#else
-	if (_dst.empty()) {
-		// create a new matrix
-		_dst.create(src.rows/2, src.cols/2, src.type());
-	} else {
-		// overwrite elements in the existing matrix
-		ASSERT(src.rows > 0 && (unsigned)(src.rows-_dst.size().height*2) <= 1);
-		ASSERT(src.cols > 0 && (unsigned)(src.cols-_dst.size().width*2) <= 1);
-		ASSERT(src.type() == _dst.type());
-	}
-	#endif
-	Mat dst(_dst.getMat());
-	ASSERT(src.elemSize() == dst.elemSize());
-	switch (src.elemSize()) {
-	case 1:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				dst.at<uint8_t>(i,j) = src.at<uint8_t>(2*i,2*j);
-		break;
-	case 2:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				dst.at<uint16_t>(i,j) = src.at<uint16_t>(2*i,2*j);
-		break;
-	case 4:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				dst.at<float>(i,j) = src.at<float>(2*i,2*j);
-		break;
-	case 8:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				dst.at<double>(i,j) = src.at<double>(2*i,2*j);
-		break;
-	default:
-		for (int i=0; i<dst.rows; ++i)
-			for (int j=0; j<dst.cols; ++j)
-				memcpy(dst.ptr(i,j), src.ptr(2*i,2*j), src.elemSize());
-	}
-}
-//! copy elements of source image to the 2 x position in the destination image
-inline void upsample2x(InputArray _src, OutputArray _dst)
-{
-	Mat src(_src.getMat());
-	if (_dst.empty()) {
-		// create a new matrix
-		_dst.create(src.rows*2, src.cols*2, src.type());
-	} else {
-		// overwrite only new elements in the existing matrix
-		ASSERT(src.rows > 0 && src.rows*2-1 <= _dst.size().height);
-		ASSERT(src.cols > 0 && src.cols*2-1 <= _dst.size().width);
-		ASSERT(src.type() == _dst.type());
-	}
-	Mat dst(_dst.getMat());
-	ASSERT(src.elemSize() == dst.elemSize());
-	switch (src.elemSize()) {
-	case 1:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				dst.at<uint8_t>(2*i,2*j) = src.at<uint8_t>(i,j);
-		break;
-	case 2:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				dst.at<uint16_t>(2*i,2*j) = src.at<uint16_t>(i,j);
-		break;
-	case 4:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				dst.at<float>(2*i,2*j) = src.at<float>(i,j);
-		break;
-	case 8:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				dst.at<double>(2*i,2*j) = src.at<double>(i,j);
-		break;
-	default:
-		for (int i=0; i<src.rows; ++i)
-			for (int j=0; j<src.cols; ++j)
-				memcpy(dst.ptr(2*i,2*j), src.ptr(i,j), src.elemSize());
-	}
-}
-
 } // namespace cv
 
 
@@ -1429,46 +1340,6 @@ inline TPoint3<TTO> cvtPoint3(const TPoint3<TFROM>& p) {
 	return TPoint3<TTO>(TTO(p.x), TTO(p.y), TTO(p.z));
 }
 
-// TPixel operators
-template <typename TYPE>
-inline TPixel<TYPE> operator/(const TPixel<TYPE>& pt0, const TPixel<TYPE>& pt1) {
-	return TPixel<TYPE>(pt0.r/pt1.r, pt0.g/pt1.g, pt0.b/pt1.b);
-}
-template <typename TYPE>
-inline TPixel<TYPE>& operator/=(TPixel<TYPE>& pt0, const TPixel<TYPE>& pt1) {
-	pt0.r/=pt1.r; pt0.g/=pt1.g; pt0.b/=pt1.b;
-	return pt0;
-}
-template <typename TYPE>
-inline TPixel<TYPE> operator*(const TPixel<TYPE>& pt0, const TPixel<TYPE>& pt1) {
-	return TPixel<TYPE>(pt0.r*pt1.r, pt0.g*pt1.g, pt0.b*pt1.b);
-}
-template <typename TYPE>
-inline TPixel<TYPE>& operator*=(TPixel<TYPE>& pt0, const TPixel<TYPE>& pt1) {
-	pt0.r*=pt1.r; pt0.g*=pt1.g; pt0.b*=pt1.b;
-	return pt0;
-}
-
-// TColor operators
-template <typename TYPE>
-inline TColor<TYPE> operator/(const TColor<TYPE>& pt0, const TColor<TYPE>& pt1) {
-	return TColor<TYPE>(pt0.r/pt1.r, pt0.g/pt1.g, pt0.b/pt1.b, pt0.a/pt1.a);
-}
-template <typename TYPE>
-inline TColor<TYPE>& operator/=(TColor<TYPE>& pt0, const TColor<TYPE>& pt1) {
-	pt0.r/=pt1.r; pt0.g/=pt1.g; pt0.b/=pt1.b; pt0.a/=pt1.a;
-	return pt0;
-}
-template <typename TYPE>
-inline TColor<TYPE> operator*(const TColor<TYPE>& pt0, const TColor<TYPE>& pt1) {
-	return TColor<TYPE>(pt0.r*pt1.r, pt0.g*pt1.g, pt0.b*pt1.b, pt0.a*pt1.a);
-}
-template <typename TYPE>
-inline TColor<TYPE>& operator*=(TColor<TYPE>& pt0, const TColor<TYPE>& pt1) {
-	pt0.r*=pt1.r; pt0.g*=pt1.g; pt0.b*=pt1.b; pt0.a*=pt1.a;
-	return pt0;
-}
-
 // TMatrix operators
 template <typename TYPE, int m, int n>
 inline TMatrix<TYPE,m,n> operator + (const TMatrix<TYPE,m,n>& m1, const TMatrix<TYPE,m,n>& m2) {
@@ -1503,6 +1374,22 @@ inline TMatrix<TYPE,m,n> operator - (const TMatrix<TYPE,m,n>& M) {
 template <typename TYPE, int m, int l, int n>
 inline TMatrix<TYPE,m,n> operator * (const TMatrix<TYPE,m,l>& m1, const TMatrix<TYPE,l,n>& m2) {
 	return TMatrix<TYPE,m,n>(m1, m2, cv::Matx_MatMulOp());
+}
+
+// TMatrix matrix-point multiplication (only for 3x3 matrices)
+template <typename TYPE, int m, int n, typename TYPE2>
+inline typename std::enable_if<m == 3 && n == 3, TPoint3<TYPE2>>::type operator *(const TMatrix<TYPE,m,n>& M, const TPoint3<TYPE2>& p) {
+	return TPoint3<TYPE2>(
+		M.val[0*3+0]*p.x + M.val[0*3+1]*p.y + M.val[0*3+2]*p.z,
+		M.val[1*3+0]*p.x + M.val[1*3+1]*p.y + M.val[1*3+2]*p.z,
+		M.val[2*3+0]*p.x + M.val[2*3+1]*p.y + M.val[2*3+2]*p.z);
+}
+template <typename TYPE, int m, int n, typename TYPE2>
+inline typename std::enable_if<m == 3 && n == 3, TPoint3<TYPE2>>::type operator *(const TMatrix<TYPE,m,n>& M, const TPoint2<TYPE2>& p) {
+	return TPoint3<TYPE2>(
+		M.val[0*3+0]*p.x + M.val[0*3+1]*p.y + M.val[0*3+2],
+		M.val[1*3+0]*p.x + M.val[1*3+1]*p.y + M.val[1*3+2],
+		M.val[2*3+0]*p.x + M.val[2*3+1]*p.y + M.val[2*3+2]);
 }
 
 template <typename TYPE, int m, int n, typename TYPE2>
@@ -1631,6 +1518,33 @@ namespace SEACAVE {
 
 namespace CONVERT {
 
+// convert HSV to RGB color
+static Pixel32F HSV2RGB(const Pixel32F& hsv) {
+	// asserts inputs are in range: h in [0,360), s in [0,1], v in [0,1]
+	float hue = hsv.r, saturation = hsv.g, value = hsv.b;
+	ASSERT((hue >= 0.f && hue < 360.f) && (saturation >= 0.f && saturation <= 1.f) && (value >= 0.f && value <= 1.f));
+
+	float c = value * saturation; // chroma
+	float x = c * (1 - std::fabs(std::fmod(hue / 60.f, 2.f) - 1));
+	float m = value - c;
+
+	Pixel32F rgb;
+	if (hue < 60) {
+		rgb.r = c; rgb.g = x; rgb.b = 0;
+	} else if (hue < 120) {
+		rgb.r = x; rgb.g = c; rgb.b = 0;
+	} else if (hue < 180) {
+		rgb.r = 0; rgb.g = c; rgb.b = x;
+	} else if (hue < 240) {
+		rgb.r = 0; rgb.g = x; rgb.b = c;
+	} else if (hue < 300) {
+		rgb.r = x; rgb.g = 0; rgb.b = c;
+	} else {
+		rgb.r = c; rgb.g = 0; rgb.b = x;
+	}
+	return rgb + m;
+}
+
 // convert sRGB to/from linear value
 // (see http://en.wikipedia.org/wiki/SRGB)
 template <typename T>
@@ -1749,6 +1663,14 @@ template <typename FLT1, typename FLT2, int m, int n>
 inline TMatrix<FLT1,m,n> Cast(const TMatrix<FLT2,m,n>& v) {
 	return v;
 }
+/*----------------------------------------------------------------*/
+
+
+// C L A S S  //////////////////////////////////////////////////////
+
+template <typename TYPE, typename ACCUMTYPE, typename WEIGHTTYPE>
+TAccumulator<TYPE,ACCUMTYPE,WEIGHTTYPE>::TAccumulator()
+	: value(INITTO(static_cast<TYPE*>(NULL), 0)), weight(0), count(0) {}
 /*----------------------------------------------------------------*/
 
 
@@ -2414,7 +2336,7 @@ template <typename TYPE>
 template <typename SAMPLER, typename INTERTYPE>
 INTERTYPE TImage<TYPE>::sample(const SAMPLER& sampler, const TPoint2<typename SAMPLER::Type>& pt) const
 {
-	return Sampler::Sample< TImage<TYPE>, SAMPLER, TPoint2<typename SAMPLER::Type>, INTERTYPE >(*this, sampler, pt);
+	return Sampler::Sample< TYPE, INTERTYPE, TImage<TYPE>, SAMPLER, TPoint2<typename SAMPLER::Type> >(*this, sampler, pt);
 }
 
 // convert color image to gray
@@ -3019,11 +2941,10 @@ void TImage<TYPE>::DilateMean(TImage<TYPE>& dst, const TYPE& invalid) const
 /*----------------------------------------------------------------*/
 
 
-template <typename TYPE>
-bool TImage<TYPE>::Load(const String& fileName)
+static bool LoadImage(const String& fileName, cv::Mat& img, int expectedChannels = -1, int expectedDepth = -1)
 {
 	if (Util::getFileExt(fileName).ToLower() == ".pfm") {
-		if (Base::depth() != CV_32F)
+		if (expectedDepth != -1 && expectedDepth != CV_32F)
 			return false;
 		File fImage(fileName, File::READ, File::OPEN);
 		if (!fImage.isOpen())
@@ -3069,44 +2990,50 @@ bool TImage<TYPE>::Load(const String& fileName)
 		ASSERT(!bLittleEndian);
 		#endif
 		const int nChannels(bLittleEndian ? -((int)sc) : (int)sc);
-		if (nChannels != Base::channels())
+		if (expectedChannels != -1 && nChannels != expectedChannels)
 			return false;
-		Base::create(h, w);
-		ASSERT(sizeof(float)*Base::channels() == Base::step.p[1]);
-		const size_t rowbytes((size_t)Base::size.p[1]*Base::step.p[1]);
-		for (int i=rows; i>0; )
-			if (fImage.read(cv::Mat::template ptr<float>(--i), rowbytes) != rowbytes)
+		img.create(h, w, CV_MAKETYPE(CV_32F, nChannels));
+		ASSERT(sizeof(float)*nChannels == img.step.p[1]);
+		const size_t rowbytes((size_t)img.cols*img.step.p[1]);
+		for (int i=img.rows; i>0; )
+			if (fImage.read(img.ptr<float>(--i), rowbytes) != rowbytes)
 				return false;
 		return true;
 	}
-	cv::Mat img(cv::imread(fileName, cv::IMREAD_UNCHANGED));
+	img = cv::imread(fileName, expectedChannels == 1 ? cv::IMREAD_GRAYSCALE : cv::IMREAD_UNCHANGED);
 	if (img.empty()) {
 		VERBOSE("error: loading image '%s'", fileName.c_str());
 		return false;
 	}
-	if (img.channels() != Base::channels()) {
-		if (img.channels() == 3 && Base::channels() == 1)
+	if (expectedChannels != -1 && img.channels() != expectedChannels) {
+		if (img.channels() == 3 && expectedChannels == 1)
 			cv::cvtColor(img, img, cv::COLOR_BGR2GRAY);
-		else if (img.channels() == 1 && Base::channels() == 3)
+		else if (img.channels() == 1 && expectedChannels == 3)
 			cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
-		else if (img.channels() == 4 && Base::channels() == 1)
+		else if (img.channels() == 4 && expectedChannels == 1)
 			cv::cvtColor(img, img, cv::COLOR_BGRA2GRAY);
-		else if (img.channels() == 1 && Base::channels() == 4)
+		else if (img.channels() == 1 && expectedChannels == 4)
 			cv::cvtColor(img, img, cv::COLOR_GRAY2BGRA);
-		else if (img.channels() == 4 && Base::channels() == 3)
+		else if (img.channels() == 4 && expectedChannels == 3)
 			cv::cvtColor(img, img, cv::COLOR_BGRA2BGR);
 	}
-	if (img.type() == Base::type())
-		cv::swap(img, *this);
-	else
-		img.convertTo(*this, Base::type());
+	if (expectedDepth != -1 && img.depth() != expectedDepth)
+		img.convertTo(img, expectedDepth);
 	return true;
+}
+template <typename TYPE>
+bool TImage<TYPE>::Load(const String& fileName)
+{
+	return LoadImage(fileName, *this, Base::channels(), Base::depth());
 }
 /*----------------------------------------------------------------*/
 
-template <typename TYPE>
-bool TImage<TYPE>::Save(const String& fileName) const
+static bool SaveImage(const cv::Mat& img, const String& fileName)
 {
+	if (img.dims != 2) {
+		VERBOSE("error: only 2D images can be saved");
+		return false;
+	}
 	std::vector<int> compression_params;
 	const String ext(Util::getFileExt(fileName).ToLower());
 	if (ext == ".png") {
@@ -3124,7 +3051,7 @@ bool TImage<TYPE>::Save(const String& fileName) const
 	} else
 #endif
 	if (ext == ".pfm") {
-		if (Base::depth() != CV_32F)
+		if (img.depth() != CV_32F)
 			return false;
 		Util::ensureFolder(fileName);
 		File fImage(fileName, File::WRITE, File::CREATE | File::TRUNCATE);
@@ -3136,16 +3063,15 @@ bool TImage<TYPE>::Save(const String& fileName) const
 		#else
 		static const double scale(1.0);
 		#endif
-		fImage.print("Pf\n%d %d\n%lf\n", width(), height(), scale*Base::channels());
-		ASSERT(sizeof(float)*Base::channels() == Base::step.p[1]);
-		const size_t rowbytes = (size_t)Base::size.p[1]*Base::step.p[1];
-		for (int i=rows; i>0; )
-			fImage.write(cv::Mat::template ptr<const float>(--i), rowbytes);
+		fImage.print("Pf\n%d %d\n%lf\n", img.cols, img.rows, scale*img.channels());
+		ASSERT(sizeof(float)*img.channels() == img.step.p[1]);
+		const size_t rowbytes = (size_t)img.cols*img.step.p[1];
+		for (int i=img.rows; i>0; )
+			fImage.write(img.ptr<const float>(--i), rowbytes);
 		return true;
 	}
-
 	try {
-		if (!cv::imwrite(fileName, *this, compression_params)) {
+		if (!cv::imwrite(fileName, img, compression_params)) {
 			VERBOSE("error: saving image '%s'", fileName.c_str());
 			return false;
 		}
@@ -3155,6 +3081,11 @@ bool TImage<TYPE>::Save(const String& fileName) const
 		return false;
 	}
 	return true;
+}
+template <typename TYPE>
+bool TImage<TYPE>::Save(const String& fileName) const
+{
+	return SaveImage(*this, fileName);
 }
 /*----------------------------------------------------------------*/
 
@@ -3457,251 +3388,6 @@ TYPE InvertMatrix3x3(const TYPE* m, TYPE* mi) {
 
 // C L A S S  //////////////////////////////////////////////////////
 
-#ifdef _USE_EIGEN
-
-///Compute a rotation exponential using the Rodrigues Formula.
-///The rotation axis is given by \f$\vec{w}\f$, and the rotation angle must
-///be computed using \f$ \theta = |\vec{w}|\f$. This is provided as a separate
-///function primarily to allow fast and rough matrix exponentials using fast
-///and rough approximations to \e A and \e B.
-///
-///@param w Vector about which to rotate.
-///@param A \f$\frac{\sin \theta}{\theta}\f$
-///@param B \f$\frac{1 - \cos \theta}{\theta^2}\f$
-///@param R Matrix to hold the return value.
-///@relates SO3
-template <typename Precision>
-inline void eigen_SO3_exp(const typename Eigen::SO3<Precision>::Vec3& w, typename Eigen::SO3<Precision>::Mat3& R) {
-	static const Precision one_6th(1.0/6.0);
-	static const Precision one_20th(1.0/20.0);
-	//Use a Taylor series expansion near zero. This is required for
-	//accuracy, since sin t / t and (1-cos t)/t^2 are both 0/0.
-	Precision A, B;
-	const Precision theta_sq(w.squaredNorm());
-	if (theta_sq < Precision(1e-8)) {
-		A = Precision(1) - one_6th * theta_sq;
-		B = Precision(0.5);
-	} else {
-		if (theta_sq < Precision(1e-6)) {
-			B = Precision(0.5) - Precision(0.25) * one_6th * theta_sq;
-			A = Precision(1) - theta_sq * one_6th*(Precision(1) - one_20th * theta_sq);
-		} else {
-			const Precision theta(sqrt(theta_sq));
-			const Precision inv_theta(Precision(1)/theta);
-			A = sin(theta) * inv_theta;
-			B = (Precision(1) - cos(theta)) * (inv_theta * inv_theta);
-		}
-	}
-	{
-	const Precision wx2(w(0)*w(0));
-	const Precision wy2(w(1)*w(1));
-	const Precision wz2(w(2)*w(2));
-	R(0,0) = Precision(1) - B*(wy2 + wz2);
-	R(1,1) = Precision(1) - B*(wx2 + wz2);
-	R(2,2) = Precision(1) - B*(wx2 + wy2);
-	}
-	{
-	const Precision a(A*w[2]);
-	const Precision b(B*(w[0]*w[1]));
-	R(0,1) = b - a;
-	R(1,0) = b + a;
-	}
-	{
-	const Precision a(A*w[1]);
-	const Precision b(B*(w[0]*w[2]));
-	R(0,2) = b + a;
-	R(2,0) = b - a;
-	}
-	{
-	const Precision a(A*w[0]);
-	const Precision b(B*(w[1]*w[2]));
-	R(1,2) = b - a;
-	R(2,1) = b + a;
-	}
-}
-template <typename Precision>
-inline typename Eigen::SO3<Precision>::Mat3 Eigen::SO3<Precision>::exp(const Vec3& w) const {
-	Mat3 result;
-	eigen_SO3_exp<Precision>(w, result);
-	return result;
-}
-
-/// Take the logarithm of the matrix, generating the corresponding vector in the Lie Algebra.
-/// See the Detailed Description for details of this vector.
-template <typename Precision>
-inline void eigen_SO3_ln(const typename Eigen::SO3<Precision>::Mat3& R, typename Eigen::SO3<Precision>::Vec3& w) {
-	const Precision cos_angle((R(0,0) + R(1,1) + R(2,2) - Precision(1)) * Precision(0.5));
-	w(0) = (R(2,1)-R(1,2))*Precision(0.5);
-	w(1) = (R(0,2)-R(2,0))*Precision(0.5);
-	w(2) = (R(1,0)-R(0,1))*Precision(0.5);
-
-	const Precision sin_angle_abs(sqrt(w.squaredNorm()));
-	if (cos_angle > Precision(M_SQRT1_2)) {           // [0 - Pi/4] use asin
-		if (sin_angle_abs > Precision(0))
-			w *= asin(sin_angle_abs) / sin_angle_abs;
-	} else if (cos_angle > Precision(-M_SQRT1_2)) {   // [Pi/4 - 3Pi/4] use acos, but antisymmetric part
-		if (sin_angle_abs > Precision(0))
-			w *= acos(cos_angle) / sin_angle_abs;
-	} else {                                       // rest use symmetric part
-		// antisymmetric part vanishes, but still large rotation, need information from symmetric part
-		const Precision angle(Precision(M_PI) - asin(sin_angle_abs));
-		const Precision d0(R(0,0) - cos_angle);
-		const Precision d1(R(1,1) - cos_angle);
-		const Precision d2(R(2,2) - cos_angle);
-		typename Eigen::SO3<Precision>::Vec3 r2;
-		if (d0*d0 > d1*d1 && d0*d0 > d2*d2) {      // first is largest, fill with first column
-			r2(0) = d0;
-			r2(1) = (R(1,0)+R(0,1))*Precision(0.5);
-			r2(2) = (R(0,2)+R(2,0))*Precision(0.5);
-		} else if (d1*d1 > d2*d2) {                // second is largest, fill with second column
-			r2(0) = (R(1,0)+R(0,1))*Precision(0.5);
-			r2(1) = d1;
-			r2(2) = (R(2,1)+R(1,2))*Precision(0.5);
-		} else {                                   // third is largest, fill with third column
-			r2(0) = (R(0,2)+R(2,0))*Precision(0.5);
-			r2(1) = (R(2,1)+R(1,2))*Precision(0.5);
-			r2(2) = d2;
-		}
-		// flip, if we point in the wrong direction!
-		if (r2.dot(w) < Precision(0))
-			r2 *= Precision(-1);
-		w = r2 * (angle/r2.norm());
-	}
-}
-template <typename Precision>
-inline typename Eigen::SO3<Precision>::Vec3 Eigen::SO3<Precision>::ln() const {
-	Vec3 result;
-	eigen_SO3_ln<Precision>(mat, result);
-	return result;
-}
-
-/// Write an SO3 to a stream
-/// @relates SO3
-template <typename Precision>
-inline std::ostream& operator<<(std::ostream& os, const Eigen::SO3<Precision>& rhs) {
-	return os << rhs.get_matrix();
-}
-/// Read from SO3 to a stream
-/// @relates SO3
-template <typename Precision>
-inline std::istream& operator>>(std::istream& is, Eigen::SO3<Precision>& rhs) {
-	is >> rhs.mat;
-	rhs.coerce();
-	return is;
-}
-
-/// Right-multiply by a Vector
-/// @relates SO3
-template <typename P, int O>
-inline Eigen::Matrix<P,3,1,O> operator*(const Eigen::SO3<P>& lhs, const Eigen::Matrix<P,3,1,O>& rhs) {
-	return lhs.get_matrix() * rhs;
-}
-/// Left-multiply by a Vector
-/// @relates SO3
-template <typename P, int O>
-inline Eigen::Matrix<P,3,1,O> operator*(const Eigen::Matrix<P,3,1,O>& lhs, const Eigen::SO3<P>& rhs) {
-	return lhs * rhs.get_matrix();
-}
-/// Right-multiply by a matrix
-/// @relates SO3
-template <typename P, int C, int O>
-inline Eigen::Matrix<P,3,C,O> operator*(const Eigen::SO3<P>& lhs, const Eigen::Matrix<P,3,C,O>& rhs) {
-	return lhs.get_matrix() * rhs;
-}
-/// Left-multiply by a matrix
-/// @relates SO3
-template <typename P, int R, int O>
-inline Eigen::Matrix<P,R,3,O> operator*(const Eigen::Matrix<P,R,3,O>& lhs, const Eigen::SO3<P>& rhs) {
-	return lhs * rhs.get_matrix();
-}
-/*----------------------------------------------------------------*/
-
-
-/// Exponentiate an angle in the Lie algebra to generate a new SO2.
-template <typename Precision>
-inline void eigen_SO2_exp(const Precision& d, typename Eigen::SO2<Precision>::Mat2& R) {
-	R(0,0) = R(1,1) = cos(d);
-	R(1,0) = sin(d);
-	R(0,1) = -R(1,0);
-}
-template <typename Precision>
-inline typename Eigen::SO2<Precision>::Mat2 Eigen::SO2<Precision>::exp(const Precision& d) const {
-	Mat2 result;
-	eigen_SO2_exp<Precision>(d, result);
-	return result;
-}
-
-/// Extracts the rotation angle from the SO2
-template <typename Precision>
-inline void eigen_SO2_ln(const typename Eigen::SO2<Precision>::Mat2& R, Precision& d) {
-	d = atan2(R(1,0), R(0,0));
-}
-template <typename Precision>
-inline Precision Eigen::SO2<Precision>::ln() const {
-	Precision d;
-	eigen_SO2_ln<Precision>(mat, d);
-	return d;
-}
-
-/// Write an SO2 to a stream
-/// @relates SO2
-template <typename Precision>
-inline std::ostream& operator<<(std::ostream& os, const Eigen::SO2<Precision> & rhs) {
-	return os << rhs.get_matrix();
-}
-/// Read from SO2 to a stream
-/// @relates SO2
-template <typename Precision>
-inline std::istream& operator>>(std::istream& is, Eigen::SO2<Precision>& rhs) {
-	is >> rhs.mat;
-	rhs.coerce();
-	return is;
-}
-
-/// Right-multiply by a Vector
-/// @relates SO2
-template <typename P, int O>
-inline Eigen::Matrix<P,2,1,O> operator*(const Eigen::SO2<P>& lhs, const Eigen::Matrix<P,2,1,O>& rhs) {
-	return lhs.get_matrix() * rhs;
-}
-/// Left-multiply by a Vector
-/// @relates SO2
-template <typename P, int O>
-inline Eigen::Matrix<P,2,1,O> operator*(const Eigen::Matrix<P,2,1,O>& lhs, const Eigen::SO2<P>& rhs) {
-	return lhs * rhs.get_matrix();
-}
-/// Right-multiply by a Matrix
-/// @relates SO2
-template <typename P, int C, int O>
-inline Eigen::Matrix<P,2,C,O> operator*(const Eigen::SO2<P>& lhs, const Eigen::Matrix<P,2,C,O>& rhs) {
-	return lhs.get_matrix() * rhs;
-}
-/// Left-multiply by a Matrix
-/// @relates SO2
-template <typename P, int R, int O>
-inline Eigen::Matrix<P,R,2,O> operator*(const Eigen::Matrix<P,R,2,O>& lhs, const Eigen::SO2<P>& rhs) {
-	return lhs * rhs.get_matrix();
-}
-/*----------------------------------------------------------------*/
-
-namespace Eigen {
-
-template <typename Derived>
-std::istream& operator >> (std::istream& st, MatrixBase<Derived>& m) {
-	for (int i = 0; i < m.rows(); ++i)
-		for (int j = 0; j < m.cols(); ++j)
-			st >> m(i, j);
-	return st;
-}
-
-} // namespace Eigen
-/*----------------------------------------------------------------*/
-
-#endif // _USE_EIGEN
-
-
-// C L A S S  //////////////////////////////////////////////////////
-
 #ifdef _USE_BOOST
 
 namespace boost {
@@ -3710,8 +3396,9 @@ namespace boost {
 		// Serialization support for cv::Mat
 		template<class Archive>
 		void save(Archive& ar, const cv::Mat& m, const unsigned int /*version*/) {
+			ASSERT(m.dims == 0 || m.dims == 2); // only empty or 2D mats supported
 			const int elem_type = m.type();
-			const size_t elem_size = m.elemSize();
+			const size_t elem_size = m.empty() ? 0 : m.elemSize();
 
 			ar & m.cols;
 			ar & m.rows;
@@ -3719,6 +3406,8 @@ namespace boost {
 			ar & elem_size;
 
 			const size_t data_size = elem_size * m.cols * m.rows;
+			if (data_size == 0)
+				return;
 			if (m.isContinuous()) {
 				ar & boost::serialization::make_array(m.ptr(), data_size);
 			} else {
@@ -3740,6 +3429,8 @@ namespace boost {
 			m.create(rows, cols, elem_type);
 
 			const size_t data_size = elem_size * m.cols * m.rows;
+			if (data_size == 0)
+				return;
 			ar & boost::serialization::make_array(m.ptr(), data_size);
 		}
 		template<class Archive>
@@ -3847,11 +3538,46 @@ namespace boost {
 		inline void load(Archive& ar, Eigen::Matrix<Scalar,_Rows,_Cols,_Options,_MaxRows,_MaxCols>& M, const unsigned int /*version*/) {
 			ar >> make_nvp("data", make_array(M.data(), _Rows*_Cols));
 		}
-		// The function that causes boost::serialization to look for separate
-		// save() and load() functions when serializing and Eigen matrix.
+		// The function that causes boost::serialization to look for separate save() and load() functions
 		template<class Archive, class Scalar, int _Rows, int _Cols, int _Options, int _MaxRows, int _MaxCols>
 		inline void serialize(Archive& ar, Eigen::Matrix<Scalar,_Rows,_Cols,_Options,_MaxRows,_MaxCols>& M, const unsigned int version) {
 			split_free(ar, M, version);
+		}
+
+		// Serialization support for Eigen::SO2
+		template<class Archive, typename Precision>
+		inline void save(Archive& ar, const Eigen::SO2<Precision>& so, const unsigned int /*version*/) {
+			Precision comp(so.ln());
+			ar << comp;
+		}
+		template<class Archive, typename Precision>
+		inline void load(Archive& ar, Eigen::SO2<Precision>& so, const unsigned int /*version*/) {
+			Precision comp;
+			ar >> comp;
+			so.exp(comp);
+		}
+		// The function that causes boost::serialization to look for separate save() and load() functions
+		template<class Archive, typename Precision>
+		inline void serialize(Archive& ar, Eigen::SO2<Precision>& so, const unsigned int version) {
+			split_free(ar, so, version);
+		}
+
+		// Serialization support for Eigen::SO3
+		template<class Archive, typename Precision>
+		inline void save(Archive& ar, const Eigen::SO3<Precision>& so, const unsigned int /*version*/) {
+			Precision comp(so.ln());
+			ar << comp;
+		}
+		template<class Archive, typename Precision>
+		inline void load(Archive& ar, Eigen::SO3<Precision>& so, const unsigned int /*version*/) {
+			Precision comp;
+			ar >> comp;
+			so.exp(comp);
+		}
+		// The function that causes boost::serialization to look for separate save() and load() functions
+		template<class Archive, typename Precision>
+		inline void serialize(Archive& ar, Eigen::SO3<Precision>& so, const unsigned int version) {
+			split_free(ar, so, version);
 		}
 		#endif // _USE_EIGEN
 
@@ -3931,7 +3657,9 @@ bool SerializeSave(const TYPE& obj, std::ofstream& fs, ARCHIVE_TYPE type, unsign
 		VERBOSE("error: Can not save the object, invalid archive type");
 		return false;
 	}
-	return true;
+	// flush the buffered archive bytes and verify the stream is still good, so a failed
+	// write (e.g. disk full) is reported instead of leaving a truncated but parseable file
+	return fs.flush().good();
 } // SerializeSave
 template <typename TYPE>
 bool SerializeSave(const TYPE& obj, const SEACAVE::String& fileName, ARCHIVE_TYPE type, unsigned flags=boost::archive::no_header)

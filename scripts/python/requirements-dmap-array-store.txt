@@ -1,0 +1,5 @@
+# Canonical Zarr v3 DMAP stores require Python 3.11 or newer.
+-r requirements-depth-benchmark.txt
+# Zarr 3.2 requires NumPy 2; keep compatibility with NumPy 1.26 deployments.
+zarr>=3.1,<3.2
+numcodecs[crc32c]>=0.14,<0.17

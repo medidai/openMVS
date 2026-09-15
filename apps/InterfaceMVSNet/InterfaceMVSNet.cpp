@@ -560,7 +560,7 @@ bool ParseSceneRTMV(Scene& scene, const String& strPath)
 			VERBOSE("Unable to load image %s.", (strFileName+".exr").c_str());
 			continue;
 		}
-		cv::imwrite(imageData.name, imageData.image);
+		SaveImage(imageData.image, imageData.name);
 		imageData.ReleaseImage();
 		// set image resolution
 		imageData.width = resolution.width;
@@ -605,7 +605,7 @@ bool ParseSceneRTMV(Scene& scene, const String& strPath)
 			cv::split(imgMask, channels);
 			channels[0].convertTo(imgMask, CV_16U);
 			imageData.maskName = strImagePath+strImageName+".mask.png";
-			cv::imwrite(imageData.maskName, imgMask);
+			SaveImage(imgMask, imageData.maskName);
 		}
 		// try reading the depth-map
 		DepthMap depthMap; {
@@ -679,7 +679,7 @@ bool ParseScene(Scene& scene)
 int main(int argc, LPCTSTR* argv)
 {
 	#ifdef _DEBUGINFO
-	// set _crtBreakAlloc index to stop in <dbgheap.c> at allocation
+	// set _crtBreakAlloc index or use _CrtSetBreakAlloc() to stop in <dbgheap.c> at allocation
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);// | _CRTDBG_CHECK_ALWAYS_DF);
 	#endif
 

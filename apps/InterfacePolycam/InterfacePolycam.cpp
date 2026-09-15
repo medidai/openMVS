@@ -234,7 +234,7 @@ bool ParseImage(Scene& scene, const String& imagePath, const String& cameraPath,
 			const String neighborName = std::to_string(timestamp);
 			const IIndex neighborID = mapImageName.at(neighborName);
 			if (neighborID != imageData.ID)
-				imageData.neighbors.emplace_back(ViewScore{neighborID, 0, 1.f, FD2R(15.f), 0.5f, 3.f});
+				imageData.neighbors.emplace_back(ViewScore{neighborID, 0, 1.f, D2R(15.f), 0.5f, 3.f});
 		}
 	}
 	// load and convert depth-map
@@ -337,7 +337,7 @@ bool ParseScene(Scene& scene, const String& scenePath)
 int main(int argc, LPCTSTR* argv)
 {
 	#ifdef _DEBUGINFO
-	// set _crtBreakAlloc index to stop in <dbgheap.c> at allocation
+	// set _crtBreakAlloc index or use _CrtSetBreakAlloc() to stop in <dbgheap.c> at allocation
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);// | _CRTDBG_CHECK_ALWAYS_DF);
 	#endif
 

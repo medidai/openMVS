@@ -117,9 +117,6 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 			#endif
 			), "verbosity level")
 		#endif
-		#ifdef _USE_CUDA
-		("cuda-device", boost::program_options::value(&SEACAVE::CUDA::desiredDeviceID)->default_value(-1), "CUDA device number to be used to reconstruct the mesh (-2 - CPU processing, -1 - best GPU, >=0 - device index)")
-		#endif
 		;
 
 	// group of options allowed both on command line and in config file
@@ -238,7 +235,7 @@ void Application::Finalize()
 // <x-coord1> <y-coord1>
 // <x-coord2> <y-coord2>
 // ...
-// 
+//
 // for example:
 // N01.JPG 3
 // 3090 2680
@@ -327,7 +324,7 @@ bool Export3DProjections(Scene& scene, const String& inputFileName) {
 		if (intRay.pick.IsValid()) {
 			const Point3d ptHit(ray.GetPoint(intRay.pick.dist));
 			oStream.print("%.7f %.7f %.7f\n", ptHit.x, ptHit.y, ptHit.z);
-		} else 
+		} else
 			oStream.print("NA\n");
 	}
 	return true;
@@ -336,7 +333,7 @@ bool Export3DProjections(Scene& scene, const String& inputFileName) {
 int main(int argc, LPCTSTR* argv)
 {
 	#ifdef _DEBUGINFO
-	// set _crtBreakAlloc index to stop in <dbgheap.c> at allocation
+	// set _crtBreakAlloc index or use _CrtSetBreakAlloc() to stop in <dbgheap.c> at allocation
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);// | _CRTDBG_CHECK_ALWAYS_DF);
 	#endif
 
@@ -452,16 +449,13 @@ int main(int argc, LPCTSTR* argv)
 				scene.pointcloud.pointWeights.Release();
 			if (!scene.ReconstructMesh(OPT::fDistInsert, OPT::bUseFreeSpaceSupport, OPT::bUseOnlyROI, 4, OPT::fThicknessFactor, OPT::fQualityFactor))
 				return EXIT_FAILURE;
-			VERBOSE("Mesh reconstruction completed: %u vertices, %u faces (%s)", scene.mesh.vertices.GetSize(), scene.mesh.faces.GetSize(), TD_TIMER_GET_FMT().c_str());
+			VERBOSE("Mesh reconstruction completed: %u vertices, %u faces (%s)", scene.mesh.vertices.size(), scene.mesh.faces.size(), TD_TIMER_GET_FMT().c_str());
 			#if TD_VERBOSE != TD_VERBOSE_OFF
 			if (VERBOSITY_LEVEL > 2) {
 				// dump raw mesh
 				scene.mesh.Save(baseFileName+_T("_raw")+OPT::strExportType);
 			}
 			#endif
-		} else if (!OPT::strMeshFileName.empty()) {
-			// load existing mesh to clean
-			scene.mesh.Load(MAKE_PATH_SAFE(OPT::strMeshFileName));
 		}
 
 		// clean the mesh
@@ -474,9 +468,7 @@ int main(int argc, LPCTSTR* argv)
 				numVertices-scene.mesh.vertices.size(), numFaces-scene.mesh.faces.size(), TD_TIMER_GET_FMT().c_str());
 		}
 		const float fDecimate(OPT::nTargetFaceNum ? static_cast<float>(OPT::nTargetFaceNum) / scene.mesh.faces.size() : OPT::fDecimateMesh);
-		scene.mesh.Clean(1.f, OPT::fRemoveSpurious, OPT::bRemoveSpikes, OPT::nCloseHoles, OPT::nSmoothMesh, OPT::fEdgeLength, false);
-		scene.mesh.Clean(fDecimate, 0.f, OPT::bRemoveSpikes, OPT::nCloseHoles, 0u, 0.f, false); // extra cleaning trying to close more holes
-		scene.mesh.Clean(1.f, 0.f, false, 0u, 0u, 0.f, true); // extra cleaning to remove non-manifold problems created by closing holes
+		scene.mesh.Clean(fDecimate, OPT::fRemoveSpurious, OPT::bRemoveSpikes, OPT::nCloseHoles, OPT::nSmoothMesh, OPT::fEdgeLength);
 		scene.obb = initialOBB;
 
 		// save the final mesh

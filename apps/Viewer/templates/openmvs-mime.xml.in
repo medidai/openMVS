@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns='http://www.freedesktop.org/standards/shared-mime-info'>
+  <mime-type type="application/x-openmvs-mvs">
+    <comment>OpenMVS scene file</comment>
+    <glob pattern="*.mvs"/>
+    <icon> @ICON_NAME@ </icon>
+  </mime-type>
+  <mime-type type="application/x-openmvs-dmap">
+    <comment>OpenMVS depth map file</comment>
+    <glob pattern="*.dmap"/>
+    <icon> @ICON_NAME@ </icon>
+  </mime-type>
+  <mime-type type="model/ply">
+    <comment>Polygon File Format</comment>
+    <glob pattern="*.ply"/>
+    <icon> @ICON_NAME@ </icon>
+  </mime-type>
+  <mime-type type="model/obj">
+    <comment>Wavefront OBJ file</comment>
+    <glob pattern="*.obj"/>
+    <icon> @ICON_NAME@ </icon>
+  </mime-type>
+  <mime-type type="model/gltf+json">
+    <comment>GL Transmission Format</comment>
+    <glob pattern="*.gltf"/>
+    <icon> @ICON_NAME@ </icon>
+  </mime-type>
+  <mime-type type="model/gltf-binary">
+    <comment>GL Transmission Format Binary</comment>
+    <glob pattern="*.glb"/>
+    <icon> @ICON_NAME@ </icon>
+  </mime-type>
+</mime-info>

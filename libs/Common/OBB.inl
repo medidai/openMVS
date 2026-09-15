@@ -52,6 +52,13 @@ inline TOBB<TYPE,DIMS>::TOBB(const TOBB<CTYPE,DIMS>& rhs)
 
 
 template <typename TYPE, int DIMS>
+inline void TOBB<TYPE,DIMS>::Reset()
+{
+	m_rot.setIdentity();
+	m_pos = POINT::Zero();
+	m_ext = POINT::Zero();
+}
+template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::Set(const AABB& aabb)
 {
 	m_rot.setIdentity();
@@ -71,110 +78,112 @@ inline void TOBB<TYPE,DIMS>::Set(const MATRIX& rot, const POINT& ptMin, const PO
 // Inspired from "Fitting Oriented Bounding Boxes" by James Gregson
 // http://jamesgregson.blogspot.ro/2011/03/latex-test.html
 
-// build an OBB from a vector of input points.  This
+// Build an OBB from a vector of input points.  This
 // method just forms the covariance matrix and hands
 // it to the build_from_covariance_matrix method
-// which handles fitting the box to the points
+// which handles fitting the box to the points.
+//
+// If k (number of nearest neighbors) is set, the method will filter
+// out inside points and use only the surface points. This is useful
+// when the dominant direction of the inside points is not aligned with
+// the convex hull which ultimately is used to define the OBB dimensions.
 template <typename TYPE, int DIMS>
-inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n)
+inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, int k, int fixedAxis)
 {
 	ASSERT(n >= DIMS);
 
-	// loop over the points to find the mean point
-	// location and to build the covariance matrix;
-	// note that we only have
-	// to build terms for the upper triangular 
-	// portion since the matrix is symmetric
+	std::vector<POINT> surfacePoints;
+	if (k > 0) {
+		// Filter surface points based on the k nearest neighbors
+		surfacePoints = FilterSurfacePoints(pts, n, k);
+		pts = surfacePoints.data();
+		n = surfacePoints.size();
+	}
+
+	// loop over the points to find the mean point location
+	// and to accumulate the second moments
 	POINT mu(POINT::Zero());
-	TYPE cxx=0, cxy=0, cxz=0, cyy=0, cyz=0, czz=0;
+	MATRIX C(MATRIX::Zero());
 	for (size_t i=0; i<n; ++i) {
 		const POINT& p = pts[i];
 		mu += p;
-		cxx += p(0)*p(0); 
-		cxy += p(0)*p(1); 
-		cxz += p(0)*p(2);
-		cyy += p(1)*p(1);
-		cyz += p(1)*p(2);
-		czz += p(2)*p(2);
+		C += p * p.transpose();
 	}
-	const TYPE invN(TYPE(1)/TYPE(n));
-	cxx = (cxx - mu(0)*mu(0)*invN)*invN; 
-	cxy = (cxy - mu(0)*mu(1)*invN)*invN; 
-	cxz = (cxz - mu(0)*mu(2)*invN)*invN;
-	cyy = (cyy - mu(1)*mu(1)*invN)*invN;
-	cyz = (cyz - mu(1)*mu(2)*invN)*invN;
-	czz = (czz - mu(2)*mu(2)*invN)*invN;
-
 	// now build the covariance matrix
-	MATRIX C;
-	C(0,0) = cxx; C(0,1) = cxy; C(0,2) = cxz;
-	C(1,0) = cxy; C(1,1) = cyy; C(1,2) = cyz;
-	C(2,0) = cxz; C(2,1) = cyz; C(2,2) = czz;
+	const TYPE invN(TYPE(1)/TYPE(n));
+	C = (C - mu*mu.transpose()*invN)*invN;
 
 	// set the OBB parameters from the covariance matrix
-	Set(C, pts, n);
+	Set(C, pts, n, fixedAxis);
+}
+// Build an OBB from a vector of input points with the last local axis
+// aligned to the given up direction; the remaining axes are the ones
+// minimizing the footprint of the box: the minimum-area rectangle of
+// the points projected on the hyperplane perpendicular to up, computed
+// exactly over their convex hull (one side of the optimal rectangle is
+// always collinear with a hull edge). Unlike the covariance based fit,
+// the resulting orientation is independent of the point density
+// distribution.
+template <typename TYPE, int DIMS>
+inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, const POINT& up)
+{
+	ASSERT(n >= DIMS);
+	SetRotation(up, pts, n);
+	SetBounds(pts, n);
 }
 // builds an OBB from triangles specified as an array of
 // points with integer indices into the point array. Forms
 // the covariance matrix for the triangles, then uses the
-// method build_from_covariance_matrix method to fit 
+// method build_from_covariance_matrix method to fit
 // the box.  ALL points will be fit in the box, regardless
 // of whether they are indexed by a triangle or not.
 template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::Set(const POINT* pts, size_t n, const TRIANGLE* tris, size_t s)
 {
+	STATIC_ASSERT(DIMS == 3); // a triangle is only defined by three indices in 3D
 	ASSERT(n >= DIMS);
 
 	// loop over the triangles this time to find the
-	// mean location
+	// mean location and accumulate the area weighted second moments
 	POINT mu(POINT::Zero());
 	TYPE Am=0;
-	TYPE cxx=0, cxy=0, cxz=0, cyy=0, cyz=0, czz=0;
+	MATRIX C(MATRIX::Zero());
 	for (size_t i=0; i<s; ++i) {
 		ASSERT(tris[i](0)<n && tris[i](1)<n && tris[i](2)<n);
 		const POINT& p = pts[tris[i](0)];
 		const POINT& q = pts[tris[i](1)];
 		const POINT& r = pts[tris[i](2)];
 		const POINT mui = (p+q+r)/TYPE(3);
-		const TYPE Ai = (q-p).cross(r-p).normalize()/TYPE(2);
+		const TYPE Ai = (q-p).cross(r-p).norm()/TYPE(2);
 		mu += mui*Ai;
 		Am += Ai;
 
-		// these bits set the c terms to Am*E[xx], Am*E[xy], Am*E[xz]....
+		// this sets the C terms to Am*E[xx], Am*E[xy], Am*E[xz]....
 		const TYPE Ai12 = Ai/TYPE(12);
-		cxx += (TYPE(9)*mui(0)*mui(0) + p(0)*p(0) + q(0)*q(0) + r(0)*r(0))*Ai12;
-		cxy += (TYPE(9)*mui(0)*mui(1) + p(0)*p(1) + q(0)*q(1) + r(0)*r(1))*Ai12;
-		cxz += (TYPE(9)*mui(0)*mui(2) + p(0)*p(2) + q(0)*q(2) + r(0)*r(2))*Ai12;
-		cyy += (TYPE(9)*mui(1)*mui(1) + p(1)*p(1) + q(1)*q(1) + r(1)*r(1))*Ai12;
-		cyz += (TYPE(9)*mui(1)*mui(2) + p(1)*p(2) + q(1)*q(2) + r(1)*r(2))*Ai12;
-		czz += (TYPE(9)*mui(2)*mui(2) + p(2)*p(2) + q(2)*q(2) + r(2)*r(2))*Ai12;
+		C += (TYPE(9)*mui*mui.transpose() +
+			  p*p.transpose() + q*q.transpose() + r*r.transpose())*Ai12;
 	}
 
-	// divide out the Am fraction from the average position and 
-	// covariance terms
+	// divide out the Am fraction from the average position and covariance
+	// terms, then subtract off the E[x]*E[x], E[x]*E[y], ... terms
 	mu /= Am;
-	cxx /= Am; cxy /= Am; cxz /= Am; cyy /= Am; cyz /= Am; czz /= Am;
-
-	// now subtract off the E[x]*E[x], E[x]*E[y], ... terms
-	cxx -= mu(0)*mu(0); cxy -= mu(0)*mu(1); cxz -= mu(0)*mu(2);
-	cyy -= mu(1)*mu(1); cyz -= mu(1)*mu(2); czz -= mu(2)*mu(2);
-
-	// now build the covariance matrix
-	MATRIX C;
-	C(0,0)=cxx; C(0,1)=cxy; C(0,2)=cxz;
-	C(1,0)=cxy; C(1,1)=cyy; C(1,2)=cyz;
-	C(2,0)=cxz; C(1,2)=cyz; C(2,2)=czz;
+	C = C/Am - mu*mu.transpose();
 
 	// set the obb parameters from the covariance matrix
 	Set(C, pts, n);
 }
 // method to set the OBB parameters which produce a box oriented according to
 // the covariance matrix C, and that contains the given points
+// if fixedAxis is specified, that axis is kept on the world basis and the OBB rotation
+// is applied only in the hyperplane perpendicular to it (0=x,1=y,2=z)
 template <typename TYPE, int DIMS>
-inline void TOBB<TYPE,DIMS>::Set(const MATRIX& C, const POINT* pts, size_t n)
+inline void TOBB<TYPE,DIMS>::Set(const MATRIX& C, const POINT* pts, size_t n, int fixedAxis)
 {
 	// extract rotation from the covariance matrix
-	SetRotation(C);
+	if (fixedAxis >= 0)
+		SetRotation(C, fixedAxis);
+	else
+		SetRotation(C);
 	// extract size and center from the given points
 	SetBounds(pts, n);
 }
@@ -187,11 +196,171 @@ inline void TOBB<TYPE,DIMS>::SetRotation(const MATRIX& C)
 	const Eigen::SelfAdjointEigenSolver<MATRIX> es(C);
 	ASSERT(es.info() == Eigen::Success);
 	// find the right, up and forward vectors from the eigenvectors
-	// and set the rotation matrix using the eigenvectors
-	ASSERT(es.eigenvalues()(0) < es.eigenvalues()(1) && es.eigenvalues()(1) < es.eigenvalues()(2));
+	// and set the rotation matrix using the eigenvectors;
+	// eigenvalues are sorted ascending, possibly equal for degenerate (isotropic/planar) inputs
+	ASSERT(std::is_sorted(es.eigenvalues().data(), es.eigenvalues().data()+DIMS));
 	m_rot = es.eigenvectors().transpose();
 	if (m_rot.determinant() < 0)
 		m_rot = -m_rot;
+}
+template <typename TYPE, int DIMS>
+inline void TOBB<TYPE,DIMS>::SetRotation(const MATRIX& C, int fixedAxis)
+{
+	STATIC_ASSERT(DIMS > 1);
+	ASSERT(fixedAxis >= 0 && fixedAxis < DIMS);
+	// the free axes, in wrap-around order after the fixed one
+	enum {DIMSF = DIMS-1};
+	int freeAxes[DIMS];
+	for (int i=0; i<DIMSF; ++i)
+		freeAxes[i] = (fixedAxis + 1 + i) % DIMS;
+	// covariance sub-matrix of the free axes
+	typedef Eigen::Matrix<TYPE,DIMSF,DIMSF> MATRIXF;
+	MATRIXF Cf;
+	for (int i=0; i<DIMSF; ++i)
+		for (int j=0; j<DIMSF; ++j)
+			Cf(i,j) = C(freeAxes[i], freeAxes[j]);
+	const Eigen::SelfAdjointEigenSolver<MATRIXF> es(Cf);
+	ASSERT(es.info() == Eigen::Success);
+	// build the rotation rows (rows = axes): the fixed axis aligns with the world
+	// basis, the free axes take the eigenvectors ordered minor -> major
+	m_rot.setZero();
+	m_rot(fixedAxis, fixedAxis) = TYPE(1);
+	for (int i=0; i<DIMSF; ++i)
+		for (int j=0; j<DIMSF; ++j)
+			m_rot(freeAxes[i], freeAxes[j]) = es.eigenvectors()(j,i);
+	// make right-handed: flip the minor row if needed
+	if (m_rot.determinant() < TYPE(0))
+		m_rot.row(freeAxes[0]) = -m_rot.row(freeAxes[0]);
+}
+// method to set the OBB rotation such that the last local axis aligns with the given
+// up direction, while the remaining axes minimize the box footprint measured in the
+// hyperplane perpendicular to it; only a 2D hyperplane (3D box) leaves any orientation
+// freedom, resolved exactly by the minimum-area rectangle of the projected points
+template <typename TYPE, int DIMS>
+inline void TOBB<TYPE,DIMS>::SetRotation(const POINT& upDirection, const POINT* pts, size_t n)
+{
+	STATIC_ASSERT(DIMS > 1);
+	ASSERT(n > 0);
+	enum {DIMSP = DIMS-1}; // dimension of the hyperplane perpendicular to up
+	typedef Eigen::Matrix<TYPE,DIMSP,1> POINTP;
+	typedef Eigen::Matrix<TYPE,DIMSP,DIMSP> MATRIXP;
+	const POINT up(upDirection.normalized());
+	// orthonormal basis of the hyperplane perpendicular to up: the Householder QR of
+	// up returns an orthogonal matrix having up as first column, so its trailing
+	// columns span the searched hyperplane
+	const Eigen::Matrix<TYPE,DIMS,DIMS> basis(Eigen::HouseholderQR<POINT>(up).householderQ());
+	const Eigen::Matrix<TYPE,DIMS,DIMSP> basisP(basis.template rightCols<DIMSP>());
+	// find the hyperplane orientation minimizing the footprint
+	MATRIXP rotP(MATRIXP::Identity());
+	if constexpr (DIMSP == 2) {
+		// project the points on the hyperplane
+		std::vector<POINTP> ptsP(n);
+		for (size_t i=0; i<n; ++i)
+			ptsP[i] = basisP.transpose()*pts[i];
+		const auto cross2 = [](const POINTP& o, const POINTP& p, const POINTP& q) {
+			return (p(0)-o(0))*(q(1)-o(1)) - (p(1)-o(1))*(q(0)-o(0));
+		};
+		// Akl-Toussaint acceleration: points strictly inside the quadrilateral of the four
+		// coordinate-extreme points cannot be hull vertices, so discard them before sorting;
+		// a degenerate quadrilateral (collinear/coincident extremes) discards nothing as no
+		// point is then strictly inside all four edges
+		if (ptsP.size() > 64) {
+			size_t iMinX(0), iMaxX(0), iMinY(0), iMaxY(0);
+			for (size_t i=1; i<ptsP.size(); ++i) {
+				if (ptsP[i](0) < ptsP[iMinX](0)) iMinX = i;
+				if (ptsP[i](0) > ptsP[iMaxX](0)) iMaxX = i;
+				if (ptsP[i](1) < ptsP[iMinY](1)) iMinY = i;
+				if (ptsP[i](1) > ptsP[iMaxY](1)) iMaxY = i;
+			}
+			const POINTP quad[4] = {ptsP[iMinX], ptsP[iMinY], ptsP[iMaxX], ptsP[iMaxY]}; // CCW
+			std::vector<POINTP> border;
+			border.reserve(ptsP.size());
+			for (const POINTP& p: ptsP) {
+				bool inside = true;
+				for (int k=0; k<4; ++k) {
+					if (cross2(quad[k], quad[(k+1)%4], p) <= TYPE(0)) {
+						inside = false;
+						break;
+					}
+				}
+				if (!inside)
+					border.push_back(p);
+			}
+			ptsP = std::move(border);
+		}
+		// compute the 2D convex hull (Andrew's monotone chain)
+		std::sort(ptsP.begin(), ptsP.end(), [](const POINTP& l, const POINTP& r) {
+			return l(0) < r(0) || (l(0) == r(0) && l(1) < r(1));
+		});
+		ptsP.erase(std::unique(ptsP.begin(), ptsP.end(), [](const POINTP& l, const POINTP& r) {
+			return l(0) == r(0) && l(1) == r(1);
+		}), ptsP.end());
+		std::vector<POINTP> hull;
+		if (ptsP.size() >= 3) {
+			hull.resize(2*ptsP.size());
+			size_t h = 0;
+			for (size_t i = 0; i < ptsP.size(); ++i) {
+				while (h >= 2 && cross2(hull[h-2], hull[h-1], ptsP[i]) <= TYPE(0))
+					--h;
+				hull[h++] = ptsP[i];
+			}
+			for (size_t i = ptsP.size()-1, t = h+1; i > 0; --i) {
+				while (h >= t && cross2(hull[h-2], hull[h-1], ptsP[i-1]) <= TYPE(0))
+					--h;
+				hull[h++] = ptsP[i-1];
+			}
+			hull.resize(h-1);
+		}
+		// find the in-plane direction minimizing the rectangle area:
+		// evaluate the extents for each hull edge direction
+		POINTP bestDir(1, 0);
+		if (hull.size() < 3) {
+			// collinear projections: the minimum-area rectangle degenerates to the
+			// segment itself, so align with the line instead of the arbitrary basis x-axis
+			const std::vector<POINTP>& seg(hull.size() == 2 ? hull : ptsP);
+			if (seg.size() >= 2) {
+				const POINTP e(seg.back() - seg.front());
+				const TYPE len(e.norm());
+				if (len > TYPE(0))
+					bestDir = e/len;
+			}
+		} else {
+			TYPE bestArea = std::numeric_limits<TYPE>::max();
+			for (size_t i = 0; i < hull.size(); ++i) {
+				const POINTP e(hull[(i+1)%hull.size()] - hull[i]);
+				const TYPE len(e.norm());
+				if (len <= TYPE(0))
+					continue;
+				const POINTP d(e/len);
+				TYPE minD(std::numeric_limits<TYPE>::max()), maxD(std::numeric_limits<TYPE>::lowest());
+				TYPE minP(std::numeric_limits<TYPE>::max()), maxP(std::numeric_limits<TYPE>::lowest());
+				for (const POINTP& v: hull) {
+					const TYPE pd( d(0)*v(0) + d(1)*v(1));
+					const TYPE pp(-d(1)*v(0) + d(0)*v(1));
+					if (pd < minD) minD = pd;
+					if (pd > maxD) maxD = pd;
+					if (pp < minP) minP = pp;
+					if (pp > maxP) maxP = pp;
+				}
+				const TYPE area((maxD-minD)*(maxP-minP));
+				if (area < bestArea) {
+					bestArea = area;
+					bestDir = d;
+				}
+			}
+		}
+		rotP << bestDir(0), bestDir(1),
+		       -bestDir(1), bestDir(0);
+	}
+	// assemble the world-to-local rotation (rows are the local axes):
+	// the hyperplane axes first, the up direction last
+	m_rot.template topRows<DIMSP>() = rotP * basisP.transpose();
+	m_rot.row(DIMSP) = up.transpose();
+	// the hyperplane basis can come out with either handedness; flipping the first
+	// axis makes the frame right-handed without changing the fitted box
+	if (m_rot.determinant() < TYPE(0))
+		m_rot.row(0) = -m_rot.row(0);
+	ASSERT(ISEQUAL(m_rot.determinant(), TYPE(1)));
 }
 // method to set the OBB center and size that contains the given points
 // the rotations should be already set
@@ -199,27 +368,18 @@ template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::SetBounds(const POINT* pts, size_t n)
 {
 	ASSERT(n >= DIMS);
-	ASSERT(ISEQUAL((m_rot*m_rot.transpose()).trace(), TYPE(3)) && ISEQUAL(m_rot.determinant(), TYPE(1)));
+	ASSERT(ISEQUAL((m_rot*m_rot.transpose()).trace(), TYPE(DIMS)) && ISEQUAL(m_rot.determinant(), TYPE(1)));
 
 	// build the bounding box extents in the rotated frame
-	const TYPE tmax = std::numeric_limits<TYPE>::max();
-	POINT minim(tmax, tmax, tmax), maxim(-tmax, -tmax, -tmax);
-	for (size_t i=0; i<n; ++i) {
-		const POINT p_prime(m_rot * pts[i]);
-		if (minim(0) > p_prime(0)) minim(0) = p_prime(0);
-		if (minim(1) > p_prime(1)) minim(1) = p_prime(1);
-		if (minim(2) > p_prime(2)) minim(2) = p_prime(2);
-		if (maxim(0) < p_prime(0)) maxim(0) = p_prime(0);
-		if (maxim(1) < p_prime(1)) maxim(1) = p_prime(1);
-		if (maxim(2) < p_prime(2)) maxim(2) = p_prime(2);
-	}
+	AABB aabb(m_rot * pts[0]);
+	for (size_t i=1; i<n; ++i)
+		aabb.Insert(m_rot * pts[i]);
 
-	// set the center of the OBB to be the average of the 
+	// set the center of the OBB to be the average of the
 	// minimum and maximum, and the extents be half of the
 	// difference between the minimum and maximum
-	const POINT center((maxim+minim)*TYPE(0.5));
-	m_pos = m_rot.transpose() * center;
-	m_ext = (maxim-minim)*TYPE(0.5);
+	m_pos = m_rot.transpose() * aabb.GetCenter();
+	m_ext = aabb.GetSize() * TYPE(0.5);
 } // Set
 /*----------------------------------------------------------------*/
 
@@ -227,6 +387,8 @@ inline void TOBB<TYPE,DIMS>::SetBounds(const POINT* pts, size_t n)
 template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::BuildBegin()
 {
+	// accumulate the second moments in m_rot, the point sum in m_pos
+	// and the point count in the m_ext storage
 	m_rot = MATRIX::Zero();
 	m_pos = POINT::Zero();
 	m_ext = POINT::Zero();
@@ -234,35 +396,26 @@ inline void TOBB<TYPE,DIMS>::BuildBegin()
 template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::BuildAdd(const POINT& p)
 {
-	// store mean in m_pos
+	m_rot += p * p.transpose();
 	m_pos += p;
-	// store covariance params in m_rot
-	m_rot(0,0) += p(0)*p(0); 
-	m_rot(0,1) += p(0)*p(1); 
-	m_rot(0,2) += p(0)*p(2);
-	m_rot(1,0) += p(1)*p(1);
-	m_rot(1,1) += p(1)*p(2);
-	m_rot(1,2) += p(2)*p(2);
-	// store count in m_ext
-	++(*((size_t*)m_ext.data()));
+	// the count must stay exact for arbitrary n (a float counter saturates at 2^24),
+	// so it lives as an integer in the extents storage, unused during build
+	STATIC_ASSERT(sizeof(POINT) >= sizeof(size_t));
+	size_t n;
+	memcpy(&n, m_ext.data(), sizeof(n));
+	++n;
+	memcpy(m_ext.data(), &n, sizeof(n));
 }
 template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::BuildEnd()
 {
-	const TYPE invN(TYPE(1)/TYPE(*((size_t*)m_ext.data())));
-	const TYPE cxx = (m_rot(0,0) - m_pos(0)*m_pos(0)*invN)*invN; 
-	const TYPE cxy = (m_rot(0,1) - m_pos(0)*m_pos(1)*invN)*invN; 
-	const TYPE cxz = (m_rot(0,2) - m_pos(0)*m_pos(2)*invN)*invN;
-	const TYPE cyy = (m_rot(1,0) - m_pos(1)*m_pos(1)*invN)*invN;
-	const TYPE cyz = (m_rot(1,1) - m_pos(1)*m_pos(2)*invN)*invN;
-	const TYPE czz = (m_rot(1,2) - m_pos(2)*m_pos(2)*invN)*invN;
-
-	// now build the covariance matrix
-	MATRIX C;
-	C(0,0) = cxx; C(0,1) = cxy; C(0,2) = cxz;
-	C(1,0) = cxy; C(1,1) = cyy; C(1,2) = cyz;
-	C(2,0) = cxz; C(2,1) = cyz; C(2,2) = czz;
-	SetRotation(C);
+	STATIC_ASSERT(sizeof(POINT) >= sizeof(size_t));
+	size_t n;
+	memcpy(&n, m_ext.data(), sizeof(n));
+	ASSERT(n > 0);
+	// build the covariance matrix out of the accumulated moments
+	const TYPE invN(TYPE(1)/TYPE(n));
+	SetRotation(MATRIX((m_rot - m_pos*m_pos.transpose()*invN)*invN));
 } // Build
 /*----------------------------------------------------------------*/
 
@@ -301,9 +454,13 @@ inline void TOBB<TYPE,DIMS>::Translate(const POINT& d)
 template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::Transform(const MATRIX& m)
 {
-	m_rot = m * m_rot;
+	Eigen::Transform<Type, DIMS, Eigen::Affine> transform(m);
+	MATRIX rotation, scaling;
+	transform.computeRotationScaling(&rotation, &scaling);
+	m_rot = m_rot * rotation.transpose();
 	m_pos = m * m_pos;
-}
+	m_ext = scaling * m_ext;
+} // Transform
 /*----------------------------------------------------------------*/
 
 
@@ -336,32 +493,19 @@ inline void TOBB<TYPE,DIMS>::GetSize(POINT& ptSize) const
 template <typename TYPE, int DIMS>
 inline void TOBB<TYPE,DIMS>::GetCorners(POINT pts[numCorners]) const
 {
-	if (DIMS == 2) {
-		const POINT pEAxis[2] = {
-			m_rot.row(0)*m_ext[0],
-			m_rot.row(1)*m_ext[1]
-		};
-		const POINT pos(m_rot.transpose()*m_pos);
-		pts[0] = pos - pEAxis[0] - pEAxis[1];
-		pts[1] = pos + pEAxis[0] - pEAxis[1];
-		pts[2] = pos + pEAxis[0] + pEAxis[1];
-		pts[3] = pos - pEAxis[0] + pEAxis[1];
-	}
-	if (DIMS == 3) {
-		const POINT pEAxis[3] = {
-			m_rot.row(0)*m_ext[0],
-			m_rot.row(1)*m_ext[1],
-			m_rot.row(2)*m_ext[2]
-		};
-		const POINT pos(m_rot.transpose()*m_pos);
-		pts[0] = pos - pEAxis[0] - pEAxis[1] - pEAxis[2];
-		pts[1] = pos - pEAxis[0] - pEAxis[1] + pEAxis[2];
-		pts[2] = pos + pEAxis[0] - pEAxis[1] - pEAxis[2];
-		pts[3] = pos + pEAxis[0] - pEAxis[1] + pEAxis[2];
-		pts[4] = pos + pEAxis[0] + pEAxis[1] - pEAxis[2];
-		pts[5] = pos + pEAxis[0] + pEAxis[1] + pEAxis[2];
-		pts[6] = pos - pEAxis[0] + pEAxis[1] - pEAxis[2];
-		pts[7] = pos - pEAxis[0] + pEAxis[1] + pEAxis[2];
+	// generate all corner combinations using bit patterns;
+	// use bit j of i to determine sign: 0 = subtract, 1 = add
+	POINT axisVectors[DIMS];
+	for (int j=0; j<DIMS; ++j)
+		axisVectors[j] = m_rot.row(j) * m_ext[j];
+	for (int i=0; i<numCorners; ++i) {
+		pts[i] = m_pos;
+		for (int j=0; j<DIMS; ++j) {
+			if (i & (1 << j))
+				pts[i] += axisVectors[j];
+			else
+				pts[i] -= axisVectors[j];
+		}
 	}
 } // GetCorners
 // constructs the corner of the aligned bounding box in world space
@@ -379,7 +523,7 @@ inline typename TOBB<TYPE,DIMS>::AABB TOBB<TYPE,DIMS>::GetAABB() const
 template <typename TYPE, int DIMS>
 inline TYPE TOBB<TYPE,DIMS>::GetVolume() const
 {
-	return m_ext.prod()*numCorners;
+	return m_ext.prod()*TYPE(numCorners);
 }
 /*----------------------------------------------------------------*/
 
@@ -388,14 +532,88 @@ template <typename TYPE, int DIMS>
 bool TOBB<TYPE,DIMS>::Intersects(const POINT& pt) const
 {
 	const POINT dist(m_rot * (pt - m_pos));
-	if (DIMS == 2) {
-		return ABS(dist[0]) <= m_ext[0]
-			&& ABS(dist[1]) <= m_ext[1];
-	}
-	if (DIMS == 3) {
-		return ABS(dist[0]) <= m_ext[0]
-			&& ABS(dist[1]) <= m_ext[1]
-			&& ABS(dist[2]) <= m_ext[2];
-	}
+	return (dist.array().abs() <= m_ext.array()).all();
 } // Intersects(POINT)
+/*----------------------------------------------------------------*/
+
+
+// Surface (aproximate) point extraction from 3D point clouds using directional vector summation.
+//
+// This algorithm approximates which points lie on the surface (outer boundary) of a 3D point cloud,
+// based on the spatial distribution of their neighbors.
+//
+// For each point:
+// 1. Find its k nearest neighbors using a KD-tree (via nanoflann).
+// 2. Compute unit direction vectors from the point to each neighbor.
+// 3. Sum all direction vectors and compute the magnitude of the result.
+//    - A large magnitude indicates an asymmetric neighborhood — likely a surface point.
+//    - A near-zero magnitude indicates a symmetric (interior) neighborhood.
+//
+// After computing this "surface score" for each point, the algorithm selects the top N% of points
+// with the highest scores as likely surface points.
+
+template <typename TYPE, int DIMS>
+struct TPointCloudSurfaceAdaptor {
+	const typename TOBB<TYPE,DIMS>::POINT* pts;
+	size_t n;
+	TPointCloudSurfaceAdaptor(const typename TOBB<TYPE,DIMS>::POINT* pts_, size_t n_) : pts(pts_), n(n_) {}
+	inline size_t kdtree_get_point_count() const { return n; }
+	inline TYPE kdtree_get_pt(const size_t idx, int dim) const { return pts[idx][dim]; }
+	template <class BBOX>
+	bool kdtree_get_bbox(BBOX&) const { return false; }
+};
+
+template <typename TYPE, int DIMS>
+std::vector<TYPE> TOBB<TYPE,DIMS>::ComputeSurfacePointsScores(const POINT* pts, size_t n, int k)
+{
+	using PointCloudSurfaceAdaptor = TPointCloudSurfaceAdaptor<TYPE, DIMS>;
+	using KDTree = nanoflann::KDTreeSingleIndexAdaptor<
+		nanoflann::L2_Simple_Adaptor<TYPE, PointCloudSurfaceAdaptor>,
+		PointCloudSurfaceAdaptor, DIMS>;
+
+	PointCloudSurfaceAdaptor adaptor(pts, n);
+	KDTree kdtree(DIMS, adaptor, nanoflann::KDTreeSingleIndexAdaptorParams());
+	kdtree.buildIndex();
+
+	std::vector<TYPE> scores(n);
+	std::vector<size_t> indices(k + 1);
+	std::vector<TYPE> dists(k + 1);
+	for (size_t i = 0; i < n; ++i) {
+		nanoflann::KNNResultSet<TYPE> resultSet(k + 1);
+		resultSet.init(indices.data(), dists.data());
+		kdtree.findNeighbors(resultSet, &pts[i][0], nanoflann::SearchParameters());
+		POINT sum_vector = POINT::Zero();
+		for (size_t j = 1; j < resultSet.size(); ++j) { // skip self
+			POINT dir = pts[indices[j]] - pts[i];
+			TYPE norm = dir.norm();
+			if (!ISZERO(norm))
+				sum_vector += dir / norm;
+		}
+		scores[i] = sum_vector.norm();
+	}
+	return scores;
+}
+
+template <typename TYPE, int DIMS>
+std::vector<typename TOBB<TYPE,DIMS>::POINT> TOBB<TYPE,DIMS>::FilterSurfacePoints(const POINT* pts, size_t n, int k, TYPE percentile)
+{
+	auto scores = ComputeSurfacePointsScores(pts, n, k);
+	TYPE threshold;
+	if (percentile > 0) {
+		// Calculate the index for the given percentile
+		size_t index = static_cast<size_t>((TYPE(1) - percentile) * scores.size());
+		const auto nth = scores.begin() + index;
+		std::nth_element(scores.begin(), nth, scores.end());
+		threshold = *nth;
+	} else {
+		// Use given percentile param as threshold
+		threshold = -percentile;
+	}
+	std::vector<POINT> result;
+	for (size_t i = 0; i < n; ++i) {
+		if (scores[i] > threshold)
+			result.push_back(pts[i]);
+	}
+	return result;
+}
 /*----------------------------------------------------------------*/

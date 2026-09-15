@@ -1,0 +1,31 @@
+{
+  "name": "siftgpu",
+  "version": "2025-09-04",
+  "description": "SiftGPU: GPU-accelerated SIFT feature detector, descriptor and matcher",
+  "homepage": "https://github.com/cdcseacave/SiftGPU",
+  "license": "BSD-3-Clause",
+  "dependencies": [
+    {
+      "name": "glad",
+      "features": [
+        "extensions",
+        "gl-api-latest"
+      ]
+    },
+    "glfw3",
+    "opengl",
+    { "name": "vcpkg-cmake", "host": true },
+    { "name": "vcpkg-cmake-config", "host": true }
+  ],
+  "features": {
+    "cuda": {
+      "description": "Enable CUDA implementation",
+      "dependencies": [ "cuda" ]
+    },
+    "egl": {
+      "description": "Enable EGL headless OpenGL context support",
+      "dependencies": [ "egl" ]
+    }
+  },
+  "supports": "linux | windows | osx"
+}

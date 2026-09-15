@@ -15,6 +15,16 @@
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+// Helper macros for stringification
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
+#define OpenMVS_VERSION TOSTRING(OpenMVS_MAJOR_VERSION) "." TOSTRING(OpenMVS_MINOR_VERSION) "." TOSTRING(OpenMVS_PATCH_VERSION)
+
+#define OpenMVS_VERSION_AT_LEAST(x,y,z) \
+	(OpenMVS_MAJOR_VERSION>x || (OpenMVS_MAJOR_VERSION==x && \
+	(OpenMVS_MINOR_VERSION>y || (OpenMVS_MINOR_VERSION==y && OpenMVS_PATCH_VERSION>=z))))
+
 #ifdef _MSC_VER
 
 // Modify the following defines if you have to target a platform prior to the ones specified below.
@@ -90,7 +100,11 @@
 #define EXPORT_API __declspec(dllexport)
 #define IMPORT_API __declspec(dllimport)
 /*----------------------------------------------------------------*/
-#ifdef _USRDLL
+// _USRDLL is set per-target by cxx_library_with_type when building any of our
+// DLLs. OPENMVS_SHARED is set globally by the top-level CMakeLists when
+// BUILD_SHARED_LIBS=ON; apps don't have _USRDLL but still need dllimport hints
+// for symbols that live inside Common.dll.
+#if defined(_USRDLL)
   #ifdef Common_EXPORTS
 	#define GENERAL_API EXPORT_API
 	#define GENERAL_TPL
@@ -98,6 +112,9 @@
 	#define GENERAL_API IMPORT_API
 	#define GENERAL_TPL extern
   #endif
+#elif defined(OPENMVS_SHARED)
+  #define GENERAL_API IMPORT_API
+  #define GENERAL_TPL extern
 #else
   #define GENERAL_API
   #define GENERAL_TPL
@@ -118,12 +135,21 @@
 #endif
 
 //----------------------------------------------------------------------
-// DLL_API is ignored for all other systems
+// DLL_API for GCC/Clang under -fvisibility=hidden
 //----------------------------------------------------------------------
+#if defined(__GNUC__) || defined(__clang__)
+#define EXPORT_API __attribute__((visibility("default")))
+#else
 #define EXPORT_API
+#endif
 #define IMPORT_API
-#define GENERAL_API
+#ifdef Common_EXPORTS
+#define GENERAL_API EXPORT_API
 #define GENERAL_TPL
+#else
+#define GENERAL_API
+#define GENERAL_TPL extern
+#endif
 
 // Define platform type
 #if defined(__x86_64__) || defined(__ppc64__) || defined(__aarch64__) || defined(__arm64__) || defined(__mips64)
@@ -180,7 +206,7 @@
 #	define COLD
 #	define THREADLOCAL __declspec(thread)
 #	define FORCEINLINE __forceinline
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
 #	define ALIGN(n) __attribute__((aligned(n)))
 #	define NOINITVTABLE
 #	define DECRESTRICT
@@ -242,7 +268,27 @@ __inline__ static void trap_instruction() { __asm__ volatile("brk #0"); }
 #endif
 #endif
 
+// _HEADLESS_DEBUG: ASSERT prints to stderr and continues -- no modal popups,
+// no debugger break. Lets test runners / CI capture every failed invariant
+// in one pass. Production builds leave _HEADLESS_DEBUG undefined and behave
+// exactly as before.
+#ifdef _HEADLESS_DEBUG
+#include <cstdio>
+#define PRINT_ASSERT_MSG(exp, ...) do { std::fprintf(stderr, "[ASSERT] %s:%d: %s\n", __FILE__, __LINE__, #exp); std::fflush(stderr); } while(0)
+#define _ASSERT_BREAK()
+#else
 #define PRINT_ASSERT_MSG(exp, ...)
+#define _ASSERT_BREAK() DEBUG_BREAK()
+#endif
+
+// Make every assertion visible to MSVC Code Analysis. _Analysis_assume_ is a
+// no-op outside analysis and does not pass assumptions to the optimizer.
+#ifdef _MSC_VER
+#include <sal.h>
+#define ASSERT_ANALYSIS_ASSUME(exp) _Analysis_assume_(exp)
+#else
+#define ASSERT_ANALYSIS_ASSUME(exp)
+#endif
 
 #ifdef _DEBUG
 
@@ -252,29 +298,45 @@ __inline__ static void trap_instruction() { __asm__ volatile("brk #0"); }
 #include <cstdlib>
 #include <crtdbg.h>
 #ifdef _INC_CRTDBG
-#define SIMPLE_ASSERT(exp) {if (!(exp) && 1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, NULL, #exp)) _CrtDbgBreak();}
-#define ASSERT(exp, ...) {static bool bIgnore(false); if (!bIgnore && !(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); if (!(bIgnore = !(1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, NULL, #exp)))) _CrtDbgBreak();}}
+#ifdef _HEADLESS_DEBUG
+#define SIMPLE_ASSERT(exp) {if (!(exp)) PRINT_ASSERT_MSG(exp); ASSERT_ANALYSIS_ASSUME(exp);}
+#define ASSERT(exp, ...) {if (!(exp)) PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); ASSERT_ANALYSIS_ASSUME(exp);}
 #else
-#define SIMPLE_ASSERT(exp) {if (!(exp)) DEBUG_BREAK();}
-#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); DEBUG_BREAK();}}
+#define SIMPLE_ASSERT(exp) {if (!(exp) && 1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, NULL, #exp)) _CrtDbgBreak(); ASSERT_ANALYSIS_ASSUME(exp);}
+#define ASSERT(exp, ...) {static bool bIgnore(false); if (!bIgnore && !(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); if (!(bIgnore = !(1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, NULL, #exp)))) _CrtDbgBreak();} ASSERT_ANALYSIS_ASSUME(exp);}
+#endif
+#else
+#define SIMPLE_ASSERT(exp) {if (!(exp)) _ASSERT_BREAK(); ASSERT_ANALYSIS_ASSUME(exp);}
+#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); _ASSERT_BREAK();} ASSERT_ANALYSIS_ASSUME(exp);}
 #endif // _INC_CRTDBG
 #define TRACE(...) {TCHAR buffer[2048]; _sntprintf(buffer, 2048, __VA_ARGS__); OutputDebugString(buffer);}
-#else // _MSC_VER
+#elif defined(__CUDA_ARCH__)
+// __CUDA_ARCH__ is defined only while nvcc compiles the device side of a
+// .cu file -- never for ordinary host translation units, and never for the
+// __host__ side of a .cu file. CUDA implements
+// it natively for device code (__assertfail() + trap; the failure message
+// surfaces at the next cudaStreamSynchronize()/error check) and it already
+// compiles to nothing under NDEBUG, so this costs nothing in Release builds.
+#include <cassert>
+#define SIMPLE_ASSERT(exp) assert(exp)
+#define ASSERT(exp, ...) assert(exp)
+#define TRACE(...)
+#else // !_MSC_VER & !__CUDA_ARCH__
 #include <assert.h>
-#define SIMPLE_ASSERT(exp) {if (!(exp)) DEBUG_BREAK();}
-#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); DEBUG_BREAK();}}
+#define SIMPLE_ASSERT(exp) {if (!(exp)) _ASSERT_BREAK();}
+#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); _ASSERT_BREAK();}}
 #define TRACE(...)
 #endif // _MSC_VER
 
 #else
 
 #ifdef _RELEASE
-#define SIMPLE_ASSERT(exp)
-#define ASSERT(exp, ...)
+#define SIMPLE_ASSERT(exp) ASSERT_ANALYSIS_ASSUME(exp)
+#define ASSERT(exp, ...) ASSERT_ANALYSIS_ASSUME(exp)
 #else
 #ifdef _MSC_VER
-#define SIMPLE_ASSERT(exp) {if (!(exp)) __debugbreak();}
-#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); __debugbreak();}}
+#define SIMPLE_ASSERT(exp) {if (!(exp)) __debugbreak(); ASSERT_ANALYSIS_ASSUME(exp);}
+#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); __debugbreak();} ASSERT_ANALYSIS_ASSUME(exp);}
 #else // _MSC_VER
 #define SIMPLE_ASSERT(exp) {if (!(exp)) __builtin_trap();}
 #define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); __builtin_trap();}}

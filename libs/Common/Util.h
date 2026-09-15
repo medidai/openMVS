@@ -52,31 +52,70 @@ namespace SEACAVE {
 // S T R U C T S ///////////////////////////////////////////////////
 
 // Manage setting/removing bit flags
+// TYPE can be either an integer type or an enum type
 template <typename TYPE>
 class TFlags
 {
+private:
+	// Helper trait to get the underlying type for both enums and integer types
+	template<typename T, bool = std::is_enum<T>::value>
+	struct UnderlyingTypeHelper {
+		typedef T type;
+	};
+	template<typename T>
+	struct UnderlyingTypeHelper<T, true> {
+		typedef typename std::underlying_type<T>::type type;
+	};
+
 public:
+	typedef typename UnderlyingTypeHelper<TYPE>::type UnderlyingType;
 	typedef TYPE Type;
 
 public:
-	inline TFlags() : flags(0)							{ }
+	inline TFlags() : flags(static_cast<Type>(0))		{ }
 	inline TFlags(const TFlags& rhs) : flags(rhs.flags)	{ }
 	inline TFlags(Type f) : flags(f)					{ }
-	inline bool isSet(Type aFlag) const					{ return (flags & aFlag) == aFlag; }
-	inline bool isSet(Type aFlag, Type nF) const		{ return (flags & (aFlag|nF)) == aFlag; }
-	inline bool isSetExclusive(Type aFlag) const		{ return flags == aFlag; }
-	inline bool isAnySet(Type aFlag) const				{ return (flags & aFlag) != 0; }
-	inline bool isAnySet(Type aFlag, Type nF) const		{ const Type m(flags & (aFlag|nF)); return m != 0 && (m & nF) == 0; }
-	inline bool isAnySetExclusive(Type aFlag) const		{ return (flags & aFlag) != 0 && (flags & ~aFlag) == 0; }
-	inline void set(Type aFlag, bool bSet)				{ if (bSet) set(aFlag); else unset(aFlag); }
-	inline void set(Type aFlag)							{ flags |= aFlag; }
-	inline void unset(Type aFlag)						{ flags &= ~aFlag; }
-	inline void flip(Type aFlag)						{ flags ^= aFlag; }
-	inline void operator=(TFlags rhs)					{ flags = rhs.flags; }
-	inline operator Type() const						{ return flags; }
-	inline operator Type&()								{ return flags; }
+	// Only define this constructor when Type and UnderlyingType are different (i.e., for enums)
+	template<typename U = UnderlyingType, typename = typename std::enable_if<!std::is_same<Type, U>::value>::type>
+	inline TFlags(U f) : flags(static_cast<Type>(static_cast<UnderlyingType>(f)))	{ }
+
+	// Accept both enum and underlying type for compatibility
+	template<typename T>
+	inline bool isSet(T aFlag) const					{ return (toUnderlying(flags) & toUnderlying(aFlag)) == toUnderlying(aFlag); }
+	template<typename T1, typename T2>
+	inline bool isSet(T1 aFlag, T2 nF) const			{ return (toUnderlying(flags) & (toUnderlying(aFlag)|toUnderlying(nF))) == toUnderlying(aFlag); }
+	template<typename T>
+	inline bool isSetExclusive(T aFlag) const			{ return toUnderlying(flags) == toUnderlying(aFlag); }
+	template<typename T>
+	inline bool isAnySet(T aFlag) const					{ return (toUnderlying(flags) & toUnderlying(aFlag)) != 0; }
+	template<typename T1, typename T2>
+	inline bool isAnySet(T1 aFlag, T2 nF) const			{ const UnderlyingType m(toUnderlying(flags) & (toUnderlying(aFlag)|toUnderlying(nF))); return m != 0 && (m & toUnderlying(nF)) == 0; }
+	template<typename T>
+	inline bool isAnySetExclusive(T aFlag) const		{ return (toUnderlying(flags) & toUnderlying(aFlag)) != 0 && (toUnderlying(flags) & ~toUnderlying(aFlag)) == 0; }
+
+	template<typename T>
+	inline void set(T aFlag, bool bSet)					{ if (bSet) set(aFlag); else unset(aFlag); }
+	template<typename T>
+	inline void set(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) | toUnderlying(aFlag)); }
+	template<typename T>
+	inline void unset(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) & ~toUnderlying(aFlag)); }
+	template<typename T>
+	inline void flip(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) ^ toUnderlying(aFlag)); }
+
+	inline TFlags& operator=(TFlags rhs)				{ flags = rhs.flags; return *this; }
+	inline TFlags& operator=(Type f)					{ flags = f; return *this; }
+	inline operator UnderlyingType() const				{ return static_cast<UnderlyingType>(flags); }
+	inline operator UnderlyingType&()					{ return reinterpret_cast<UnderlyingType&>(flags); }
+
 protected:
 	Type flags;
+
+	// Helper to convert enum or integer to underlying type
+	template<typename T>
+	static inline constexpr UnderlyingType toUnderlying(T value) {
+		return static_cast<UnderlyingType>(value);
+	}
+
 	#ifdef _USE_BOOST
 	// implement BOOST serialization
 	friend class boost::serialization::access;
@@ -86,7 +125,7 @@ protected:
 	}
 	#endif
 };
-typedef class GENERAL_API TFlags<uint32_t> Flags;
+typedef TFlags<uint32_t> Flags;
 /*----------------------------------------------------------------*/
 
 
@@ -195,12 +234,17 @@ protected:
 	std::vector<size_t> Freq; // histogram
 	size_t Overflow, Underflow; // count under/over flow
 };
-typedef class GENERAL_API THistogram<float> Histogram32F;
-typedef class GENERAL_API THistogram<double> Histogram64F;
+typedef THistogram<float> Histogram32F;
+typedef THistogram<double> Histogram64F;
 /*----------------------------------------------------------------*/
 
 
-class GENERAL_API Util
+// Note: this class deliberately does NOT carry `GENERAL_API` at class level —
+// MSVC would then eagerly instantiate every member of every template type
+// referenced by any method (e.g. cList<IDX>) and trigger SFINAE-less methods
+// like `cList<T>::EmptyDelete()`. Each non-inline static method below is
+// tagged individually so they still cross the DLL boundary.
+class Util
 {
 public:
 	static String getAppName() {
@@ -351,9 +395,9 @@ public:
 		return path[off+2] == _T('\0') || path[off+2] == PATH_SEPARATOR;
 	}
 
-	static String getHomeFolder();
-	static String getApplicationFolder();
-	static String getCurrentFolder();
+	static GENERAL_API String getHomeFolder();
+	static GENERAL_API String getApplicationFolder();
+	static GENERAL_API String getCurrentFolder();
 	static String getProcessFolder() {
 		return getFilePath(getAppName());
 	}
@@ -550,6 +594,63 @@ public:
 		}
 	}
 
+	// Parse index ranges; use commas/spaces to separate IDs and '-' for ranges (e.g., 1 2 10-15)
+	// returns error message in case of failure
+	static String parseIndexRanges(LPCSTR input, size_t maxCount, CLISTDEFSCALAR(IDX)& outIndices, LPCSTR entityLabel="") {
+		outIndices.clear();
+		if (input == nullptr || *input == '\0')
+			return String::FormatString("No %sdata available.", entityLabel);
+		if (maxCount == 0)
+			return String::FormatString("No %sdata size available.", entityLabel);
+		auto skipDelimiters = [](LPCSTR& cursor) {
+			while (*cursor && (std::isspace(*cursor) || *cursor == ','))
+				++cursor;
+		};
+		auto parseNumber = [](LPCSTR& cursor, IDX& value) -> bool {
+			if (!*cursor || !std::isdigit(*cursor))
+				return false;
+			value = 0;
+			const IDX maxValue = std::numeric_limits<IDX>::max();
+			while (*cursor && std::isdigit(*cursor)) {
+				const IDX digit = static_cast<IDX>(*cursor - '0');
+				if (value > (maxValue - digit) / 10)
+					return false;
+				value = value * 10 + digit;
+				++cursor;
+			}
+			return true;
+		};
+		LPCSTR cursor = input;
+		while (true) {
+			skipDelimiters(cursor);
+			if (*cursor == '\0')
+				break;
+			// Parse start of range
+			IDX startValue;
+			if (!parseNumber(cursor, startValue))
+				return String::FormatString("Invalid %sindex specification.", entityLabel);
+			skipDelimiters(cursor);
+			IDX endValue = startValue;
+			if (*cursor == '-') {
+				skipDelimiters(++cursor);
+				if (!parseNumber(cursor, endValue))
+					return String::FormatString("Incomplete %srange specification.", entityLabel);
+			}
+			if (startValue >= maxCount)
+				return String::FormatString("%sindex %zu out of range (0-%zu).", entityLabel, size_t(startValue), maxCount - 1);
+			if (endValue >= maxCount)
+				return String::FormatString("%sindex %zu out of range (0-%zu).", entityLabel, size_t(endValue), maxCount - 1);
+			if (endValue < startValue)
+				return String::FormatString("Invalid %srange: %zu-%zu.", entityLabel, size_t(startValue), size_t(endValue));
+			for (IDX idx = startValue; idx <= endValue; ++idx)
+				outIndices.push_back(idx);
+		}
+		if (outIndices.empty())
+			return String::FormatString("No valid %sindices provided.", entityLabel);
+		return {}; // success
+	}
+
+
 	static String getShortTimeString() {
 		char buf[8];
 		time_t _tt = time(NULL);
@@ -684,11 +785,11 @@ public:
 		return (float)atof(aString);
 	}
 
-	static time_t getTime() {
+	static GENERAL_API time_t getTime() {
 		return (time_t)time(NULL);
 	}
 
-	static uint32_t getTick() {
+	static GENERAL_API uint32_t getTick() {
 		#ifdef _MSC_VER
 		return GetTickCount();
 		#else
@@ -698,18 +799,44 @@ public:
 		#endif
 	}
 
+	// Lenient text reader for a 3x4 or 4x4 transform stored as
+	// whitespace-separated numbers. On a 4x4 file the bottom row must be
+	// 0 0 0 1; only the upper 3 rows are returned. Non-numeric tokens are
+	// skipped so simple labels/comments are tolerated. Returns false if the
+	// file cannot be opened or the value count / bottom row is invalid.
+	// Takes the cv::Matx base (Matrix3x4 == TMatrix<REAL,3,4> upcasts) because
+	// the SEACAVE Matrix3x4 typedef isn't yet defined at this point in the
+	// header chain (Types.h includes Util.h before declaring TMatrix).
+	static GENERAL_API bool loadMatrix3x4(const String& fileName, cv::Matx<double,3,4>& out) {
+		std::ifstream file(fileName);
+		if (!file)
+			return false;
+		std::vector<double> v;
+		std::string token;
+		while (file >> token) {
+			try { v.push_back(std::stod(token)); }
+			catch (...) { /* tolerate non-numeric tokens (labels/comments) */ }
+		}
+		// reject invalid formats or 4x4 inputs whose bottom row isn't the affine sentinel [0 0 0 1]
+		if (v.size() != 12 && (v.size() != 16 || v[12] != 0 || v[13] != 0 || v[14] != 0 || v[15] != 1))
+			return false;
+		for (unsigned i = 0; i < 12; ++i)
+			out.val[i] = v[i];
+		return true;
+	}
 
-	static void		Init();
 
-	static String	GetCPUInfo();
-	static String	GetRAMInfo();
-	static String	GetOSInfo();
-	static String	GetDiskInfo(const String&);
+	static GENERAL_API void		Init();
+
+	static GENERAL_API String	GetCPUInfo();
+	static GENERAL_API String	GetRAMInfo();
+	static GENERAL_API String	GetOSInfo();
+	static GENERAL_API String	GetDiskInfo(const String&);
 	enum CPUFNC {NA=0, SSE, AVX};
-	static const Flags ms_CPUFNC;
+	static GENERAL_API const Flags ms_CPUFNC;
 
-	static void		LogBuild();
-	static void		LogMemoryInfo();
+	static GENERAL_API void		LogBuild();
+	static GENERAL_API void		LogMemoryInfo();
 
 	struct MemoryInfo {
 		size_t totalPhysical;
@@ -719,9 +846,9 @@ public:
 		MemoryInfo(size_t tP = 0, size_t fP = 0, size_t tV = 0, size_t fV = 0)
 			: totalPhysical(tP), freePhysical(fP), totalVirtual(tV), freeVirtual(fV) {}
 	};
-	static MemoryInfo GetMemoryInfo();
+	static GENERAL_API MemoryInfo GetMemoryInfo();
 
-	static LPSTR* CommandLineToArgvA(LPCSTR CmdLine, size_t& _argc);
+	static GENERAL_API LPSTR* CommandLineToArgvA(LPCSTR CmdLine, size_t& _argc);
 	static String CommandLineToString(size_t argc, LPCTSTR* argv) {
 		String strCmdLine;
 		for (size_t i=1; i<argc; ++i)
@@ -790,6 +917,26 @@ public:
 		}
 	};
 };
+/*----------------------------------------------------------------*/
+
+
+// counters tracking how well a cache serves its uses; synchronization stays with
+// the owning cache
+struct CacheHitStats {
+	uint32_t numMisses; // fetched from the backing store
+	uint32_t numHits; // served from the cache
+
+	inline CacheHitStats() : numMisses(0), numHits(0) {}
+	inline void Hit() { ++numHits; }
+	inline void Miss() { ++numMisses; }
+	inline void Reset() { numMisses = numHits = 0; }
+	inline uint32_t NumUses() const { return numMisses + numHits; }
+	inline unsigned HitRatePercent() const { const uint32_t numUses(NumUses()); return numUses ? (unsigned)((100.f*numHits)/numUses + 0.5f) : 0u; }
+};
+// report as "<name> cache: X% hit rate (uses, misses)"; a macro so the log line is
+// attributed to the calling module's log channel
+#define REPORT_CACHE_HIT_STATS(stats, name) \
+	do { if ((stats).NumUses()) DEBUG_EXTRA(name " cache: %u%% hit rate (%u uses, %u misses)", (stats).HitRatePercent(), (stats).NumUses(), (stats).numMisses); } while(false)
 /*----------------------------------------------------------------*/
 
 } // namespace SEACAVE

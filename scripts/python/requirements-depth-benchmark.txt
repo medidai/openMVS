@@ -1,0 +1,12 @@
+pyyaml
+numpy
+opencv-python-headless
+pandas
+pyarrow
+matplotlib
+pillow
+tyro
+rich
+plotly
+jinja2
+zstandard

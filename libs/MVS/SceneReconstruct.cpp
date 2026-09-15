@@ -56,8 +56,14 @@ using namespace MVS;
 // (faster, but not clear license policy)
 #define DELAUNAY_MAXFLOW_IBFS
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("ScnRecnt"));
 
 #ifdef DELAUNAY_MAXFLOW_IBFS
 #include "../Math/IBFS/IBFS.h"
@@ -236,6 +242,10 @@ struct vert_info_t {
 		ASSERT(pweights == NULL || _views.GetSize() == pweights->GetSize());
 		FOREACH(i, _views) {
 			const PointCloud::View viewID(_views[i]);
+			// pointWeights holds the plain [0,1] per-view confidence (see SceneDensify fusion), i.e.
+			// the expected value of the constant-weight vote of 1: dimensionless and independent of
+			// the scene's length unit, so it can feed the graph-cut constants (kb, kf, kRel, kAbs,
+			// kOutl, tuned for the uniform-weight regime) directly, with no normalization step
 			const PointCloud::Weight weight(pweights ? (*pweights)[i] : PointCloud::Weight(1));
 			// insert viewID in increasing order
 			const uint32_t idx(views.FindFirstEqlGreater(viewID));
@@ -282,9 +292,9 @@ vert_info_t::~vert_info_t() {
 }
 void vert_info_t::AllocateInfo() {
 	ASSERT(!views.IsEmpty());
-	viewsInfo = new view_info_t[views.GetSize()];
+	viewsInfo = new view_info_t[views.size()];
 	#ifndef _RELEASE
-	memset(viewsInfo, 0, sizeof(view_info_t)*views.GetSize());
+	memset(reinterpret_cast<void*>(viewsInfo), 0, sizeof(view_info_t)*views.size());
 	#endif
 }
 #endif
@@ -330,12 +340,19 @@ inline Plane getFacetPlane(const facet_t& facet)
 
 // Check if a point (p) is coplanar with a triangle (a, b, c);
 // return orientation type
-#if _PLATFORM_X86 && defined(__GNUC__)
+// Disable FP contraction (FMA) for this geometric predicate so the sign of the
+// determinant is reproducible across architectures and compilers: a fused
+// multiply-add rounds once instead of twice and can flip the sign near the
+// epsilon threshold
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC push_options
-#pragma GCC target ("no-fma")
+#pragma GCC optimize("-ffp-contract=off")
 #endif
 static inline int orientation(const point_t& a, const point_t& b, const point_t& c, const point_t& p)
 {
+	#if defined(__clang__)
+	#pragma clang fp contract(off)
+	#endif
 	#if 0
 	return CGAL::orientation(a, b, c, p);
 	#else
@@ -361,7 +378,7 @@ static inline int orientation(const point_t& a, const point_t& b, const point_t&
 	return CGAL::COPLANAR;
 	#endif
 }
-#if _PLATFORM_X86 && defined(__GNUC__)
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC pop_options
 #endif
 
@@ -1157,3 +1174,5 @@ bool Scene::ReconstructMesh(float distInsert, bool bUseFreeSpaceSupport, bool bU
 	return true;
 }
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

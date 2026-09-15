@@ -282,16 +282,20 @@ public:
 
 	/** @brief Copy constructor from 3x3 matrix
 		@attention Orthonormality of matrix is enforced automatically! */
-	inline TRMatrixBase(const Mat& mat);
+	inline explicit TRMatrixBase(const Mat& mat);
 
 	/** @brief Initialization from parametrized rotation (axis-angle) */
-	inline TRMatrixBase(const Vec& rot);
+	inline explicit TRMatrixBase(const Vec& rot);
+	/** or accept cv::Point3_<T> generically */
+	inline explicit TRMatrixBase(const cv::Point3_<TYPE>& rot) : TRMatrixBase(Vec(rot)) {}
 
 	/** @brief Initialization from rotation axis w and angle phi (in rad) using Rodrigues' formula */
-	inline TRMatrixBase(const Vec& w, const TYPE phi);
+	template <typename TYPEW = TYPE,
+	          std::enable_if_t<std::is_floating_point<TYPEW>::value, int> = 0>
+	inline TRMatrixBase(const Vec& w, const TYPEW phi);
 
 	/** @brief Initialization from quaternion */
-	inline TRMatrixBase(const Quat& q);
+	inline explicit TRMatrixBase(const Quat& q);
 
 	/** @brief Initialization with the rotation from roll/pitch/yaw (in rad) */
 	inline TRMatrixBase(TYPE roll, TYPE pitch, TYPE yaw);
@@ -411,11 +415,16 @@ public:
 	{ SetYXZ(r[0], r[1], r[2]); }
 
 	/** @brief Set from rotation axis w and angle phi (in rad)
-		@param w Axis vector w will be normalized to length 1, so we need
-				 |w|>1e-6 if phi != 0, otherwise an exception is thrown
-		@param phi Rotation angle is given in radians
+		@tparam TYPEW Working precision used for the internal Rodrigues
+				 algebra (skew-symmetric matrix, sin/cos, accumulation)
+				 to better preserve orthogonality of the resulting
+				 rotation matrix at the cost of 9 narrowing casts on store.
+		@param w Axis vector, must be unit-length (|w|=1).
+		@param phi Rotation angle is given in radians.
 		@author evers, woelk */
-	void Set(const Vec& w, TYPE phi);
+	template <typename TYPEW = TYPE,
+	          std::enable_if_t<std::is_floating_point<TYPEW>::value, int> = 0>
+	void Set(const Vec& w, TYPEW phi);
 
 	/** set this matrix from 3 vectors each representing a column*/
 	void SetFromColumnVectors(const Vec& v0,
@@ -426,10 +435,6 @@ public:
 	void SetFromRowVectors(const Vec& v0,
 						   const Vec& v1,
 						   const Vec& v2);
-
-	/** @brief Set from rotation axis * angle (modified Rodrigues vector)
-		@author evers */
-	void SetFromAxisAngle(const Vec& w);
 
 	/* @brief Set rotation matrix from an orthogonal basis given in world
 	   coordinate system (WCS)
@@ -494,6 +499,7 @@ public:
 
 	// get parametrized rotation (axis-angle) from the rotation matrix
 	inline void SetRotationAxisAngle(const Vec& rot);
+	static TRMatrixBase AxisAngleToRotation(const Vec& rot);
 
 	// modify the rotation matrix by the given parametrized delta rotation (axis-angle)
 	inline void Apply(const Vec& delta);

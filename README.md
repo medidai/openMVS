@@ -22,6 +22,22 @@ Automatic Windows x64 binary builds can be found for each commit on its Artifact
 
 See the usage [example](https://github.com/cdcseacave/openMVS/wiki/Usage) wiki page.
 
+## Experimental APD/DVP depth estimation
+
+This branch includes optional Adaptive Patch Deformation and gated global
+epipolar proposals for CUDA PatchMatch. Both are disabled by default. See the
+[experimental usage and limitations](docs/experimental/01_apd_dvp.md) before
+enabling them; this is not a production-default promotion or full-paper
+DVP-MVS reproduction.
+
+## Depth-map observability
+
+CUDA depth-map estimation and filtering can be built with optional,
+default-off observability support. See the
+[depth-map observability quickstart](docs/dmap_observability/01_quickstart.md)
+for capture profiles, report generation, interactive investigation, and the
+ephemeral test-scene demo.
+
 ## License
 
 See the [copyright](https://github.com/cdcseacave/openMVS/blob/master/COPYRIGHT.md) file.

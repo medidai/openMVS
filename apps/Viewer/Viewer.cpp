@@ -1,7 +1,7 @@
 /*
  * Viewer.cpp
  *
- * Copyright (c) 2014-2015 SEACAVE
+ * Copyright (c) 2014-2025 SEACAVE
  *
  * Author(s):
  *
@@ -30,9 +30,8 @@
  */
 
 #include "Common.h"
-#include <boost/program_options.hpp>
-
 #include "Scene.h"
+#include <boost/program_options.hpp>
 
 using namespace VIEWER;
 
@@ -48,8 +47,16 @@ namespace {
 
 namespace OPT {
 String strInputFileName;
+std::vector<std::string> strLayerFileNames;
 String strGeometryFileName;
+String strPoseQualityFileName;
 String strOutputFileName;
+String strScreenshotFileName;
+String strViewFileName;
+String strCompareMode;
+bool bAlignLayers;
+int nViewCamera;
+String strShow;
 unsigned nArchiveType;
 int nProcessPriority;
 unsigned nMaxThreads;
@@ -76,7 +83,9 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 {
 	// initialize log and console
 	OPEN_LOG();
+	#ifndef _RELEASE
 	OPEN_LOGCONSOLE();
+	#endif
 
 	// group of options allowed only on command line
 	boost::program_options::options_description generic("Generic options");
@@ -105,8 +114,16 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	boost::program_options::options_description config("Viewer options");
 	config.add_options()
 		("input-file,i", boost::program_options::value<std::string>(&OPT::strInputFileName), "input project filename containing camera poses and scene (point-cloud/mesh)")
+		("layer-file,l", boost::program_options::value<std::vector<std::string>>(&OPT::strLayerFileNames)->composing(), "additional scene or geometry file to load as a layer (repeat for multiple layers)")
 		("geometry-file,g", boost::program_options::value<std::string>(&OPT::strGeometryFileName), "mesh or point-cloud with views file name (overwrite existing geometry)")
+		("pose-quality-file", boost::program_options::value<std::string>(&OPT::strPoseQualityFileName), "per-image pose quality CSV report (CreateStructure --export-pose-quality) to display as camera uncertainty ellipsoids")
 		("output-file,o", boost::program_options::value<std::string>(&OPT::strOutputFileName), "output filename for storing the mesh")
+		("screenshot-file,S", boost::program_options::value<std::string>(&OPT::strScreenshotFileName), "render the scene off-screen to this image file and exit (scriptable; extension selects the format, .png if omitted)")
+		("compare-mode", boost::program_options::value<std::string>(&OPT::strCompareMode), "enable multi-layer comparison in swipe or split mode (requires at least two layers)")
+		("align-layers", boost::program_options::bool_switch(&OPT::bAlignLayers)->default_value(false), "align additional layers to the active layer using shared cameras")
+		("view-file", boost::program_options::value<std::string>(&OPT::strViewFileName), "transform file controlling the screenshot viewpoint (12 or 16 whitespace-separated values, row-major camera-to-world); if omitted the default fitted view is used")
+		("view-camera", boost::program_options::value(&OPT::nViewCamera)->default_value(-1), "set the screenshot viewpoint to this scene camera's pose for a natural upright framing (-1 disabled; out-of-range selects a central camera); overridden by --view-file")
+		("screenshot-show", boost::program_options::value<std::string>(&OPT::strShow), "which scene components to render in the screenshot, as a string of flags: p=point-cloud, m=mesh, t=textured, c=cameras, w=wireframe, b=bounding-box, u=UI overlay (e.g. 'p', 'm', 'mt', 'mu'); if omitted the interactive defaults are kept and the UI overlay is disabled")
 		;
 
 	boost::program_options::options_description cmdline_options;
@@ -145,43 +162,41 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	Util::LogBuild();
 	LOG(_T("Command line: ") APPNAME _T("%s"), Util::CommandLineToString(argc, argv).c_str());
 
-	// validate input
-	Util::ensureValidPath(OPT::strInputFileName);
+	// Resolve every command-line/config path once, before opening a layer can
+	// switch WORKING_FOLDER to that scene's directory.
+	const auto resolveOptionPath = [](String& path) {
+		Util::ensureValidPath(path);
+		if (!path.empty())
+			path = Util::getFullPath(MAKE_PATH_SAFE(path));
+	};
+	resolveOptionPath(OPT::strInputFileName);
+	for (std::string& layerFileName : OPT::strLayerFileNames) {
+		String path(layerFileName.c_str());
+		resolveOptionPath(path);
+		layerFileName.assign(path.c_str());
+	}
 	if (OPT::vm.count("help")) {
 		boost::program_options::options_description visible("Available options");
 		visible.add(generic).add(config);
 		GET_LOG() << _T("\n"
-			"Visualize any know point-cloud/mesh formats or MVS projects. Supply files through command line or Drag&Drop.\n"
-			"Keys:\n"
-			"\tE: export scene\n"
-			"\tR: reset scene\n"
-			"\tB: render bounds\n"
-			"\tB + Shift: togle bounds\n"
-			"\tC: render cameras\n"
-			"\tC + Shift: render camera trajectory\n"
-			"\tC + Ctrl: center scene\n"
-			"\tLeft/Right: select next camera to view the scene\n"
-			"\tS: save scene\n"
-			"\tS + Shift: rescale images and save scene\n"
-			"\tT: render mesh texture\n"
-			"\tW: render wire-frame mesh\n"
-			"\tV: render view rays to the selected point\n"
-			"\tV + Shift: render points seen by the current view\n"
-			"\tUp/Down: adjust point size\n"
-			"\tUp/Down + Shift: adjust minimum number of views accepted when displaying a point or line\n"
-			"\t+/-: adjust camera thumbnail transparency\n"
-			"\t+/- + Shift: adjust camera cones' length\n"
-			"\t+/- + Ctrl: adjust camera FOV\n"
-			"\t+/- + Alt: adjust points confidence visibility threshold\n"
-			"\n")
+			"Visualize any known point-cloud/mesh formats or MVS projects. Supply files through command line or Drag&Drop.\n"
+			"Multiple scenes can be loaded as layers (-l), aligned, and compared side by side with synchronized cameras.\n")
 			<< visible;
 	}
 	if (!OPT::strExportType.empty())
 		OPT::strExportType = OPT::strExportType.ToLower() == _T("obj") ? _T(".obj") : _T(".ply");
 
 	// initialize optional options
-	Util::ensureValidPath(OPT::strGeometryFileName);
-	Util::ensureValidPath(OPT::strOutputFileName);
+	resolveOptionPath(OPT::strGeometryFileName);
+	resolveOptionPath(OPT::strPoseQualityFileName);
+	resolveOptionPath(OPT::strOutputFileName);
+	resolveOptionPath(OPT::strScreenshotFileName);
+	resolveOptionPath(OPT::strViewFileName);
+	OPT::strCompareMode = OPT::strCompareMode.ToLower();
+	if (!OPT::strCompareMode.empty() && OPT::strCompareMode != _T("swipe") && OPT::strCompareMode != _T("split")) {
+		LOG("invalid compare mode '%s' (expected 'swipe' or 'split')", OPT::strCompareMode.c_str());
+		return false;
+	}
 
 	MVS::Initialize(APPNAME, OPT::nMaxThreads, OPT::nProcessPriority);
 	return true;
@@ -203,7 +218,7 @@ void Application::Finalize()
 int main(int argc, LPCTSTR* argv)
 {
 	#ifdef _DEBUGINFO
-	// set _crtBreakAlloc index to stop in <dbgheap.c> at allocation
+	// set _crtBreakAlloc index or use _CrtSetBreakAlloc() to stop in <dbgheap.c> at allocation
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);// | _CRTDBG_CHECK_ALWAYS_DF);
 	#endif
 
@@ -213,16 +228,75 @@ int main(int argc, LPCTSTR* argv)
 
 	// create viewer
 	Scene viewer;
-	if (!viewer.Init(cv::Size(1280, 720), APPNAME,
-			OPT::strInputFileName.empty() ? NULL : MAKE_PATH_SAFE(OPT::strInputFileName).c_str(),
-			OPT::strGeometryFileName.empty() ? NULL : MAKE_PATH_SAFE(OPT::strGeometryFileName).c_str()))
+	if (!viewer.Initialize(cv::Size(1280, 720), APPNAME,
+			OPT::strInputFileName.empty() ? OPT::strInputFileName : MAKE_PATH_SAFE(OPT::strInputFileName),
+			OPT::strGeometryFileName.empty() ? OPT::strGeometryFileName : MAKE_PATH_SAFE(OPT::strGeometryFileName)))
 		return EXIT_FAILURE;
+	if (!OPT::strLayerFileNames.empty()) {
+		// Each repeated option is an independent layer. OpenFiles() deliberately
+		// pairs a scene+geometry selection from the GUI, which is not the CLI
+		// contract advertised by --layer-file.
+		for (const std::string& fileName : OPT::strLayerFileNames) {
+			if (!viewer.AddLayer(MAKE_PATH_SAFE(fileName), String(), !viewer.IsOpen()))
+				return EXIT_FAILURE;
+		}
+	}
+	if (OPT::bAlignLayers) {
+		if (viewer.GetLayerCount() < 2 || !viewer.AlignLayersToActive()) {
+			DEBUG("error: --align-layers requires at least two layers with three or more shared non-collinear cameras");
+			return EXIT_FAILURE;
+		}
+	}
+	if (!OPT::strCompareMode.empty()) {
+		if (viewer.GetLayerCount() < 2) {
+			DEBUG("error: --compare-mode requires at least two loaded layers");
+			return EXIT_FAILURE;
+		}
+		viewer.EnableCompareMode(OPT::strCompareMode == _T("swipe") ? Window::COMPARE_SWIPE : Window::COMPARE_SPLIT);
+	}
+	if (viewer.IsOpen() && !OPT::strPoseQualityFileName.empty()) {
+		// load and display the per-image pose uncertainty
+		if (!viewer.LoadPoseUncertainty(MAKE_PATH_SAFE(OPT::strPoseQualityFileName)))
+			return EXIT_FAILURE;
+	}
 	if (viewer.IsOpen() && !OPT::strOutputFileName.empty()) {
 		// export the scene
-		viewer.Export(MAKE_PATH_SAFE(OPT::strOutputFileName), OPT::strExportType.empty()?LPCTSTR(NULL):OPT::strExportType.c_str());
+		if (!viewer.Export(MAKE_PATH_SAFE(OPT::strOutputFileName), OPT::strExportType))
+			return EXIT_FAILURE;
 	}
-	// enter viewer loop
-	viewer.Loop();
+	if (!OPT::strScreenshotFileName.empty()) {
+		// scriptable mode: optionally set the viewpoint, capture one frame off-screen, then exit
+		if (!viewer.IsOpen())
+			return EXIT_FAILURE;
+		bool includeUI = false;
+		if (!OPT::strShow.empty()) {
+			// select which render layers are visible in the screenshot
+			Window& w = viewer.GetWindow();
+			w.showPointCloud    = OPT::strShow.find('p') != std::string::npos;
+			w.showMeshTextured  = OPT::strShow.find('t') != std::string::npos;
+			// 't' is a modifier of mesh rendering: requesting textured implies mesh
+			w.showMesh          = OPT::strShow.find('m') != std::string::npos || w.showMeshTextured;
+			w.showCameras       = OPT::strShow.find('c') != std::string::npos;
+			w.showMeshWireframe = OPT::strShow.find('w') != std::string::npos;
+			w.showBounds        = OPT::strShow.find('b') != std::string::npos;
+			includeUI           = OPT::strShow.find('u') != std::string::npos;
+		}
+		if (!OPT::strViewFileName.empty()) {
+			if (!viewer.SetViewFromFile(MAKE_PATH_SAFE(OPT::strViewFileName)))
+				return EXIT_FAILURE;
+		} else if (OPT::nViewCamera >= 0 && !viewer.SetViewFromCamera((unsigned)OPT::nViewCamera)) {
+			return EXIT_FAILURE;
+		}
+		viewer.GetWindow().RequestScreenshot(MAKE_PATH_SAFE(OPT::strScreenshotFileName), includeUI, true);
+	}
+	// enter viewer loop (returns immediately after the screenshot in scriptable mode)
+	viewer.Run();
 	return EXIT_SUCCESS;
 }
+#ifdef _WIN32
+// bridge WinMain -> main()
+int APIENTRY WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+	return main(__argc, const_cast<LPCTSTR*>(__argv));
+}
+#endif
 /*----------------------------------------------------------------*/

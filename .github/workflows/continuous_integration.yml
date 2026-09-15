@@ -1,16 +1,28 @@
 name: Continuous Integration
 run-name: ${{ github.actor }} is building OpenMVS
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [master, develop]
   pull_request:
     branches: [master, develop]
+  schedule:
+    - cron: '23 23 * * 5'
   # Allows to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 env:
+  BUILD_DIR: make
   CTEST_OUTPUT_ON_FAILURE: 1
+  VCPKG_FEATURE_FLAGS: manifests,binarycaching,registries
+  VCPKG_COMMIT: '9e593bb18ea69cc5095e012465dcd675a822ed0d'
 
 defaults:
   run:
@@ -19,69 +31,289 @@ defaults:
 jobs:
   build-tests:
     name: Build on ${{ matrix.os }}
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
+    # packages:write is needed to push vcpkg binary cache to GitHub Packages NuGet
+    # feed (see VCPKG_BINARY_SOURCES configuration). contents:read is the default.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest,  macOS-latest, windows-latest]
         include:
           - os: windows-latest
             triplet: x64-windows-release
             build-type: Release
+            cmake-extra-args: -A x64 -DOpenMVS_MSVC_FAST_RELEASE=ON
+            artifact-name: OpenMVS_Windows_Release_x64
           - os: ubuntu-latest
             triplet: x64-linux-release
             build-type: Release
+            cmake-extra-args: -G Ninja
+            artifact-name: OpenMVS_Ubuntu_Release_x64
           - os: macos-latest
             triplet: arm64-osx
             build-type: Release
+            cmake-extra-args: -G Ninja
+            artifact-name: OpenMVS_macOS_Release_arm64
+    env:
+      VCPKG_DEFAULT_TRIPLET: ${{ matrix.triplet }}
+      BUILD_CONFIG: ${{ matrix.build-type }}
+      CMAKE_EXTRA_ARGS: ${{ matrix.cmake-extra-args }}
+
     steps:
-      - name: Checkout
+      - &checkout-step
+        name: Checkout
         uses: actions/checkout@v4
 
-      - name: Restore artifacts, or setup vcpkg for building artifacts
+      - &setup-vcpkg-step
+        name: Setup vcpkg and cache artifacts
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgDirectory: '${{ github.workspace }}/vcpkg'
-          vcpkgGitCommitId: 'ef7dbf94b9198bc58f45951adcf1f041fcbc5ea0'
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+
+      # The windows runner's Visual Studio ships LLVM flang, which vcpkg's lapack-reference
+      # port auto-detects and uses to compile reference LAPACK. That flang (currently 22.1.x)
+      # fails on LAPACK 3.12.1's ?gedmd (DMD) routines ("'w' is not an object that can appear
+      # in an expression"), breaking the whole vcpkg install. On dev machines without flang,
+      # vcpkg_find_fortran instead falls back to its bundled MinGW gfortran (with GNUtoMS), which
+      # builds LAPACK cleanly — so reproduce that here by hiding flang so CMake finds no Fortran
+      # compiler and vcpkg uses gfortran. flang is only ever used for this Fortran detection;
+      # the C/C++ build uses cl.exe and is unaffected.
+      - &hide-vs-flang-step
+        name: Use vcpkg's bundled gfortran for LAPACK (disable VS LLVM flang)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "flang*.exe" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              Write-Host "Disabling $($_.FullName)"
+              Rename-Item -LiteralPath $_.FullName -NewName "$($_.Name).disabled" -Force
+            }
+
+      - name: Install mono (required for nuget.exe on Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # Refresh the apt index first — fresh GH-hosted Ubuntu runners can ship
+          # with stale indices, in which case `apt-get install` fails to resolve
+          # mono-complete. The full Ubuntu dependency install step later does its
+          # own update; this duplicate update is cheap (cached) and keeps the two
+          # steps independent.
+          sudo apt-get update -y
+          sudo apt-get install -y mono-complete
+
+      # Use a NuGet feed hosted on GitHub Packages as vcpkg's binary cache. Each port
+      # is uploaded as its own NuGet package AS SOON AS IT FINISHES building — so even
+      # if the job hits the 6-hour Windows CI timeout mid-build, all completed ports
+      # are durably cached and the next trigger continues from there. This replaces
+      # the previous `x-gha` backend, which Microsoft removed from vcpkg in April 2025
+      # (vcpkg-tool PR #1662) without a drop-in replacement; NuGet on GH Packages is
+      # the migration path with equivalent per-port granularity.
+      # macOS arm64 is excluded: mono on Apple Silicon is unreliable (brew formula
+      # has been failing intermittently), and macOS builds are short enough that a
+      # source rebuild is acceptable. Windows is the real pain point this targets.
+      # On macOS we use the previous full-folder cache (files backend + actions/cache),
+      # since mono on Apple Silicon is unreliable so the NuGet path doesn't apply there.
+      # The macOS build is short enough that a single tarball at job end is acceptable.
+      - name: Cache vcpkg binary packages (macOS only)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg-cache
+          key: vcpkg-${{ env.VCPKG_DEFAULT_TRIPLET }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ env.VCPKG_DEFAULT_TRIPLET }}-${{ env.VCPKG_COMMIT }}-
+
+      - &setup-nuget-cache-step
+        name: Configure vcpkg binary cache
+        env:
+          # GITHUB_TOKEN has packages:write on the workflow's own repository for
+          # in-repo events. On pull requests from forks the token is read-only:
+          # we still let vcpkg READ the cache (so forks benefit from already-built
+          # ports) but skip the write/setapikey path so the run doesn't fail
+          # trying to push.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUGET_FEED: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # lukka/run-vcpkg@v11 defaults VCPKG_BINARY_SOURCES to "clear;x-gha,readwrite"
+            # which references a backend Microsoft removed in April 2025. On macOS we
+            # fall back to the simple `files` backend pointing at a workspace folder,
+            # which actions/cache@v4 (set up just above) tarballs and persists between
+            # runs — same approach we used before x-gha.
+            mkdir -p "${GITHUB_WORKSPACE}/vcpkg-cache"
+            echo "VCPKG_BINARY_SOURCES=clear;files,${GITHUB_WORKSPACE}/vcpkg-cache,readwrite" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # Decide read vs readwrite mode for vcpkg's nuget backend.
+          if [ "$IS_FORK_PR" = "true" ]; then
+            NUGET_MODE=read
+            echo "Fork PR detected: vcpkg NuGet cache will be READ-ONLY (token cannot push to GitHub Packages)."
+          else
+            NUGET_MODE=readwrite
+          fi
+          # Locate the nuget binary that vcpkg ships (Windows: nuget.exe, Linux: via mono)
+          NUGET="$($VCPKG_ROOT/vcpkg fetch nuget | tail -n 1)"
+          # Register the GitHub Packages NuGet feed as a vcpkg binary source.
+          # `sources add` configures auth for both read and (if writable) write —
+          # the GH Packages NuGet endpoint requires auth even to read.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            "$NUGET" sources add -Source "$NUGET_FEED" -StorePasswordInClearText -Name GitHubPackages \
+              -UserName "${{ github.repository_owner }}" -Password "$GH_TOKEN"
+            if [ "$NUGET_MODE" = "readwrite" ]; then
+              "$NUGET" setapikey "$GH_TOKEN" -Source "$NUGET_FEED"
+            fi
+          else
+            mono "$NUGET" sources add -Source "$NUGET_FEED" -StorePasswordInClearText -Name GitHubPackages \
+              -UserName "${{ github.repository_owner }}" -Password "$GH_TOKEN"
+            if [ "$NUGET_MODE" = "readwrite" ]; then
+              mono "$NUGET" setapikey "$GH_TOKEN" -Source "$NUGET_FEED"
+            fi
+          fi
+          # Tell vcpkg to use this feed. Each port becomes its own NuGet package
+          # keyed by its computed ABI hash; partial vcpkg.json changes invalidate
+          # only the affected ports. Mode is read-only on fork PRs, readwrite on
+          # in-repo events (push, dispatch, internal PRs).
+          echo "VCPKG_BINARY_SOURCES=clear;nuget,$NUGET_FEED,$NUGET_MODE" >> "$GITHUB_ENV"
 
       - name: Install Ubuntu dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y autoconf-archive libxmu-dev libdbus-1-dev libxtst-dev libxi-dev libxinerama-dev libxcursor-dev xorg-dev libgl-dev libglu1-mesa-dev autoconf automake bison libtool libltdl-dev pkg-config ninja-build
+          # libav*-dev / libsw*-dev: consumed by the local ports/opencv4
+          # overlay so OpenCV's videoio links against apt-provided ffmpeg
+          sudo apt-get install -y autoconf-archive libxmu-dev libdbus-1-dev libxtst-dev libxi-dev libxinerama-dev libxcursor-dev xorg-dev libgl-dev libglu1-mesa-dev autoconf automake bison libtool libltdl-dev pkg-config nasm ninja-build libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev
 
       - name: Install macOS dependencies
-        if: matrix.os == 'macOS-latest'
+        if: matrix.os == 'macos-latest'
         run: |
           brew install automake autoconf autoconf-archive libtool ninja
 
-      - name: Configure CMake for Windows
-        if: matrix.os == 'windows-latest'
+      - &configure-step
+        name: Configure CMake
         run: |
-          cmake -S . -B make -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DOpenMVS_USE_CUDA=OFF
+          cmake -S . -B ${{ env.BUILD_DIR }} -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIG }} -DVCPKG_ROOT=${{ env.VCPKG_ROOT }} -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_DEFAULT_TRIPLET }} -DOpenMVS_USE_CUDA=OFF -DOpenMVS_HEADLESS_DEBUG=ON ${{ env.CMAKE_EXTRA_ARGS }}
 
-      - name: Configure CMake for Ubuntu and macOS
-        if: matrix.os != 'windows-latest'
-        run: |
-          cmake -S . -B make -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DOpenMVS_USE_CUDA=OFF -G Ninja
-
-      - name: Build
-        working-directory: ./make
+      - &build-step
+        name: Build
+        working-directory: ./${{ env.BUILD_DIR }}
         run: |
           rm -rf ../vcpkg/buildtrees
           rm -rf ../vcpkg/downloads
-          cmake --build . --config ${{ matrix.build-type }} --parallel $(nproc)
+          # With BUILD_SHARED_LIBS=ON (default), CMakeLists.txt force-disables IPO and
+          # apps link only against import libs (.lib stubs) instead of pulling in the full
+          # transitive .obj graph. On static MSVC links + /GL+/LTCG build, split into a
+          # libs-then-apps phase with --parallel 1 for apps as it peaks at ~40 GB per link.
+          cmake --build . --parallel 4 --config ${{ env.BUILD_CONFIG }}
 
       - name: Unit Tests
-        working-directory: ./make
+        working-directory: ./${{ env.BUILD_DIR }}
         run: |
-          ctest -j$(nproc) --build-config ${{ matrix.build-type }}
+          ctest --parallel 2 --build-config ${{ env.BUILD_CONFIG }}
 
-      - name: Deploy Windows release
-        if: matrix.os == 'windows-latest'
+      - name: Deploy release
         uses: actions/upload-artifact@v4
         with:
-          name: OpenMVS_Windows_Release_x64
+          name: ${{ matrix.artifact-name }}
           path: |
-            ${{ github.workspace }}/make/bin/**/x64
-            !${{ github.workspace }}/make/bin/**/*.exp
+            ${{ github.workspace }}/${{ env.BUILD_DIR }}/bin/**
+            !${{ github.workspace }}/${{ env.BUILD_DIR }}/bin/**/*.exp
+
+  msvc-code-analysis:
+    name: MSVC Code Analysis
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      packages: write
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+      BUILD_CONFIG: Debug
+      CMAKE_EXTRA_ARGS: -A x64
+
+    steps:
+      - *checkout-step
+      - *setup-vcpkg-step
+      - *hide-vs-flang-step
+      - *setup-nuget-cache-step
+      - *configure-step
+      - *build-step
+
+      - name: Initialize MSVC Code Analysis
+        uses: microsoft/msvc-code-analysis-action@96315324a485db21449515180214ecb78c16a1c5
+        id: run-analysis
+        with:
+          cmakeBuildDirectory: ${{ env.BUILD_DIR }}
+          buildConfiguration: ${{ env.BUILD_CONFIG }}
+          ruleset: NativeRecommendedRules.ruleset
+
+      # MSVC's /analyze emits one SARIF "run" per translation unit, all packed into a
+      # single results.sarif. GitHub Code Scanning enforces two relevant limits:
+      #   1. A SARIF file may contain at most 20 runs (this job sees ~115).
+      #   2. Effective 2025-07-21, upload-sarif rejects a SARIF file with multiple runs
+      #      sharing the same category (https://github.blog/changelog/2025-07-21-...).
+      # Splitting into per-run files doesn't help: github/codeql-action/upload-sarif
+      # re-combines every file in the directory via the CodeQL CLI before upload, so
+      # the merged result still trips limit (1). Consolidate everything into a single
+      # run by unioning the rules and remapping each result's ruleIndex so the merged
+      # run references its rules correctly. Both limits are then trivially satisfied.
+      - name: Merge SARIF runs into a single run
+        id: merge-sarif
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, pathlib
+          src = pathlib.Path(r"${{ steps.run-analysis.outputs.sarif }}")
+          data = json.loads(src.read_text(encoding="utf-8"))
+          runs = data.get("runs", [])
+          if not runs:
+              print("No runs to merge; uploading source unchanged.")
+              merged_path = src
+          else:
+              # Union rules across runs by ruleId; remap each result's ruleIndex.
+              global_rules = []
+              rule_id_to_index = {}
+              merged_results = []
+              base = runs[0]
+              for run in runs:
+                  driver = run.get("tool", {}).get("driver", {})
+                  local_rules = driver.get("rules", []) or []
+                  local_to_global = {}
+                  for li, rule in enumerate(local_rules):
+                      rid = rule.get("id")
+                      if rid is None:
+                          gi = len(global_rules)
+                          global_rules.append(rule)
+                      elif rid in rule_id_to_index:
+                          gi = rule_id_to_index[rid]
+                      else:
+                          gi = len(global_rules)
+                          rule_id_to_index[rid] = gi
+                          global_rules.append(rule)
+                      local_to_global[li] = gi
+                  for res in run.get("results", []) or []:
+                      if "ruleIndex" in res and res["ruleIndex"] in local_to_global:
+                          res["ruleIndex"] = local_to_global[res["ruleIndex"]]
+                      merged_results.append(res)
+              merged_run = {k: v for k, v in base.items() if k not in ("results",)}
+              merged_run.setdefault("tool", {}).setdefault("driver", {})["rules"] = global_rules
+              merged_run["results"] = merged_results
+              merged_run.setdefault("automationDetails", {})["id"] = "msvc-analysis/"
+              data["runs"] = [merged_run]
+              merged_path = src.parent / "results-merged.sarif"
+              merged_path.write_text(json.dumps(data), encoding="utf-8")
+              print(f"Merged {len(runs)} runs / {len(merged_results)} results / "
+                    f"{len(global_rules)} unique rules into {merged_path}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write(f"SARIF_FILE={merged_path.as_posix()}\n")
+          PY
+
+      - name: Upload SARIF to GitHub
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ env.SARIF_FILE }}
+          category: msvc-analysis

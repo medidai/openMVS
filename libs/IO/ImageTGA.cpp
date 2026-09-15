@@ -58,7 +58,7 @@ CImageTGA::~CImageTGA()
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageTGA::ReadHeader()
+bool CImageTGA::ReadHeader()
 {
 	// read header
 	((ISTREAM*)m_pStream)->setPos(0);
@@ -66,7 +66,7 @@ HRESULT CImageTGA::ReadHeader()
 	m_pStream->read(&tgaInfo, sizeof(TGAINFOHEADER));
 	if (tgaInfo.byCMType != 0) {	// paletted images not supported
 		LOG(LT_IMAGE, "error: invalid TGA image");
-		return _INVALIDFILE;
+		return false;
 	}
 
 	m_dataWidth = m_width = tgaInfo.shWidth;
@@ -90,7 +90,7 @@ HRESULT CImageTGA::ReadHeader()
 	default:
 		ASSERT(0);
 		LOG(LT_IMAGE, "error: unsupported TGA image");
-		return _INVALIDFILE;
+		return false;
 	}
 
 	m_lineWidth = m_width * m_stride;
@@ -101,12 +101,12 @@ HRESULT CImageTGA::ReadHeader()
 		m_pStream->read(buffer, tgaInfo.byIDLength);
 	}
 
-	return _OK;
+	return true;
 } // ReadHeader
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageTGA::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageTGA::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
 	// read data
 	if (dataFormat == m_format && nStride == m_stride) {
@@ -114,32 +114,32 @@ HRESULT CImageTGA::ReadData(void* pData, PIXELFORMAT dataFormat, Size nStride, S
 		(BYTE*&)pData += (m_height-1)*lineWidth;
 		for (Size j=0; j<m_height; ++j, (uint8_t*&)pData-=lineWidth)
 			if (m_lineWidth != m_pStream->read(pData, m_lineWidth))
-				return _INVALIDFILE;
+				return false;
 	} else {
 		// read image to a buffer and convert it
 		CAutoPtrArr<uint8_t> const buffer(new uint8_t[m_lineWidth]);
 		for (Size j=0; j<m_height; ++j) {
 			if (m_lineWidth != m_pStream->read(buffer, m_lineWidth))
-				return _INVALIDFILE;
+				return false;
 			if (!FilterFormat((BYTE*)pData+(m_height-j-1)*lineWidth, dataFormat, nStride, buffer, m_format, m_stride, m_width))
-				return _FAIL;
+				return false;
 		}
 	}
-	return _OK;
+	return true;
 } // ReadData
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageTGA::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
+bool CImageTGA::WriteHeader(PIXELFORMAT imageFormat, Size width, Size height, BYTE numLevels)
 {
-	return _FAIL;
+	return false;
 } // WriteHeader
 /*----------------------------------------------------------------*/
 
 
-HRESULT CImageTGA::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
+bool CImageTGA::WriteData(void* pData, PIXELFORMAT dataFormat, Size nStride, Size lineWidth)
 {
-	return _FAIL;
+	return false;
 } // WriteData
 /*----------------------------------------------------------------*/
 
