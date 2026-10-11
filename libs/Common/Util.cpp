@@ -19,6 +19,8 @@
 #include <sys/sysctl.h>
 #else
 #include <sys/sysinfo.h>
+#include <cstdio>
+#include <limits>
 #endif
 #include <pwd.h>
 #endif
@@ -137,11 +139,6 @@ String Util::GetCPUInfo()
 	return cpu;
 }
 
-String Util::GetRAMInfo()
-{
-	const MemoryInfo memInfo(GetMemoryInfo());
-	return formatBytes(memInfo.totalPhysical) + _T(" Physical Memory ") + formatBytes(memInfo.totalVirtual) + _T(" Virtual Memory");
-}
 
 String Util::GetOSInfo()
 {
@@ -597,6 +594,70 @@ void Util::LogMemoryInfo()
 
 
 
+// Linux sysinfo reports host memory even when the process runs in a container.
+// Prefer the active cgroup limit so memory-sensitive caches stay within the
+// container boundary.
+#if !defined(_MSC_VER) && !defined(__APPLE__)
+namespace {
+bool ReadMemoryValue(const char* path, size_t& value)
+{
+	std::FILE* file(std::fopen(path, "r"));
+
+	if (file == nullptr) {
+		return false;
+	}
+
+	unsigned long long rawValue;
+	const bool parsed(std::fscanf(file, "%llu", &rawValue) == 1);
+	std::fclose(file);
+
+	if (!parsed || rawValue > std::numeric_limits<size_t>::max()) {
+		return false;
+	}
+
+	value = static_cast<size_t>(rawValue);
+	return true;
+}
+
+bool GetCgroupMemory(size_t& limit, size_t& usage)
+{
+	static constexpr const char* paths[][2] = {
+		{"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"},
+		{"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+		 "/sys/fs/cgroup/memory/memory.usage_in_bytes"},
+	};
+	for (const auto& path : paths)
+		if (ReadMemoryValue(path[0], limit) && ReadMemoryValue(path[1], usage))
+			return true;
+	return false;
+}
+} // namespace
+#endif
+
+String Util::GetRAMInfo()
+{
+	const MemoryInfo memInfo(GetMemoryInfo());
+
+	#if !defined(_MSC_VER) && !defined(__APPLE__)
+	struct sysinfo info;
+
+	if (sysinfo(&info) == 0) {
+		const size_t hostTotal((size_t)info.totalram * (size_t)info.mem_unit);
+		size_t limit, usage;
+		const String containerLimit(GetCgroupMemory(limit, usage) && limit > 0
+			? (limit < hostTotal ? String::FormatString("%.1f GiB", double(limit) / (1024.0 * 1024.0 * 1024.0)) : String("not restrictive"))
+			: String("unlimited or unavailable"));
+
+		return String::FormatString("host total=%.1f GiB, container limit=%s, effective total=%.1f GiB, available now=%.1f GiB",
+			double(hostTotal) / (1024.0 * 1024.0 * 1024.0), containerLimit.c_str(),
+			double(memInfo.totalPhysical) / (1024.0 * 1024.0 * 1024.0),
+			double(memInfo.freePhysical) / (1024.0 * 1024.0 * 1024.0));
+	}
+	#endif
+
+	return formatBytes(memInfo.totalPhysical) + _T(" Physical Memory ") + formatBytes(memInfo.totalVirtual) + _T(" Virtual Memory");
+}
+
 // get the total & free physical & virtual memory (in bytes)
 Util::MemoryInfo Util::GetMemoryInfo()
 {
@@ -640,9 +701,18 @@ Util::MemoryInfo Util::GetMemoryInfo()
 		ASSERT(false);
 		return MemoryInfo();
 	}
+	size_t totalPhysical((size_t)info.totalram*(size_t)info.mem_unit);
+	size_t freePhysical((size_t)info.freeram*(size_t)info.mem_unit);
+	size_t cgroupLimit;
+	size_t cgroupUsage;
+	if (GetCgroupMemory(cgroupLimit, cgroupUsage) &&
+		cgroupLimit > 0 && cgroupLimit < totalPhysical) {
+		totalPhysical = cgroupLimit;
+		freePhysical = cgroupUsage < cgroupLimit ? cgroupLimit - cgroupUsage : 0;
+	}
 	return MemoryInfo(
-		(size_t)info.totalram*(size_t)info.mem_unit,
-		(size_t)info.freeram*(size_t)info.mem_unit,
+		totalPhysical,
+		freePhysical,
 		(size_t)info.totalswap*(size_t)info.mem_unit,
 		(size_t)info.freeswap*(size_t)info.mem_unit
 	);
