@@ -75,6 +75,7 @@ int nArchiveType;
 int nProcessPriority;
 unsigned nMaxThreads;
 String strConfigFileName;
+bool bSaveDmapsFloat16;
 boost::program_options::variables_map vm;
 } // namespace OPT
 
@@ -171,6 +172,7 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 		("estimate-roi", boost::program_options::value(&OPT::nEstimateROI)->default_value(2), "estimate and set region-of-interest (0 - disabled, 1 - enabled, 2 - adaptive)")
 		("crop-to-roi", boost::program_options::value(&OPT::bCrop2ROI)->default_value(true), "crop scene using the region-of-interest")
 		("remove-dmaps", boost::program_options::value(&bRemoveDmaps)->default_value(false), "remove depth-maps after fusion")
+		("save-dmaps-float16", boost::program_options::value(&OPT::bSaveDmapsFloat16)->default_value(false), "save depth-maps in 16-bit float format instead of 32-bit float for reduced file size")
 		("tower-mode", boost::program_options::value(&OPT::nTowerMode)->default_value(4), "add a cylinder of points in the center of ROI; scene assume to be Z-up oriented (0 - disabled, 1 - replace, 2 - append, 3 - select neighbors, 4 - select neighbors & append, <0 - force tower mode)")
 		("normalize-coordinates", boost::program_options::value(&OPT::nNormalizeCoordinates)->default_value(0), "normalize scene coordinates and output the inverse transform to file (0 - disabled, 1 - center, 2 - center & scale)")
 		;
@@ -260,9 +262,10 @@ bool Application::Initialize(size_t argc, LPCTSTR* argv)
 	OPTDENSE::nEstimateColors = nEstimateColors;
 	OPTDENSE::nEstimateNormals = nEstimateNormals;
 	OPTDENSE::nFuseFilter = nFuseFilter;
-	OPTDENSE::nOptimize = nOptimize;
-	OPTDENSE::nIgnoreMaskLabel = nIgnoreMaskLabel;
-	OPTDENSE::bRemoveDmaps = bRemoveDmaps;
+			OPTDENSE::nOptimize = nOptimize;
+		OPTDENSE::nIgnoreMaskLabel = nIgnoreMaskLabel;
+		OPTDENSE::bRemoveDmaps = bRemoveDmaps;
+		OPTDENSE::bSaveDmapsFloat16 = OPT::bSaveDmapsFloat16;
 	if (!bValidConfig && !OPT::strDenseConfigFileName.empty())
 		OPTDENSE::oConfig.Save(OPT::strDenseConfigFileName);
 
