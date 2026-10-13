@@ -1385,10 +1385,12 @@ void DepthMapsData::FuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, b
 		depthDataLoadFlags |= HeaderDepthDataRaw::HAS_NORMAL;
 	}
 	Util::Progress progress(_T("Fused depth-maps"), arrDepthData.size());
-	GET_LOGCONSOLE().Pause();
 	BoolArr fusedDMaps(arrDepthData.size());
 	fusedDMaps.Memset(0);
-	DMapCache cacheDMaps(arrDepthData, depthDataLoadFlags, GetAvailableMemory(arrDepthData, fusedDMaps, numDMapsReserveFusion));
+	const size_t cacheBudget(GetAvailableMemory(arrDepthData, fusedDMaps, numDMapsReserveFusion));
+	LOG("Depth-map cache initial budget: %.2f GiB%s", double(cacheBudget) / (1024.0 * 1024.0 * 1024.0), cacheBudget == 0 ? " (unlimited)" : "");
+	GET_LOGCONSOLE().Pause();
+	DMapCache cacheDMaps(arrDepthData, depthDataLoadFlags, cacheBudget);
 	unsigned totalNumImageNeighborsInCache = 0, totalNumImagesInCache = 0;
 	IIndex numDMapsFused = 0;
 	for (; numDMapsFused < arrDepthData.size(); ++numDMapsFused) {
@@ -1624,10 +1626,12 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 		depthDataLoadFlags |= HeaderDepthDataRaw::HAS_NORMAL;
 	}
 	Util::Progress progress(_T("Dense fused depth-maps"), arrDepthData.size());
-	GET_LOGCONSOLE().Pause();
 	BoolArr fusedDMaps(arrDepthData.size());
 	fusedDMaps.Memset(0);
-	DMapCache cacheDMaps(arrDepthData, depthDataLoadFlags, GetAvailableMemory(arrDepthData, fusedDMaps, numDMapsReserveFusion));
+	const size_t cacheBudget(GetAvailableMemory(arrDepthData, fusedDMaps, numDMapsReserveFusion));
+	LOG("Depth-map cache initial budget: %.2f GiB%s", double(cacheBudget) / (1024.0 * 1024.0 * 1024.0), cacheBudget == 0 ? " (unlimited)" : "");
+	GET_LOGCONSOLE().Pause();
+	DMapCache cacheDMaps(arrDepthData, depthDataLoadFlags, cacheBudget);
 	unsigned totalNumImageNeighborsInCache = 0, totalNumImagesInCache = 0;
 	BoolArr neighbors(arrDepthData.size());
 	PointCloud::Point refPoint;
